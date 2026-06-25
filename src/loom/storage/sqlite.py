@@ -258,6 +258,207 @@ class LoomStorage:
             "avg_latency_ms": metric_rows["avg_latency"] if metric_rows else 0.0,
         }
 
+    def get_metrics_timeseries(
+        self, hours: int = 24, bucket_seconds: int = 3600
+    ) -> dict:
+        """Return time-bucketed metrics plus by-model/source/task_type rollups.
+
+        Buckets are aligned to ``bucket_seconds`` boundaries (epoch-relative) so
+        that the same wall-clock window always lands in the same bucket.
+        """
+        bucket_seconds = max(int(bucket_seconds), 1)
+        since = time.time() - hours * 3600
+
+        bucket_rows = self.conn.execute(
+            """
+            SELECT
+                CAST(timestamp / ? AS INTEGER) * ? AS bucket,
+                COUNT(*) AS requests,
+                COALESCE(SUM(tokens_in), 0) AS tokens_in,
+                COALESCE(SUM(tokens_out), 0) AS tokens_out,
+                COALESCE(SUM(cost_estimate), 0.0) AS cost,
+                COALESCE(AVG(latency_ms), 0.0) AS avg_latency_ms
+            FROM metrics
+            WHERE timestamp >= ?
+            GROUP BY bucket
+            ORDER BY bucket ASC
+            """,
+            (bucket_seconds, bucket_seconds, since),
+        ).fetchall()
+        buckets = [
+            {
+                "ts": int(r["bucket"]),
+                "requests": r["requests"],
+                "tokens_in": r["tokens_in"],
+                "tokens_out": r["tokens_out"],
+                "cost": round(r["cost"], 6),
+                "avg_latency_ms": round(r["avg_latency_ms"], 2),
+            }
+            for r in bucket_rows
+        ]
+
+        model_rows = self.conn.execute(
+            """
+            SELECT model,
+                   COUNT(*) AS requests,
+                   COALESCE(SUM(tokens_in), 0) AS tokens_in,
+                   COALESCE(SUM(tokens_out), 0) AS tokens_out,
+                   COALESCE(SUM(cost_estimate), 0.0) AS cost
+            FROM metrics
+            WHERE timestamp >= ?
+            GROUP BY model
+            ORDER BY requests DESC
+            """,
+            (since,),
+        ).fetchall()
+        by_model = {
+            (r["model"] or "unknown"): {
+                "requests": r["requests"],
+                "tokens_in": r["tokens_in"],
+                "tokens_out": r["tokens_out"],
+                "cost": round(r["cost"], 6),
+            }
+            for r in model_rows
+        }
+
+        source_rows = self.conn.execute(
+            """
+            SELECT COALESCE(source, 'default') AS source,
+                   COUNT(*) AS requests,
+                   COALESCE(SUM(cost_estimate), 0.0) AS cost
+            FROM metrics
+            WHERE timestamp >= ?
+            GROUP BY source
+            ORDER BY requests DESC
+            """,
+            (since,),
+        ).fetchall()
+        by_source = {
+            r["source"]: {"requests": r["requests"], "cost": round(r["cost"], 6)}
+            for r in source_rows
+        }
+
+        task_rows = self.conn.execute(
+            """
+            SELECT COALESCE(task_type, 'general') AS task_type, COUNT(*) AS n
+            FROM metrics
+            WHERE timestamp >= ?
+            GROUP BY task_type
+            ORDER BY n DESC
+            """,
+            (since,),
+        ).fetchall()
+        by_task_type = {r["task_type"]: r["n"] for r in task_rows}
+
+        return {
+            "hours": hours,
+            "bucket_seconds": bucket_seconds,
+            "buckets": buckets,
+            "by_model": by_model,
+            "by_source": by_source,
+            "by_task_type": by_task_type,
+        }
+
+    def get_audit_entries(
+        self,
+        limit: int = 50,
+        offset: int = 0,
+        model: Optional[str] = None,
+        source: Optional[str] = None,
+        status: Optional[str] = None,
+        search: Optional[str] = None,
+    ) -> dict:
+        """Return paginated request log joining metrics + routing_decisions.
+
+        Only successful requests are persisted to ``metrics`` (errors are logged
+        to the audit file, not the DB), so every entry reports ``status:success``.
+        A ``status="error"`` filter therefore yields no rows.
+        """
+        limit = max(1, min(int(limit), 500))
+        offset = max(0, int(offset))
+
+        where: list[str] = []
+        params: list[Any] = []
+        if model:
+            where.append("m.model = ?")
+            params.append(model)
+        if source:
+            where.append("COALESCE(m.source, 'default') = ?")
+            params.append(source)
+        if status and status.lower() != "success":
+            # DB only holds successful requests; any non-success filter is empty.
+            where.append("1 = 0")
+        if search:
+            like = f"%{search}%"
+            where.append(
+                "(m.request_id LIKE ? OR m.model LIKE ? OR m.requested_model LIKE ? "
+                "OR r.routing_reason LIKE ? OR m.task_type LIKE ?)"
+            )
+            params.extend([like, like, like, like, like])
+
+        clause = (" WHERE " + " AND ".join(where)) if where else ""
+
+        total = self.conn.execute(
+            f"""
+            SELECT COUNT(*) AS n
+            FROM metrics m
+            LEFT JOIN routing_decisions r ON m.request_id = r.request_id
+            {clause}
+            """,
+            params,
+        ).fetchone()["n"]
+
+        rows = self.conn.execute(
+            f"""
+            SELECT
+                m.timestamp        AS timestamp,
+                m.request_id       AS request_id,
+                COALESCE(m.source, 'default') AS source,
+                m.requested_model  AS requested_model,
+                m.model            AS model_used,
+                m.provider         AS provider,
+                m.task_type        AS task_type,
+                m.tokens_in        AS tokens_in,
+                m.tokens_out       AS tokens_out,
+                m.latency_ms       AS latency_ms,
+                m.cost_estimate    AS cost_estimate,
+                m.compressed       AS compressed,
+                m.compression_ratio AS compression_ratio,
+                r.routing_reason   AS routing_reason
+            FROM metrics m
+            LEFT JOIN routing_decisions r ON m.request_id = r.request_id
+            {clause}
+            ORDER BY m.timestamp DESC
+            LIMIT ? OFFSET ?
+            """,
+            params + [limit, offset],
+        ).fetchall()
+
+        entries = [
+            {
+                "timestamp": r["timestamp"],
+                "request_id": r["request_id"],
+                "source": r["source"],
+                "requested_model": r["requested_model"] or "auto",
+                "model_used": r["model_used"],
+                "provider": r["provider"],
+                "task_type": r["task_type"] or "general",
+                "tokens_in": r["tokens_in"] or 0,
+                "tokens_out": r["tokens_out"] or 0,
+                "latency_ms": r["latency_ms"] or 0.0,
+                "cost_estimate": r["cost_estimate"] or 0.0,
+                "routing_reason": r["routing_reason"] or "",
+                "compressed": bool(r["compressed"]),
+                "compression_ratio": r["compression_ratio"]
+                if r["compression_ratio"] is not None
+                else 1.0,
+                "status": "success",
+            }
+            for r in rows
+        ]
+
+        return {"total": total, "offset": offset, "limit": limit, "entries": entries}
+
     # ------------------------------------------------------------------ compression cache
     def get_compression_cached(
         self, content_hash: str, age_ratio: float

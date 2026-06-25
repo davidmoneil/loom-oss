@@ -1,0 +1,20 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  html,
+  body,
+  #root {
+    height: 100%;
+  }
+  body {
+    @apply bg-base text-gray-200 font-sans antialiased;
+  }
+}
+
+@layer components {
+  .skeleton {
+    @apply animate-pulse rounded bg-gray-700/60;
+  }
+}

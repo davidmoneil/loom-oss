@@ -17,6 +17,10 @@ venv/
 .mypy_cache/
 .ruff_cache/
 
+# Node / dashboard build tooling
+node_modules/
+dashboard/.vite/
+
 # Runtime data
 *.db
 data/

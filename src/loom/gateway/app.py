@@ -21,6 +21,7 @@ affected feature degrades gracefully rather than crashing the process.
 from __future__ import annotations
 
 import json
+import pathlib
 import time
 import uuid
 from contextlib import asynccontextmanager
@@ -28,6 +29,7 @@ from typing import Any, AsyncIterator, Optional
 
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse, StreamingResponse
+from fastapi.staticfiles import StaticFiles
 
 from loom import __version__
 from loom.config import LoomConfig, ModelConfig, SourcePolicy
@@ -882,11 +884,71 @@ def create_app() -> FastAPI:
         except Exception:
             return {"available": False, "metrics": {}}
 
+    # -------------------------------------------------------- metrics timeseries
+    @app.get("/api/metrics/timeseries")
+    async def api_metrics_timeseries(hours: int = 24, bucket: str = "1h"):
+        gw = state()
+        empty = {
+            "hours": hours,
+            "bucket_seconds": _bucket_seconds(bucket),
+            "buckets": [],
+            "by_model": {},
+            "by_source": {},
+            "by_task_type": {},
+        }
+        if gw.storage is None:
+            return empty
+        try:
+            return _jsonable(
+                gw.storage.get_metrics_timeseries(hours, _bucket_seconds(bucket))
+            )
+        except Exception:
+            return empty
+
+    # ------------------------------------------------------------------- audit
+    @app.get("/api/audit")
+    async def api_audit(
+        limit: int = 50,
+        offset: int = 0,
+        model: Optional[str] = None,
+        source: Optional[str] = None,
+        status: Optional[str] = None,
+        search: Optional[str] = None,
+    ):
+        gw = state()
+        if gw.storage is None:
+            return {"total": 0, "offset": offset, "limit": limit, "entries": []}
+        try:
+            return _jsonable(
+                gw.storage.get_audit_entries(
+                    limit=limit,
+                    offset=offset,
+                    model=model,
+                    source=source,
+                    status=status,
+                    search=search,
+                )
+            )
+        except Exception:
+            return {"total": 0, "offset": offset, "limit": limit, "entries": []}
+
     # ------------------------------------------------------------------- config
     @app.get("/api/config")
     async def api_config():
         gw = state()
         return _sanitized_config(gw.config)
+
+    # ----------------------------------------------------------- dashboard (SPA)
+    # Mounted LAST so API routes always take priority over the static catch-all.
+    dashboard_dir = (
+        pathlib.Path(__file__).parent.parent / "dashboard" / "static"
+    )
+    if dashboard_dir.exists():
+        app.mount(
+            "/",
+            StaticFiles(directory=str(dashboard_dir), html=True),
+            name="dashboard",
+        )
 
     return app
 
@@ -909,6 +971,13 @@ _ANTHROPIC_PASSTHROUGH = (
 def _passthrough_params(body: dict, anthropic: bool = False) -> dict:
     keys = _ANTHROPIC_PASSTHROUGH if anthropic else _OPENAI_PASSTHROUGH
     return {k: body[k] for k in keys if k in body and body[k] is not None}
+
+
+_BUCKET_SIZES = {"5m": 300, "15m": 900, "1h": 3600, "1d": 86400}
+
+
+def _bucket_seconds(bucket: str) -> int:
+    return _BUCKET_SIZES.get((bucket or "1h").lower(), 3600)
 
 
 def _run_compress_graduated(processor: Any, text: str, age_ratio: float) -> str:
