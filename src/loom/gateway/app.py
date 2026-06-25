@@ -1,0 +1,900 @@
+"""Loom gateway — FastAPI application.
+
+A transparent proxy that speaks the OpenAI and Anthropic wire formats and
+forwards requests to upstream providers, adding three optimizations along the
+way:
+
+* **Routing** — when a client requests ``model="auto"`` the routing engine picks
+  a concrete model based on the inferred task type and the caller's source
+  policy.
+* **Compression** — graduated content compression is exposed at ``/v1/compress``.
+* **Detection** — determinism/tier detection is exposed at ``/v1/detect``.
+
+API keys are *pass-through*: they are read from the inbound request headers and
+forwarded to the upstream provider. The server never stores provider keys.
+
+Sibling engine modules (routing, detection, compression, observability) are
+imported defensively — if one is unavailable the gateway still boots and the
+affected feature degrades gracefully rather than crashing the process.
+"""
+
+from __future__ import annotations
+
+import json
+import time
+import uuid
+from contextlib import asynccontextmanager
+from typing import Any, AsyncIterator, Optional
+
+from fastapi import FastAPI, Request
+from fastapi.responses import JSONResponse, StreamingResponse
+
+from loom import __version__
+from loom.config import LoomConfig, ModelConfig, SourcePolicy
+from loom.storage import LoomStorage
+
+from .providers import (
+    AnthropicBackend,
+    OllamaBackend,
+    OpenAIBackend,
+    ProviderBackend,
+    ProviderError,
+)
+
+# --- Optional engines (owned by sibling agents) -----------------------------
+# Imported defensively so a missing/in-progress module cannot stop the gateway.
+try:
+    from loom.observability import AuditLogger  # type: ignore
+except Exception:  # pragma: no cover - degraded mode
+    AuditLogger = None  # type: ignore
+
+try:
+    from loom.routing.engine import RoutingEngine  # type: ignore
+except Exception:  # pragma: no cover - degraded mode
+    RoutingEngine = None  # type: ignore
+
+try:
+    from loom.detection.engine import DetectionEngine  # type: ignore
+except Exception:  # pragma: no cover - degraded mode
+    DetectionEngine = None  # type: ignore
+
+try:
+    from loom.compression.processor import ContentProcessor  # type: ignore
+except Exception:  # pragma: no cover - degraded mode
+    ContentProcessor = None  # type: ignore
+
+
+# --------------------------------------------------------------------------- #
+#  Application state
+# --------------------------------------------------------------------------- #
+class GatewayState:
+    """Holds long-lived objects created at startup and reused per request."""
+
+    def __init__(self) -> None:
+        self.config: LoomConfig = LoomConfig()
+        self.backends: dict[str, ProviderBackend] = {}
+        # model id / display name -> (provider_name, ModelConfig)
+        self.model_index: dict[str, tuple[str, ModelConfig]] = {}
+        self.storage: Optional[LoomStorage] = None
+        self.audit: Any = None
+        self.routing: Any = None
+        self.detection: Any = None
+        self.compression: Any = None
+
+    def build_backend(self, provider_name: str, api_base: str) -> ProviderBackend:
+        name = provider_name.lower()
+        if name == "anthropic":
+            return AnthropicBackend(api_base)
+        if name == "ollama":
+            return OllamaBackend(api_base)
+        # Everything else is treated as OpenAI-compatible.
+        return OpenAIBackend(api_base)
+
+    def index_models(self) -> None:
+        self.model_index.clear()
+        for provider in self.config.providers:
+            for model in provider.models:
+                self.model_index[model.model_id] = (provider.name, model)
+                if model.display_name:
+                    self.model_index.setdefault(
+                        model.display_name, (provider.name, model)
+                    )
+
+    def resolve_provider(self, model: str) -> Optional[tuple[str, ModelConfig]]:
+        """Map a requested model to (provider_name, ModelConfig).
+
+        Falls back to name-prefix inference, then to the sole configured
+        provider, so a proxied model that isn't explicitly listed can still be
+        forwarded.
+        """
+        if model in self.model_index:
+            return self.model_index[model]
+
+        lowered = model.lower()
+        guess: Optional[str] = None
+        if lowered.startswith("claude") or "anthropic" in lowered:
+            guess = "anthropic"
+        elif lowered.startswith(("gpt", "o1", "o3", "o4", "text-")):
+            guess = "openai"
+        if guess:
+            for provider in self.config.providers:
+                if provider.name == guess:
+                    return provider.name, ModelConfig(model_id=model, display_name=model)
+
+        if len(self.config.providers) == 1:
+            only = self.config.providers[0]
+            return only.name, ModelConfig(model_id=model, display_name=model)
+        return None
+
+
+def _extract_tokens(usage: Any) -> tuple[int, int]:
+    """Pull (tokens_in, tokens_out) from an OpenAI- or Anthropic-shaped usage dict."""
+    if not isinstance(usage, dict):
+        return 0, 0
+    tokens_in = usage.get("prompt_tokens") or usage.get("input_tokens") or 0
+    tokens_out = usage.get("completion_tokens") or usage.get("output_tokens") or 0
+    try:
+        return int(tokens_in or 0), int(tokens_out or 0)
+    except (TypeError, ValueError):
+        return 0, 0
+
+
+def _record_request(
+    state: GatewayState,
+    *,
+    request_id: str,
+    method: str,
+    path: str,
+    source: str,
+    provider: str,
+    model: str,
+    requested_model: Optional[str],
+    task_type: str,
+    routing_reason: str,
+    status_code: int,
+    latency_ms: float,
+    usage: Any = None,
+    cost: float = 0.0,
+) -> None:
+    """Persist + audit a completed request. Never raises into the request path."""
+    tokens_in, tokens_out = _extract_tokens(usage)
+
+    if state.storage is not None:
+        try:
+            state.storage.record_metrics(
+                request_id=request_id,
+                model=model,
+                provider=provider,
+                tokens_in=tokens_in,
+                tokens_out=tokens_out,
+                latency_ms=latency_ms,
+                cost=cost,
+            )
+        except Exception:
+            pass
+        try:
+            state.storage.record_routing_decision(
+                request_id=request_id,
+                source=source,
+                task_type=task_type,
+                model=model,
+                reason=routing_reason,
+                model_recommended=requested_model,
+            )
+        except Exception:
+            pass
+
+    if state.audit is not None:
+        try:
+            state.audit.log_request(
+                request_id=request_id,
+                method=method,
+                path=path,
+                source=source,
+                model=model,
+                provider=provider,
+                tokens_in=tokens_in,
+                tokens_out=tokens_out,
+                latency_ms=latency_ms,
+                cost_estimate=cost,
+                routing_reason=routing_reason,
+                status_code=status_code,
+            )
+        except Exception:
+            pass
+        try:
+            state.audit.log_metrics(
+                request_id=request_id,
+                model=model,
+                tokens_in=tokens_in,
+                tokens_out=tokens_out,
+                latency_ms=latency_ms,
+                cost_estimate=cost,
+            )
+        except Exception:
+            pass
+
+
+def _audit_error(state: GatewayState, request_id: str, path: str, source: str, status_code: int) -> None:
+    if state.audit is None:
+        return
+    try:
+        state.audit.log_request(
+            request_id=request_id,
+            method="POST",
+            path=path,
+            source=source,
+            status_code=status_code,
+        )
+    except Exception:
+        pass
+
+
+def _model_cost(model_cfg: Optional[ModelConfig], usage: Any) -> float:
+    if model_cfg is None:
+        return 0.0
+    tokens_in, tokens_out = _extract_tokens(usage)
+    return (tokens_in / 1000.0) * model_cfg.cost_per_1k_input + (
+        tokens_out / 1000.0
+    ) * model_cfg.cost_per_1k_output
+
+
+# --------------------------------------------------------------------------- #
+#  Routing helpers
+# --------------------------------------------------------------------------- #
+def _classify_task_type(body: dict, messages: list[dict]) -> str:
+    """Lightweight task-type heuristic used to seed routing decisions."""
+    if body.get("tools") or body.get("functions"):
+        return "tool_use"
+    response_format = body.get("response_format")
+    if isinstance(response_format, dict) and response_format.get("type") in (
+        "json_object",
+        "json_schema",
+    ):
+        return "json_generation"
+    blob = " ".join(
+        str(m.get("content", "")) for m in messages if isinstance(m, dict)
+    ).lower()
+    if "json" in blob:
+        return "json_generation"
+    if any(k in blob for k in ("story", "poem", "creative", "imagine")):
+        return "story_generation"
+    return "general"
+
+
+def _recommendation_model(rec: Any) -> Optional[str]:
+    if rec is None:
+        return None
+    if isinstance(rec, str):
+        return rec
+    for attr in ("model_id", "model", "recommended_model"):
+        value = getattr(rec, attr, None)
+        if value:
+            return value
+    if isinstance(rec, dict):
+        return rec.get("model_id") or rec.get("model")
+    return None
+
+
+def _fallback_model(config: LoomConfig, policy: SourcePolicy) -> Optional[str]:
+    """Pick a model directly from config when routing is unavailable."""
+    allowed = set(policy.allowed_providers or [])
+    for provider in config.providers:
+        if allowed and provider.name not in allowed:
+            continue
+        for model in provider.models:
+            if policy.requires_tools and not model.supports_tools:
+                continue
+            return model.model_id
+    # Last resort: anything at all.
+    for provider in config.providers:
+        if provider.models:
+            return provider.models[0].model_id
+    return None
+
+
+def _select_model(
+    state: GatewayState,
+    requested_model: Optional[str],
+    source: str,
+    body: dict,
+    messages: list[dict],
+) -> tuple[str, str, str]:
+    """Resolve the model to use. Returns (model, task_type, routing_reason)."""
+    policy = state.config.get_source_policy(source)
+    task_type = _classify_task_type(body, messages)
+
+    explicit = requested_model not in (None, "", "auto", "loom-auto")
+    if explicit:
+        return requested_model, task_type, "client_specified"  # type: ignore[return-value]
+
+    if policy.pinned_model:
+        return policy.pinned_model, task_type, "source_pinned"
+
+    if state.routing is not None:
+        rec = _try_recommend(state.routing, task_type, source, policy)
+        model = _recommendation_model(rec)
+        if model:
+            reason = getattr(rec, "routing_reason", "") or "routed"
+            return model, task_type, reason
+
+    fallback = _fallback_model(state.config, policy)
+    if fallback:
+        return fallback, task_type, "config_fallback"
+    # Nothing configured — surface a clear error upstream.
+    raise ProviderError(
+        "no model available: routing produced no result and no providers are configured",
+        status_code=503,
+    )
+
+
+def _try_recommend(engine: Any, task_type: str, source: str, policy: SourcePolicy) -> Any:
+    """Call RoutingEngine.recommend, tolerating minor signature drift."""
+    try:
+        return engine.recommend(
+            task_type=task_type,
+            source=source,
+            requires_tools=policy.requires_tools,
+        )
+    except TypeError:
+        try:
+            return engine.recommend(task_type=task_type, source=source)
+        except Exception:
+            return None
+    except Exception:
+        return None
+
+
+# --------------------------------------------------------------------------- #
+#  Request plumbing
+# --------------------------------------------------------------------------- #
+def _bearer(request: Request) -> str:
+    auth = request.headers.get("authorization", "")
+    if auth.lower().startswith("bearer "):
+        return auth[7:].strip()
+    return auth.strip()
+
+
+def _source(request: Request) -> str:
+    return request.headers.get("x-loom-source", "default")
+
+
+def _error_response(exc: Exception, request_id: str, status: int = 500) -> JSONResponse:
+    if isinstance(exc, ProviderError):
+        payload = dict(exc.payload)
+        payload.setdefault("error", {})
+        if isinstance(payload.get("error"), dict):
+            payload["error"].setdefault("request_id", request_id)
+        return JSONResponse(payload, status_code=exc.status_code)
+    return JSONResponse(
+        {
+            "error": {
+                "message": str(exc),
+                "type": "gateway_error",
+                "request_id": request_id,
+            }
+        },
+        status_code=status,
+    )
+
+
+async def _wrapped_stream(
+    state: GatewayState,
+    upstream: AsyncIterator[bytes],
+    meta: dict,
+    t0: float,
+) -> AsyncIterator[bytes]:
+    """Forward upstream bytes, recording the request when the stream finishes."""
+    status = 200
+    try:
+        async for chunk in upstream:
+            yield chunk
+    except ProviderError as exc:
+        status = exc.status_code
+        body = json.dumps(exc.payload).encode("utf-8")
+        yield b"data: " + body + b"\n\n"
+    finally:
+        # Token usage is not reliably available mid-stream; record latency/routing.
+        _record_request(
+            state,
+            status_code=status,
+            latency_ms=round((time.monotonic() - t0) * 1000, 2),
+            usage=None,
+            cost=0.0,
+            **meta,
+        )
+
+
+# --------------------------------------------------------------------------- #
+#  Lifespan
+# --------------------------------------------------------------------------- #
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    state: GatewayState = app.state.gateway
+    state.config = LoomConfig.load()
+    state.index_models()
+
+    for provider in state.config.providers:
+        state.backends[provider.name] = state.build_backend(
+            provider.name, provider.api_base
+        )
+
+    if LoomStorage is not None:
+        try:
+            state.storage = LoomStorage(state.config.storage.database_path)
+            state.storage.connect()
+        except Exception:
+            state.storage = None
+
+    if AuditLogger is not None:
+        try:
+            state.audit = AuditLogger(
+                audit_path=state.config.observability.audit_log_path,
+                metrics_path=state.config.observability.metrics_log_path,
+            )
+        except Exception:
+            state.audit = None
+
+    if RoutingEngine is not None:
+        try:
+            state.routing = RoutingEngine(state.config)
+        except Exception:
+            try:
+                state.routing = RoutingEngine()  # type: ignore[call-arg]
+            except Exception:
+                state.routing = None
+
+    if DetectionEngine is not None:
+        try:
+            state.detection = DetectionEngine(state.config)
+        except Exception:
+            try:
+                state.detection = DetectionEngine()  # type: ignore[call-arg]
+            except Exception:
+                state.detection = None
+
+    if ContentProcessor is not None:
+        try:
+            state.compression = ContentProcessor(state.config)
+        except Exception:
+            try:
+                state.compression = ContentProcessor()  # type: ignore[call-arg]
+            except Exception:
+                state.compression = None
+
+    try:
+        yield
+    finally:
+        for backend in state.backends.values():
+            try:
+                await backend.close()
+            except Exception:
+                pass
+        if state.storage is not None:
+            close = getattr(state.storage, "close", None)
+            if callable(close):
+                try:
+                    close()
+                except Exception:
+                    pass
+
+
+# --------------------------------------------------------------------------- #
+#  App factory
+# --------------------------------------------------------------------------- #
+def create_app() -> FastAPI:
+    app = FastAPI(title="Loom Gateway", version=__version__, lifespan=lifespan)
+    app.state.gateway = GatewayState()
+
+    def state() -> GatewayState:
+        return app.state.gateway
+
+    # ----------------------------------------------------------- chat (OpenAI)
+    @app.post("/v1/chat/completions")
+    async def chat_completions(request: Request):
+        gw = state()
+        request_id = str(uuid.uuid4())
+        t0 = time.monotonic()
+        try:
+            body = await request.json()
+        except Exception:
+            return _error_response(
+                ProviderError("invalid JSON body", status_code=400), request_id, 400
+            )
+
+        messages = body.get("messages") or []
+        api_key = _bearer(request)
+        source = _source(request)
+        stream = bool(body.get("stream", False))
+
+        try:
+            model, task_type, routing_reason = _select_model(
+                gw, body.get("model"), source, body, messages
+            )
+            resolved = gw.resolve_provider(model)
+            if resolved is None:
+                raise ProviderError(
+                    f"unknown model '{model}' and provider could not be inferred",
+                    status_code=400,
+                )
+            provider_name, model_cfg = resolved
+            backend = gw.backends.get(provider_name)
+            if backend is None:
+                raise ProviderError(
+                    f"no backend configured for provider '{provider_name}'",
+                    status_code=500,
+                )
+
+            forward = _passthrough_params(body)
+            result = await backend.chat_completion(
+                model=model_cfg.model_id,
+                messages=messages,
+                api_key=api_key,
+                stream=stream,
+                **forward,
+            )
+
+            meta = {
+                "request_id": request_id,
+                "method": "POST",
+                "path": "/v1/chat/completions",
+                "source": source,
+                "provider": provider_name,
+                "model": model_cfg.model_id,
+                "requested_model": body.get("model"),
+                "task_type": task_type,
+                "routing_reason": routing_reason,
+            }
+
+            if stream:
+                return StreamingResponse(
+                    _wrapped_stream(gw, result, meta, t0),  # type: ignore[arg-type]
+                    media_type="text/event-stream",
+                    headers={"X-Loom-Request-Id": request_id},
+                )
+
+            usage = result.get("usage") if isinstance(result, dict) else None
+            _record_request(
+                gw,
+                status_code=200,
+                latency_ms=round((time.monotonic() - t0) * 1000, 2),
+                usage=usage,
+                cost=_model_cost(model_cfg, usage),
+                **meta,
+            )
+            return JSONResponse(result, headers={"X-Loom-Request-Id": request_id})
+        except ProviderError as exc:
+            _audit_error(gw, request_id, "/v1/chat/completions", source, exc.status_code)
+            return _error_response(exc, request_id)
+        except Exception as exc:  # never crash
+            _audit_error(gw, request_id, "/v1/chat/completions", source, 500)
+            return _error_response(exc, request_id)
+
+    # -------------------------------------------------------- messages (Anthropic)
+    @app.post("/v1/messages")
+    async def messages_endpoint(request: Request):
+        gw = state()
+        request_id = str(uuid.uuid4())
+        t0 = time.monotonic()
+        try:
+            body = await request.json()
+        except Exception:
+            return _error_response(
+                ProviderError("invalid JSON body", status_code=400), request_id, 400
+            )
+
+        messages = body.get("messages") or []
+        api_key = request.headers.get("x-api-key", "") or _bearer(request)
+        source = _source(request)
+        stream = bool(body.get("stream", False))
+
+        try:
+            model, task_type, routing_reason = _select_model(
+                gw, body.get("model"), source, body, messages
+            )
+            # Force Anthropic backend for the messages API; fall back to inference.
+            backend = gw.backends.get("anthropic")
+            provider_name = "anthropic"
+            model_cfg = None
+            resolved = gw.resolve_provider(model)
+            if resolved is not None:
+                provider_name, model_cfg = resolved
+                if backend is None:
+                    backend = gw.backends.get(provider_name)
+            if backend is None:
+                raise ProviderError(
+                    "no Anthropic backend configured", status_code=500
+                )
+
+            forward = _passthrough_params(body, anthropic=True)
+            result = await backend.chat_completion(
+                model=model,
+                messages=messages,
+                api_key=api_key,
+                stream=stream,
+                **forward,
+            )
+
+            meta = {
+                "request_id": request_id,
+                "method": "POST",
+                "path": "/v1/messages",
+                "source": source,
+                "provider": provider_name,
+                "model": model,
+                "requested_model": body.get("model"),
+                "task_type": task_type,
+                "routing_reason": routing_reason,
+            }
+
+            if stream:
+                return StreamingResponse(
+                    _wrapped_stream(gw, result, meta, t0),  # type: ignore[arg-type]
+                    media_type="text/event-stream",
+                    headers={"X-Loom-Request-Id": request_id},
+                )
+
+            usage = result.get("usage") if isinstance(result, dict) else None
+            _record_request(
+                gw,
+                status_code=200,
+                latency_ms=round((time.monotonic() - t0) * 1000, 2),
+                usage=usage,
+                cost=_model_cost(model_cfg, usage),
+                **meta,
+            )
+            return JSONResponse(result, headers={"X-Loom-Request-Id": request_id})
+        except ProviderError as exc:
+            _audit_error(gw, request_id, "/v1/messages", source, exc.status_code)
+            return _error_response(exc, request_id)
+        except Exception as exc:
+            _audit_error(gw, request_id, "/v1/messages", source, 500)
+            return _error_response(exc, request_id)
+
+    # ----------------------------------------------------------------- compress
+    @app.post("/v1/compress")
+    async def compress(request: Request):
+        gw = state()
+        request_id = str(uuid.uuid4())
+        try:
+            body = await request.json()
+        except Exception:
+            return _error_response(
+                ProviderError("invalid JSON body", status_code=400), request_id, 400
+            )
+
+        messages = body.get("messages") or []
+        mode = body.get("mode", "audit")
+        if gw.compression is None:
+            return JSONResponse(
+                {
+                    "messages": messages,
+                    "stats": {"enabled": False, "reason": "compression unavailable"},
+                    "request_id": request_id,
+                }
+            )
+
+        compressed: list[dict] = []
+        original_chars = 0
+        compressed_chars = 0
+        try:
+            for msg in messages:
+                content = msg.get("content", "")
+                text = content if isinstance(content, str) else json.dumps(content)
+                original_chars += len(text)
+                new_text = _run_compress(gw.compression, text, mode)
+                compressed_chars += len(new_text)
+                out = dict(msg)
+                out["content"] = new_text
+                compressed.append(out)
+        except Exception as exc:
+            return _error_response(exc, request_id)
+
+        ratio = (compressed_chars / original_chars) if original_chars else 1.0
+        return JSONResponse(
+            {
+                "messages": compressed,
+                "stats": {
+                    "mode": mode,
+                    "original_chars": original_chars,
+                    "compressed_chars": compressed_chars,
+                    "compression_ratio": round(ratio, 4),
+                    "chars_saved": original_chars - compressed_chars,
+                },
+                "request_id": request_id,
+            }
+        )
+
+    # ------------------------------------------------------------------- detect
+    @app.post("/v1/detect")
+    async def detect(request: Request):
+        gw = state()
+        request_id = str(uuid.uuid4())
+        try:
+            body = await request.json()
+        except Exception:
+            return _error_response(
+                ProviderError("invalid JSON body", status_code=400), request_id, 400
+            )
+
+        source = body.get("source", "default")
+        prompt = body.get("prompt", "")
+        if gw.detection is None:
+            return JSONResponse(
+                {
+                    "tier": None,
+                    "detail": "detection engine unavailable",
+                    "request_id": request_id,
+                }
+            )
+        try:
+            result = _run_detect(gw.detection, source, prompt)
+        except Exception as exc:
+            return _error_response(exc, request_id)
+        return JSONResponse({"request_id": request_id, **_jsonable(result)})
+
+    # ------------------------------------------------------------------- health
+    @app.get("/health")
+    async def health():
+        gw = state()
+        return {
+            "status": "healthy",
+            "version": __version__,
+            "providers": [p.name for p in gw.config.providers],
+            "routing_table_loaded": gw.routing is not None,
+            "compression_enabled": gw.compression is not None,
+            "detection_enabled": gw.detection is not None,
+        }
+
+    # ------------------------------------------------------------------- models
+    @app.get("/api/models")
+    async def api_models():
+        gw = state()
+        models = []
+        for provider in gw.config.providers:
+            for model in provider.models:
+                models.append(
+                    {
+                        "id": model.model_id,
+                        "display_name": model.display_name,
+                        "provider": provider.name,
+                        "tier": model.tier,
+                        "supports_tools": model.supports_tools,
+                        "supports_json_mode": model.supports_json_mode,
+                        "max_context_tokens": model.max_context_tokens,
+                    }
+                )
+        return {"object": "list", "data": models}
+
+    # ------------------------------------------------------------------ metrics
+    @app.get("/api/metrics")
+    async def api_metrics():
+        gw = state()
+        if gw.storage is None:
+            return {"available": False, "metrics": {}}
+        try:
+            return {"available": True, "metrics": _jsonable(gw.storage.get_routing_stats(24))}
+        except Exception:
+            return {"available": False, "metrics": {}}
+
+    # ------------------------------------------------------------------- config
+    @app.get("/api/config")
+    async def api_config():
+        gw = state()
+        return _sanitized_config(gw.config)
+
+    return app
+
+
+# --------------------------------------------------------------------------- #
+#  Small helpers
+# --------------------------------------------------------------------------- #
+_OPENAI_PASSTHROUGH = (
+    "temperature", "top_p", "n", "stop", "max_tokens", "max_completion_tokens",
+    "presence_penalty", "frequency_penalty", "logit_bias", "user", "seed",
+    "response_format", "tools", "tool_choice", "functions", "function_call",
+    "parallel_tool_calls", "logprobs", "top_logprobs",
+)
+_ANTHROPIC_PASSTHROUGH = (
+    "temperature", "top_p", "top_k", "max_tokens", "stop_sequences", "system",
+    "tools", "tool_choice", "metadata",
+)
+
+
+def _passthrough_params(body: dict, anthropic: bool = False) -> dict:
+    keys = _ANTHROPIC_PASSTHROUGH if anthropic else _OPENAI_PASSTHROUGH
+    return {k: body[k] for k in keys if k in body and body[k] is not None}
+
+
+def _run_compress(processor: Any, text: str, mode: str) -> str:
+    for method in ("compress_graduated", "compress", "process"):
+        fn = getattr(processor, method, None)
+        if callable(fn):
+            try:
+                result = fn(text, mode=mode)
+            except TypeError:
+                try:
+                    result = fn(text)
+                except Exception:
+                    return text
+            except Exception:
+                return text
+            if isinstance(result, str):
+                return result
+            for attr in ("text", "content", "compressed"):
+                value = getattr(result, attr, None)
+                if isinstance(value, str):
+                    return value
+            if isinstance(result, dict):
+                return result.get("text") or result.get("content") or text
+            return text
+    return text
+
+
+def _run_detect(engine: Any, source: str, prompt: str) -> Any:
+    fn = getattr(engine, "detect", None)
+    if not callable(fn):
+        return {"tier": None}
+    try:
+        return fn(source=source, prompt=prompt)
+    except TypeError:
+        try:
+            return fn(source, prompt)
+        except TypeError:
+            return fn(prompt)
+
+
+def _jsonable(obj: Any) -> Any:
+    if obj is None or isinstance(obj, (str, int, float, bool)):
+        return obj
+    if isinstance(obj, dict):
+        return {k: _jsonable(v) for k, v in obj.items()}
+    if isinstance(obj, (list, tuple)):
+        return [_jsonable(v) for v in obj]
+    for method in ("to_dict", "model_dump", "dict"):
+        fn = getattr(obj, method, None)
+        if callable(fn):
+            try:
+                return _jsonable(fn())
+            except Exception:
+                pass
+    if hasattr(obj, "__dict__"):
+        return {k: _jsonable(v) for k, v in vars(obj).items() if not k.startswith("_")}
+    return str(obj)
+
+
+def _sanitized_config(config: LoomConfig) -> dict:
+    return {
+        "server": {
+            "host": config.server.host,
+            "port": config.server.port,
+            "log_level": config.server.log_level,
+        },
+        "providers": [
+            {
+                "name": p.name,
+                "api_base": p.api_base,
+                "models": [m.model_id for m in p.models],
+            }
+            for p in config.providers
+        ],
+        "sources": {
+            name: {
+                "minimum_tier": s.minimum_tier,
+                "requires_tools": s.requires_tools,
+                "allowed_providers": s.allowed_providers,
+                "budget_tier": s.budget_tier,
+                "pinned_model": s.pinned_model,
+            }
+            for name, s in config.sources.items()
+        },
+        "routing": {
+            "default_determinism_target": config.routing.default_determinism_target,
+            "min_empirical_runs": config.routing.min_empirical_runs,
+        },
+        "compression": {"enabled": config.compression.enabled},
+    }
+
+
+# Module-level ASGI app for ``uvicorn loom.gateway.app:app``.
+app = create_app()

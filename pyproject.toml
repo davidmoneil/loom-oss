@@ -1,0 +1,36 @@
+[project]
+name = "loom-gateway"
+version = "0.1.0-dev"
+description = "LLM optimization gateway — routing, compression, and observability"
+requires-python = ">=3.11"
+license = {text = "Apache-2.0"}
+readme = "README.md"
+dependencies = [
+    "fastapi>=0.104",
+    "uvicorn[standard]>=0.24",
+    "httpx>=0.25",
+    "pyyaml>=6.0",
+    "pydantic>=2.0",
+    "pydantic-settings>=2.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=7.0",
+    "pytest-asyncio>=0.21",
+    "httpx",  # for TestClient
+]
+
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+asyncio_mode = "auto"
+
+[project.scripts]
+loom = "loom.cli:main"
