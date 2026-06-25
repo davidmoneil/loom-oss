@@ -35,6 +35,7 @@ from loom.storage import LoomStorage
 
 from .providers import (
     AnthropicBackend,
+    GeminiBackend,
     OllamaBackend,
     OpenAIBackend,
     ProviderBackend,
@@ -85,6 +86,8 @@ class GatewayState:
         name = provider_name.lower()
         if name == "anthropic":
             return AnthropicBackend(api_base)
+        if name == "gemini":
+            return GeminiBackend(api_base)
         if name == "ollama":
             return OllamaBackend(api_base)
         # Everything else is treated as OpenAI-compatible.
@@ -116,6 +119,10 @@ class GatewayState:
             guess = "anthropic"
         elif lowered.startswith(("gpt", "o1", "o3", "o4", "text-")):
             guess = "openai"
+        elif lowered.startswith("gemini"):
+            guess = "gemini"
+        elif lowered.startswith("grok"):
+            guess = "xai"
         if guess:
             for provider in self.config.providers:
                 if provider.name == guess:
@@ -127,12 +134,29 @@ class GatewayState:
         return None
 
 
-def _extract_tokens(usage: Any) -> tuple[int, int]:
-    """Pull (tokens_in, tokens_out) from an OpenAI- or Anthropic-shaped usage dict."""
-    if not isinstance(usage, dict):
+def _extract_tokens(usage_or_response: Any) -> tuple[int, int]:
+    """Pull (tokens_in, tokens_out) from any provider's response shape.
+
+    Handles: OpenAI (usage.prompt_tokens), Anthropic (usage.input_tokens),
+    Ollama (top-level prompt_eval_count), Gemini (usageMetadata.promptTokenCount).
+    """
+    if not isinstance(usage_or_response, dict):
         return 0, 0
-    tokens_in = usage.get("prompt_tokens") or usage.get("input_tokens") or 0
-    tokens_out = usage.get("completion_tokens") or usage.get("output_tokens") or 0
+    d = usage_or_response
+    tokens_in = (
+        d.get("prompt_tokens")
+        or d.get("input_tokens")
+        or d.get("prompt_eval_count")  # Ollama
+        or (d.get("usageMetadata") or {}).get("promptTokenCount")  # Gemini
+        or 0
+    )
+    tokens_out = (
+        d.get("completion_tokens")
+        or d.get("output_tokens")
+        or d.get("eval_count")  # Ollama
+        or (d.get("usageMetadata") or {}).get("candidatesTokenCount")  # Gemini
+        or 0
+    )
     try:
         return int(tokens_in or 0), int(tokens_out or 0)
     except (TypeError, ValueError):
@@ -164,11 +188,14 @@ def _record_request(
             state.storage.record_metrics(
                 request_id=request_id,
                 model=model,
+                requested_model=requested_model,
                 provider=provider,
+                task_type=task_type,
                 tokens_in=tokens_in,
                 tokens_out=tokens_out,
                 latency_ms=latency_ms,
                 cost=cost,
+                source=source,
             )
         except Exception:
             pass
@@ -192,7 +219,9 @@ def _record_request(
                 path=path,
                 source=source,
                 model=model,
+                requested_model=requested_model,
                 provider=provider,
+                task_type=task_type,
                 tokens_in=tokens_in,
                 tokens_out=tokens_out,
                 latency_ms=latency_ms,
@@ -228,6 +257,76 @@ def _audit_error(state: GatewayState, request_id: str, path: str, source: str, s
         )
     except Exception:
         pass
+
+
+def _extract_usage(result: Any, provider: str) -> dict:
+    """Extract a normalized usage dict from any provider's response."""
+    if not isinstance(result, dict):
+        return {}
+    if provider == "ollama":
+        return {
+            "prompt_tokens": result.get("prompt_eval_count", 0),
+            "completion_tokens": result.get("eval_count", 0),
+        }
+    if provider == "gemini":
+        um = result.get("usageMetadata", {})
+        return {
+            "prompt_tokens": um.get("promptTokenCount", 0),
+            "completion_tokens": um.get("candidatesTokenCount", 0),
+        }
+    # OpenAI / Anthropic both put usage in a sub-dict
+    return result.get("usage") or {}
+
+
+def _normalize_response(result: dict, provider: str, model: str) -> dict:
+    """Normalize any provider's response to OpenAI chat completion format."""
+    if provider == "ollama":
+        msg = result.get("message", {})
+        content = msg.get("content", "")
+        return {
+            "id": f"chatcmpl-loom-{uuid.uuid4().hex[:12]}",
+            "object": "chat.completion",
+            "model": model,
+            "choices": [
+                {
+                    "index": 0,
+                    "message": {"role": "assistant", "content": content},
+                    "finish_reason": "stop" if result.get("done") else None,
+                }
+            ],
+            "usage": {
+                "prompt_tokens": result.get("prompt_eval_count", 0),
+                "completion_tokens": result.get("eval_count", 0),
+                "total_tokens": (result.get("prompt_eval_count", 0)
+                                 + result.get("eval_count", 0)),
+            },
+        }
+    if provider == "gemini":
+        candidates = result.get("candidates", [{}])
+        text = ""
+        if candidates:
+            parts = candidates[0].get("content", {}).get("parts", [])
+            text = "".join(p.get("text", "") for p in parts)
+        um = result.get("usageMetadata", {})
+        return {
+            "id": f"chatcmpl-loom-{uuid.uuid4().hex[:12]}",
+            "object": "chat.completion",
+            "model": model,
+            "choices": [
+                {
+                    "index": 0,
+                    "message": {"role": "assistant", "content": text},
+                    "finish_reason": "stop",
+                }
+            ],
+            "usage": {
+                "prompt_tokens": um.get("promptTokenCount", 0),
+                "completion_tokens": um.get("candidatesTokenCount", 0),
+                "total_tokens": um.get("totalTokenCount", 0),
+            },
+        }
+    # OpenAI and Anthropic responses are already in standard format
+    return result
 
 
 def _model_cost(model_cfg: Optional[ModelConfig], usage: Any) -> float:
@@ -553,7 +652,7 @@ def create_app() -> FastAPI:
                     headers={"X-Loom-Request-Id": request_id},
                 )
 
-            usage = result.get("usage") if isinstance(result, dict) else None
+            usage = _extract_usage(result, provider_name)
             _record_request(
                 gw,
                 status_code=200,
@@ -562,7 +661,8 @@ def create_app() -> FastAPI:
                 cost=_model_cost(model_cfg, usage),
                 **meta,
             )
-            return JSONResponse(result, headers={"X-Loom-Request-Id": request_id})
+            normalized = _normalize_response(result, provider_name, model_cfg.model_id)
+            return JSONResponse(normalized, headers={"X-Loom-Request-Id": request_id})
         except ProviderError as exc:
             _audit_error(gw, request_id, "/v1/chat/completions", source, exc.status_code)
             return _error_response(exc, request_id)
@@ -634,7 +734,7 @@ def create_app() -> FastAPI:
                     headers={"X-Loom-Request-Id": request_id},
                 )
 
-            usage = result.get("usage") if isinstance(result, dict) else None
+            usage = _extract_usage(result, provider_name)
             _record_request(
                 gw,
                 status_code=200,
@@ -677,12 +777,17 @@ def create_app() -> FastAPI:
         compressed: list[dict] = []
         original_chars = 0
         compressed_chars = 0
+        n = len(messages)
         try:
-            for msg in messages:
+            for idx, msg in enumerate(messages):
                 content = msg.get("content", "")
                 text = content if isinstance(content, str) else json.dumps(content)
                 original_chars += len(text)
-                new_text = _run_compress(gw.compression, text, mode)
+                age_ratio = idx / max(n - 1, 1) if n > 1 else 0.0
+                if mode == "audit":
+                    new_text = text
+                else:
+                    new_text = _run_compress_graduated(gw.compression, text, age_ratio)
                 compressed_chars += len(new_text)
                 out = dict(msg)
                 out["content"] = new_text
@@ -806,28 +911,17 @@ def _passthrough_params(body: dict, anthropic: bool = False) -> dict:
     return {k: body[k] for k in keys if k in body and body[k] is not None}
 
 
-def _run_compress(processor: Any, text: str, mode: str) -> str:
-    for method in ("compress_graduated", "compress", "process"):
-        fn = getattr(processor, method, None)
-        if callable(fn):
-            try:
-                result = fn(text, mode=mode)
-            except TypeError:
-                try:
-                    result = fn(text)
-                except Exception:
-                    return text
-            except Exception:
-                return text
+def _run_compress_graduated(processor: Any, text: str, age_ratio: float) -> str:
+    fn = getattr(processor, "compress_graduated", None)
+    if callable(fn):
+        try:
+            result = fn(text, age_ratio)
+            if isinstance(result, tuple):
+                return result[0]
             if isinstance(result, str):
                 return result
-            for attr in ("text", "content", "compressed"):
-                value = getattr(result, attr, None)
-                if isinstance(value, str):
-                    return value
-            if isinstance(result, dict):
-                return result.get("text") or result.get("content") or text
-            return text
+        except Exception:
+            pass
     return text
 
 

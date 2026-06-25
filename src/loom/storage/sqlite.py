@@ -13,7 +13,7 @@ import sqlite3
 import time
 from typing import Any, Optional
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 
 
 class LoomStorage:
@@ -71,13 +71,17 @@ class LoomStorage:
                 timestamp REAL NOT NULL,
                 request_id TEXT,
                 model TEXT,
+                requested_model TEXT,
                 provider TEXT,
+                task_type TEXT,
                 tokens_in INTEGER,
                 tokens_out INTEGER,
                 latency_ms REAL,
                 cost_estimate REAL,
                 compressed INTEGER,
-                compression_ratio REAL
+                compression_ratio REAL,
+                message_count INTEGER DEFAULT 0,
+                source TEXT
             );
 
             CREATE TABLE IF NOT EXISTS sessions (
@@ -115,6 +119,19 @@ class LoomStorage:
         c = self.conn
         row = c.execute("SELECT MAX(version) AS v FROM schema_version").fetchone()
         current = row["v"] if row and row["v"] is not None else 0
+
+        if current < 2:
+            for col, typ in [
+                ("requested_model", "TEXT"),
+                ("task_type", "TEXT"),
+                ("message_count", "INTEGER DEFAULT 0"),
+                ("source", "TEXT"),
+            ]:
+                try:
+                    c.execute(f"ALTER TABLE metrics ADD COLUMN {col} {typ}")
+                except sqlite3.OperationalError:
+                    pass  # column already exists
+
         if current < SCHEMA_VERSION:
             c.execute(
                 "INSERT OR REPLACE INTO schema_version (version, applied_at) VALUES (?, ?)",
@@ -167,25 +184,35 @@ class LoomStorage:
         cost: float,
         compressed: bool = False,
         compression_ratio: float = 1.0,
+        requested_model: Optional[str] = None,
+        task_type: Optional[str] = None,
+        message_count: int = 0,
+        source: Optional[str] = None,
     ) -> None:
         self.conn.execute(
             """
             INSERT INTO metrics (
-                timestamp, request_id, model, provider, tokens_in, tokens_out,
-                latency_ms, cost_estimate, compressed, compression_ratio
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                timestamp, request_id, model, requested_model, provider,
+                task_type, tokens_in, tokens_out,
+                latency_ms, cost_estimate, compressed, compression_ratio,
+                message_count, source
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 time.time(),
                 request_id,
                 model,
+                requested_model,
                 provider,
+                task_type,
                 tokens_in,
                 tokens_out,
                 latency_ms,
                 cost,
                 1 if compressed else 0,
                 compression_ratio,
+                message_count,
+                source,
             ),
         )
         self.conn.commit()
