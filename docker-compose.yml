@@ -5,7 +5,19 @@ services:
       - "4444:4444"
     volumes:
       - ./loom.yaml:/app/loom.yaml:ro
-      - ./data:/app/data
+      - loom-data:/app/data
+      - loom-logs:/app/logs
     environment:
       LOOM_CONFIG: /app/loom.yaml
+    deploy:
+      resources:
+        limits:
+          memory: 512M
+          cpus: "2.0"
+        reservations:
+          memory: 128M
     restart: unless-stopped
+
+volumes:
+  loom-data:
+  loom-logs:

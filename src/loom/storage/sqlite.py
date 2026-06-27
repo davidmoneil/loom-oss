@@ -3,6 +3,10 @@
 Persists routing decisions, per-request metrics, session rollups, and the compression
 cache. The schema is versioned via the ``schema_version`` table and applied idempotently
 by :meth:`LoomStorage.migrate`.
+
+Thread-safety: All write operations are serialized through a threading.Lock.
+WAL mode allows concurrent reads while writes are locked. Commits are batched
+via a periodic flush to avoid blocking the async event loop on every write.
 """
 
 from __future__ import annotations
@@ -10,16 +14,23 @@ from __future__ import annotations
 import json
 import os
 import sqlite3
+import threading
 import time
 from typing import Any, Optional
 
 SCHEMA_VERSION = 3
+
+_FLUSH_INTERVAL_SECONDS = 2.0
 
 
 class LoomStorage:
     def __init__(self, db_path: str = "loom.db") -> None:
         self.db_path = db_path
         self._conn: Optional[sqlite3.Connection] = None
+        self._write_lock = threading.Lock()
+        self._pending_writes = 0
+        self._last_flush = 0.0
+        self._flush_timer: Optional[threading.Timer] = None
 
     # ------------------------------------------------------------------ lifecycle
     def connect(self) -> None:
@@ -31,12 +42,19 @@ class LoomStorage:
         self._conn = sqlite3.connect(self.db_path, check_same_thread=False)
         self._conn.row_factory = sqlite3.Row
         self._conn.execute("PRAGMA journal_mode=WAL;")
+        self._conn.execute("PRAGMA synchronous=NORMAL;")
+        self._conn.execute("PRAGMA busy_timeout=5000;")
         self._create_tables()
         self.migrate()
+        self._last_flush = time.monotonic()
 
     def close(self) -> None:
+        if self._flush_timer is not None:
+            self._flush_timer.cancel()
+            self._flush_timer = None
         if self._conn is not None:
-            self._conn.commit()
+            with self._write_lock:
+                self._conn.commit()
             self._conn.close()
             self._conn = None
 
@@ -46,6 +64,27 @@ class LoomStorage:
             self.connect()
         assert self._conn is not None
         return self._conn
+
+    def _flush(self) -> None:
+        """Commit pending writes. Called by timer or explicitly."""
+        with self._write_lock:
+            if self._pending_writes > 0 and self._conn is not None:
+                self._conn.commit()
+                self._pending_writes = 0
+                self._last_flush = time.monotonic()
+
+    def _schedule_flush(self) -> None:
+        """Schedule a deferred commit if writes are pending."""
+        self._pending_writes += 1
+        now = time.monotonic()
+        if now - self._last_flush >= _FLUSH_INTERVAL_SECONDS:
+            self._conn.commit()
+            self._pending_writes = 0
+            self._last_flush = now
+        elif self._flush_timer is None or not self._flush_timer.is_alive():
+            self._flush_timer = threading.Timer(_FLUSH_INTERVAL_SECONDS, self._flush)
+            self._flush_timer.daemon = True
+            self._flush_timer.start()
 
     # ------------------------------------------------------------------ schema
     def _create_tables(self) -> None:
@@ -115,6 +154,13 @@ class LoomStorage:
                 created_at REAL NOT NULL
             );
 
+            CREATE INDEX IF NOT EXISTS idx_metrics_timestamp
+                ON metrics (timestamp);
+            CREATE INDEX IF NOT EXISTS idx_routing_timestamp
+                ON routing_decisions (timestamp);
+            CREATE INDEX IF NOT EXISTS idx_metrics_request_id
+                ON metrics (request_id);
+
             CREATE TABLE IF NOT EXISTS schema_version (
                 version INTEGER PRIMARY KEY,
                 applied_at REAL
@@ -138,7 +184,7 @@ class LoomStorage:
                 try:
                     c.execute(f"ALTER TABLE metrics ADD COLUMN {col} {typ}")
                 except sqlite3.OperationalError:
-                    pass  # column already exists
+                    pass
 
         if current < 3:
             try:
@@ -153,6 +199,15 @@ class LoomStorage:
                 """)
             except sqlite3.OperationalError:
                 pass
+            for idx in [
+                "CREATE INDEX IF NOT EXISTS idx_metrics_timestamp ON metrics (timestamp)",
+                "CREATE INDEX IF NOT EXISTS idx_routing_timestamp ON routing_decisions (timestamp)",
+                "CREATE INDEX IF NOT EXISTS idx_metrics_request_id ON metrics (request_id)",
+            ]:
+                try:
+                    c.execute(idx)
+                except sqlite3.OperationalError:
+                    pass
 
         if current < SCHEMA_VERSION:
             c.execute(
@@ -173,27 +228,28 @@ class LoomStorage:
         determinism_score: Optional[float] = None,
         alternatives: Optional[list[Any]] = None,
     ) -> None:
-        self.conn.execute(
-            """
-            INSERT INTO routing_decisions (
-                timestamp, request_id, source, task_type,
-                model_recommended, model_used, routing_reason,
-                determinism_score, alternatives_json
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-            """,
-            (
-                time.time(),
-                request_id,
-                source,
-                task_type,
-                model_recommended if model_recommended is not None else model,
-                model,
-                reason,
-                determinism_score,
-                json.dumps(alternatives) if alternatives is not None else None,
-            ),
-        )
-        self.conn.commit()
+        with self._write_lock:
+            self.conn.execute(
+                """
+                INSERT INTO routing_decisions (
+                    timestamp, request_id, source, task_type,
+                    model_recommended, model_used, routing_reason,
+                    determinism_score, alternatives_json
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    time.time(),
+                    request_id,
+                    source,
+                    task_type,
+                    model_recommended if model_recommended is not None else model,
+                    model,
+                    reason,
+                    determinism_score,
+                    json.dumps(alternatives) if alternatives is not None else None,
+                ),
+            )
+            self._schedule_flush()
 
     def record_metrics(
         self,
@@ -211,48 +267,50 @@ class LoomStorage:
         message_count: int = 0,
         source: Optional[str] = None,
     ) -> None:
-        self.conn.execute(
-            """
-            INSERT INTO metrics (
-                timestamp, request_id, model, requested_model, provider,
-                task_type, tokens_in, tokens_out,
-                latency_ms, cost_estimate, compressed, compression_ratio,
-                message_count, source
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            """,
-            (
-                time.time(),
-                request_id,
-                model,
-                requested_model,
-                provider,
-                task_type,
-                tokens_in,
-                tokens_out,
-                latency_ms,
-                cost,
-                1 if compressed else 0,
-                compression_ratio,
-                message_count,
-                source,
-            ),
-        )
-        self.conn.commit()
+        with self._write_lock:
+            self.conn.execute(
+                """
+                INSERT INTO metrics (
+                    timestamp, request_id, model, requested_model, provider,
+                    task_type, tokens_in, tokens_out,
+                    latency_ms, cost_estimate, compressed, compression_ratio,
+                    message_count, source
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    time.time(),
+                    request_id,
+                    model,
+                    requested_model,
+                    provider,
+                    task_type,
+                    tokens_in,
+                    tokens_out,
+                    latency_ms,
+                    cost,
+                    1 if compressed else 0,
+                    compression_ratio,
+                    message_count,
+                    source,
+                ),
+            )
+            self._schedule_flush()
 
     # ------------------------------------------------------ content importance
     def record_content_importance(self, content_hash: str, source: str = "request") -> None:
         now = time.time()
-        self.conn.execute(
-            """
-            INSERT INTO content_importance (content_hash, source, hit_count, last_seen, created_at)
-            VALUES (?, ?, 1, ?, ?)
-            ON CONFLICT (content_hash) DO UPDATE SET
-                hit_count = hit_count + 1,
-                last_seen = ?
-            """,
-            (content_hash, source, now, now, now),
-        )
-        self.conn.commit()
+        with self._write_lock:
+            self.conn.execute(
+                """
+                INSERT INTO content_importance (content_hash, source, hit_count, last_seen, created_at)
+                VALUES (?, ?, 1, ?, ?)
+                ON CONFLICT (content_hash) DO UPDATE SET
+                    hit_count = hit_count + 1,
+                    last_seen = ?
+                """,
+                (content_hash, source, now, now, now),
+            )
+            self._schedule_flush()
 
     def get_content_importance(self, content_hashes: list[str]) -> dict[str, float]:
         if not content_hashes:
@@ -284,10 +342,11 @@ class LoomStorage:
 
     def cleanup_stale_importance(self, max_age_hours: int = 168) -> int:
         cutoff = time.time() - max_age_hours * 3600
-        cursor = self.conn.execute(
-            "DELETE FROM content_importance WHERE last_seen < ?", (cutoff,)
-        )
-        self.conn.commit()
+        with self._write_lock:
+            cursor = self.conn.execute(
+                "DELETE FROM content_importance WHERE last_seen < ?", (cutoff,)
+            )
+            self._schedule_flush()
         return cursor.rowcount
 
     # ------------------------------------------------------------------ reads
@@ -334,11 +393,6 @@ class LoomStorage:
     def get_metrics_timeseries(
         self, hours: int = 24, bucket_seconds: int = 3600
     ) -> dict:
-        """Return time-bucketed metrics plus by-model/source/task_type rollups.
-
-        Buckets are aligned to ``bucket_seconds`` boundaries (epoch-relative) so
-        that the same wall-clock window always lands in the same bucket.
-        """
         bucket_seconds = max(int(bucket_seconds), 1)
         since = time.time() - hours * 3600
 
@@ -441,12 +495,6 @@ class LoomStorage:
         status: Optional[str] = None,
         search: Optional[str] = None,
     ) -> dict:
-        """Return paginated request log joining metrics + routing_decisions.
-
-        Only successful requests are persisted to ``metrics`` (errors are logged
-        to the audit file, not the DB), so every entry reports ``status:success``.
-        A ``status="error"`` filter therefore yields no rows.
-        """
         limit = max(1, min(int(limit), 500))
         offset = max(0, int(offset))
 
@@ -459,7 +507,6 @@ class LoomStorage:
             where.append("COALESCE(m.source, 'default') = ?")
             params.append(source)
         if status and status.lower() != "success":
-            # DB only holds successful requests; any non-success filter is empty.
             where.append("1 = 0")
         if search:
             like = f"%{search}%"
@@ -560,21 +607,22 @@ class LoomStorage:
         tokens_before: int,
         tokens_after: int,
     ) -> None:
-        self.conn.execute(
-            """
-            INSERT INTO compression_cache (
-                content_hash, age_ratio, compressed_text, tier,
-                tokens_before, tokens_after, created_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?)
-            """,
-            (
-                content_hash,
-                age_ratio,
-                compressed,
-                tier,
-                tokens_before,
-                tokens_after,
-                time.time(),
-            ),
-        )
-        self.conn.commit()
+        with self._write_lock:
+            self.conn.execute(
+                """
+                INSERT INTO compression_cache (
+                    content_hash, age_ratio, compressed_text, tier,
+                    tokens_before, tokens_after, created_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    content_hash,
+                    age_ratio,
+                    compressed,
+                    tier,
+                    tokens_before,
+                    tokens_after,
+                    time.time(),
+                ),
+            )
+            self._schedule_flush()
