@@ -168,6 +168,7 @@ class ProgrammaticSearchTier:
                     "--type-add", "docs:*.{md,yaml,yml,json,txt,toml}",
                     "--type", "docs",
                     "-i",
+                    "--",
                     keyword,
                     path,
                 ],
