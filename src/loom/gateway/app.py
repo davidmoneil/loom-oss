@@ -22,12 +22,14 @@ from __future__ import annotations
 
 import json
 import pathlib
+import threading
 import time
 import uuid
 from contextlib import asynccontextmanager
 from typing import Any, AsyncIterator, Optional
 
 from fastapi import FastAPI, Request
+from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 
@@ -271,16 +273,13 @@ def _record_request(
 
     if state.audit is not None and messages and state.scanner is not None:
         try:
-            response_text = None
-            if usage and isinstance(usage, dict):
-                response_text = None  # usage doesn't contain response text
             state.audit.log_content(
                 request_id=request_id,
                 model=model,
                 source=source,
                 provider=provider,
                 messages=messages,
-                response_text=response_text or None,
+                response_text=response_text,
                 content_logging=state.scanner.content_logging,
             )
         except Exception:
@@ -368,7 +367,35 @@ def _normalize_response(result: dict, provider: str, model: str) -> dict:
                 "total_tokens": um.get("totalTokenCount", 0),
             },
         }
-    # OpenAI and Anthropic responses are already in standard format
+    if provider == "anthropic":
+        content_blocks = result.get("content", [])
+        text = ""
+        if isinstance(content_blocks, list):
+            text = "".join(
+                b.get("text", "") for b in content_blocks
+                if isinstance(b, dict) and b.get("type") == "text"
+            )
+        usage = result.get("usage", {})
+        return {
+            "id": f"chatcmpl-loom-{uuid.uuid4().hex[:12]}",
+            "object": "chat.completion",
+            "model": model,
+            "choices": [
+                {
+                    "index": 0,
+                    "message": {"role": "assistant", "content": text},
+                    "finish_reason": result.get("stop_reason", "stop"),
+                }
+            ],
+            "usage": {
+                "prompt_tokens": usage.get("input_tokens", 0),
+                "completion_tokens": usage.get("output_tokens", 0),
+                "total_tokens": (
+                    usage.get("input_tokens", 0) + usage.get("output_tokens", 0)
+                ),
+            },
+        }
+    # OpenAI responses are already in standard format
     return result
 
 
@@ -555,10 +582,12 @@ def _error_response(exc: Exception, request_id: str, status: int = 500) -> JSONR
         if isinstance(payload.get("error"), dict):
             payload["error"].setdefault("request_id", request_id)
         return JSONResponse(payload, status_code=exc.status_code)
+    import logging as _log
+    _log.getLogger("loom.gateway").exception("Unhandled error (request_id=%s)", request_id)
     return JSONResponse(
         {
             "error": {
-                "message": str(exc),
+                "message": "internal server error",
                 "type": "gateway_error",
                 "request_id": request_id,
             }
@@ -775,9 +804,54 @@ async def lifespan(app: FastAPI):
 # --------------------------------------------------------------------------- #
 #  App factory
 # --------------------------------------------------------------------------- #
+class _RateLimiter:
+    """Simple in-memory per-IP rate limiter. No external dependencies."""
+
+    def __init__(self, max_requests: int = 100, window_seconds: int = 60) -> None:
+        self._max = max_requests
+        self._window = window_seconds
+        self._buckets: dict[str, list[float]] = {}
+        self._lock = threading.Lock()
+
+    def is_allowed(self, key: str) -> bool:
+        now = time.monotonic()
+        with self._lock:
+            bucket = self._buckets.setdefault(key, [])
+            cutoff = now - self._window
+            bucket[:] = [t for t in bucket if t > cutoff]
+            if len(bucket) >= self._max:
+                return False
+            bucket.append(now)
+            return True
+
+
 def create_app() -> FastAPI:
     app = FastAPI(title="Loom Gateway", version=__version__, lifespan=lifespan)
     app.state.gateway = GatewayState()
+
+    app.add_middleware(
+        CORSMiddleware,
+        allow_origins=["*"],
+        allow_credentials=True,
+        allow_methods=["*"],
+        allow_headers=["*"],
+        expose_headers=["X-Loom-Request-Id"],
+    )
+
+    rate_limiter = _RateLimiter(max_requests=200, window_seconds=60)
+
+    @app.middleware("http")
+    async def rate_limit_middleware(request: Request, call_next):
+        if request.url.path.startswith(("/health", "/api/")):
+            return await call_next(request)
+        client_ip = request.client.host if request.client else "unknown"
+        if not rate_limiter.is_allowed(client_ip):
+            return JSONResponse(
+                {"error": {"message": "rate limit exceeded", "type": "rate_limit_error"}},
+                status_code=429,
+                headers={"Retry-After": "60"},
+            )
+        return await call_next(request)
 
     def state() -> GatewayState:
         return app.state.gateway
@@ -905,8 +979,9 @@ def create_app() -> FastAPI:
                 )
 
             forward = _passthrough_params(body, anthropic=True)
+            actual_model = model_cfg.model_id if model_cfg else model
             result = await backend.chat_completion(
-                model=model,
+                model=actual_model,
                 messages=messages,
                 api_key=api_key,
                 stream=stream,
@@ -919,7 +994,7 @@ def create_app() -> FastAPI:
                 "path": "/v1/messages",
                 "source": source,
                 "provider": provider_name,
-                "model": model,
+                "model": actual_model,
                 "requested_model": body.get("model"),
                 "task_type": task_type,
                 "routing_reason": routing_reason,
