@@ -611,6 +611,61 @@ def _error_response(exc: Exception, request_id: str, status: int = 500) -> JSONR
     )
 
 
+async def _scan_ollama_stream(
+    upstream: AsyncIterator[bytes],
+    gw: GatewayState,
+    request_id: str,
+    source: str,
+    provider: str,
+    model: str,
+    text_key: str,
+) -> AsyncIterator[bytes]:
+    """Buffer an Ollama NDJSON stream, scan assembled text, re-emit."""
+    chunks: list[dict] = []
+    raw_lines: list[bytes] = []
+    async for line_bytes in upstream:
+        raw_lines.append(line_bytes)
+        try:
+            chunk = json.loads(line_bytes)
+            chunks.append(chunk)
+        except (json.JSONDecodeError, ValueError):
+            pass
+
+    if text_key == "response":
+        full_text = "".join(c.get("response", "") for c in chunks)
+    else:
+        full_text = "".join(
+            c.get("message", {}).get("content", "") for c in chunks if isinstance(c.get("message"), dict)
+        )
+
+    if gw.scanner and full_text:
+        scanned, _ = gw.scanner.apply(
+            full_text, session_id=request_id,
+            source=source, provider=provider, model=model,
+        )
+    else:
+        scanned = full_text
+
+    if scanned != full_text and chunks:
+        first = chunks[0].copy()
+        if text_key == "response":
+            first["response"] = scanned
+        else:
+            first.setdefault("message", {})["content"] = scanned
+        first["done"] = False
+        yield (json.dumps(first) + "\n").encode("utf-8")
+        final = chunks[-1].copy()
+        if text_key == "response":
+            final["response"] = ""
+        else:
+            final.setdefault("message", {})["content"] = ""
+        final["done"] = True
+        yield (json.dumps(final) + "\n").encode("utf-8")
+    else:
+        for line_bytes in raw_lines:
+            yield line_bytes
+
+
 async def _wrapped_stream(
     state: GatewayState,
     upstream: AsyncIterator[bytes],
@@ -867,7 +922,9 @@ def create_app() -> FastAPI:
 
     @app.middleware("http")
     async def rate_limit_middleware(request: Request, call_next):
-        if request.url.path.startswith(("/health", "/api/")):
+        path = request.url.path
+        _EXEMPT_PREFIXES = ("/health", "/api/models", "/api/metrics", "/api/audit", "/api/config", "/api/scanner", "/api/tags")
+        if any(path.startswith(p) for p in _EXEMPT_PREFIXES):
             return await call_next(request)
         client_ip = request.client.host if request.client else "unknown"
         if not rate_limiter.is_allowed(client_ip):
@@ -1132,6 +1189,11 @@ def create_app() -> FastAPI:
                 )
 
             if stream:
+                if gw.scanner and gw.scanner.enabled and gw.scanner.has_buffer_rules():
+                    return StreamingResponse(
+                        _scan_ollama_stream(result, gw, request_id, source, provider_name, model_name, "response"),
+                        media_type="application/x-ndjson",
+                    )
                 return StreamingResponse(result, media_type="application/x-ndjson")
 
             # Scan response
@@ -1208,6 +1270,11 @@ def create_app() -> FastAPI:
             )
 
             if stream:
+                if gw.scanner and gw.scanner.enabled and gw.scanner.has_buffer_rules():
+                    return StreamingResponse(
+                        _scan_ollama_stream(result, gw, request_id, source, provider_name, model_name, "message.content"),
+                        media_type="application/x-ndjson",
+                    )
                 return StreamingResponse(result, media_type="application/x-ndjson")
 
             # Scan response
