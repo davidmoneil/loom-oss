@@ -66,6 +66,16 @@ try:
 except Exception:  # pragma: no cover - degraded mode
     ContentProcessor = None  # type: ignore
 
+try:
+    from loom.compression.relevance import record_request_content  # type: ignore
+except Exception:  # pragma: no cover - degraded mode
+    record_request_content = None  # type: ignore
+
+try:
+    from loom.scanner import SensitiveDataScanner  # type: ignore
+except Exception:  # pragma: no cover - degraded mode
+    SensitiveDataScanner = None  # type: ignore
+
 
 # --------------------------------------------------------------------------- #
 #  Application state
@@ -83,6 +93,7 @@ class GatewayState:
         self.routing: Any = None
         self.detection: Any = None
         self.compression: Any = None
+        self.scanner: Any = None
 
     def build_backend(self, provider_name: str, api_base: str) -> ProviderBackend:
         name = provider_name.lower()
@@ -181,6 +192,8 @@ def _record_request(
     latency_ms: float,
     usage: Any = None,
     cost: float = 0.0,
+    messages: Optional[list[dict]] = None,
+    response_text: Optional[str] = None,
 ) -> None:
     """Persist + audit a completed request. Never raises into the request path."""
     tokens_in, tokens_out = _extract_tokens(usage)
@@ -241,6 +254,34 @@ def _record_request(
                 tokens_out=tokens_out,
                 latency_ms=latency_ms,
                 cost_estimate=cost,
+            )
+        except Exception:
+            pass
+
+    if (
+        record_request_content is not None
+        and messages
+        and status_code == 200
+        and state.storage is not None
+    ):
+        try:
+            record_request_content(messages, state.storage, source=source)
+        except Exception:
+            pass
+
+    if state.audit is not None and messages and state.scanner is not None:
+        try:
+            response_text = None
+            if usage and isinstance(usage, dict):
+                response_text = None  # usage doesn't contain response text
+            state.audit.log_content(
+                request_id=request_id,
+                model=model,
+                source=source,
+                provider=provider,
+                messages=messages,
+                response_text=response_text or None,
+                content_logging=state.scanner.content_logging,
             )
         except Exception:
             pass
@@ -460,6 +501,53 @@ def _source(request: Request) -> str:
     return request.headers.get("x-loom-source", "default")
 
 
+def _extract_response_text(result: dict) -> Optional[str]:
+    """Extract the assistant's text content from any response format."""
+    for choice in result.get("choices", []):
+        msg = choice.get("message", {})
+        if msg.get("content"):
+            return msg["content"]
+    for block in result.get("content", []):
+        if isinstance(block, dict) and block.get("type") == "text":
+            return block.get("text", "")
+    return None
+
+
+def _scan_response(gw: GatewayState, result: dict, provider: str, model: str, source: str) -> dict:
+    """Scan LLM response text for sensitive data. Never raises."""
+    if gw.scanner is None or not gw.scanner.enabled:
+        return result
+    try:
+        choices = result.get("choices", [])
+        modified = False
+        for choice in choices:
+            msg = choice.get("message", {})
+            text = msg.get("content", "")
+            if text:
+                scanned, matches = gw.scanner.apply(
+                    text, source=source, provider=provider, model=model,
+                )
+                if matches:
+                    msg["content"] = scanned
+                    modified = True
+        if not modified:
+            # Anthropic format: result.content[].text
+            content = result.get("content", [])
+            if isinstance(content, list):
+                for block in content:
+                    if isinstance(block, dict) and block.get("type") == "text":
+                        text = block.get("text", "")
+                        if text:
+                            scanned, matches = gw.scanner.apply(
+                                text, source=source, provider=provider, model=model,
+                            )
+                            if matches:
+                                block["text"] = scanned
+    except Exception:
+        pass
+    return result
+
+
 def _error_response(exc: Exception, request_id: str, status: int = 500) -> JSONResponse:
     if isinstance(exc, ProviderError):
         payload = dict(exc.payload)
@@ -485,25 +573,118 @@ async def _wrapped_stream(
     meta: dict,
     t0: float,
 ) -> AsyncIterator[bytes]:
-    """Forward upstream bytes, recording the request when the stream finishes."""
+    """Forward upstream bytes, scanning for sensitive data when buffering is enabled.
+
+    If the scanner has buffer-mode rules, accumulates the full stream, scans the
+    assembled text, rebuilds the SSE events with scanned content, and re-yields.
+    Otherwise passes through directly with zero overhead.
+    """
     status = 200
-    try:
-        async for chunk in upstream:
-            yield chunk
-    except ProviderError as exc:
-        status = exc.status_code
-        body = json.dumps(exc.payload).encode("utf-8")
-        yield b"data: " + body + b"\n\n"
-    finally:
-        # Token usage is not reliably available mid-stream; record latency/routing.
-        _record_request(
-            state,
-            status_code=status,
-            latency_ms=round((time.monotonic() - t0) * 1000, 2),
-            usage=None,
-            cost=0.0,
-            **meta,
-        )
+    scan_enabled = (
+        state.scanner is not None
+        and state.scanner.enabled
+        and state.scanner.has_buffer_rules()
+    )
+
+    if scan_enabled:
+        chunks: list[bytes] = []
+        try:
+            async for chunk in upstream:
+                chunks.append(chunk)
+        except ProviderError as exc:
+            status = exc.status_code
+            chunks.append(b"data: " + json.dumps(exc.payload).encode("utf-8") + b"\n\n")
+
+        full_body = b"".join(chunks)
+        source = meta.get("source", "unknown")
+        provider = meta.get("provider", "unknown")
+        model = meta.get("model", "")
+
+        try:
+            text_parts = []
+            lines = full_body.decode("utf-8", errors="replace").split("\n")
+            for line in lines:
+                if not line.startswith("data: "):
+                    continue
+                payload = line[6:].strip()
+                if not payload or payload == "[DONE]":
+                    continue
+                try:
+                    event = json.loads(payload)
+                    # OpenAI format
+                    choices = event.get("choices", [])
+                    for choice in choices:
+                        delta = choice.get("delta", {})
+                        if "content" in delta and delta["content"]:
+                            text_parts.append(delta["content"])
+                    # Anthropic format
+                    delta = event.get("delta", {})
+                    if delta.get("type") == "text_delta" and delta.get("text"):
+                        text_parts.append(delta["text"])
+                except json.JSONDecodeError:
+                    pass
+
+            if text_parts:
+                full_text = "".join(text_parts)
+                scanned_text, matches = state.scanner.apply(
+                    full_text, source=source, provider=provider, model=model,
+                )
+                if matches:
+                    rebuilt_lines = []
+                    text_offset = 0
+                    for line in lines:
+                        if not line.startswith("data: "):
+                            rebuilt_lines.append(line)
+                            continue
+                        payload = line[6:].strip()
+                        if not payload or payload == "[DONE]":
+                            rebuilt_lines.append(line)
+                            continue
+                        try:
+                            event = json.loads(payload)
+                            changed = False
+                            for choice in event.get("choices", []):
+                                delta = choice.get("delta", {})
+                                if "content" in delta and delta["content"]:
+                                    orig_len = len(delta["content"])
+                                    delta["content"] = scanned_text[text_offset:text_offset + orig_len]
+                                    text_offset += orig_len
+                                    changed = True
+                            delta = event.get("delta", {})
+                            if delta.get("type") == "text_delta" and delta.get("text"):
+                                orig_len = len(delta["text"])
+                                delta["text"] = scanned_text[text_offset:text_offset + orig_len]
+                                text_offset += orig_len
+                                changed = True
+                            if changed:
+                                rebuilt_lines.append(f"data: {json.dumps(event)}")
+                            else:
+                                rebuilt_lines.append(line)
+                        except json.JSONDecodeError:
+                            rebuilt_lines.append(line)
+                    full_body = "\n".join(rebuilt_lines).encode("utf-8")
+        except Exception:
+            pass  # scanning failure = pass through original
+
+        yield full_body
+    else:
+        # Passthrough mode — zero overhead
+        try:
+            async for chunk in upstream:
+                yield chunk
+        except ProviderError as exc:
+            status = exc.status_code
+            body = json.dumps(exc.payload).encode("utf-8")
+            yield b"data: " + body + b"\n\n"
+
+    _record_request(
+        state,
+        status_code=status,
+        latency_ms=round((time.monotonic() - t0) * 1000, 2),
+        usage=None,
+        cost=0.0,
+        **meta,
+    )
 
 
 # --------------------------------------------------------------------------- #
@@ -520,6 +701,15 @@ async def lifespan(app: FastAPI):
             provider.name, provider.api_base
         )
 
+    if SensitiveDataScanner is not None:
+        try:
+            state.scanner = SensitiveDataScanner(state.config)
+        except Exception:
+            try:
+                state.scanner = SensitiveDataScanner()  # type: ignore[call-arg]
+            except Exception:
+                state.scanner = None
+
     if LoomStorage is not None:
         try:
             state.storage = LoomStorage(state.config.storage.database_path)
@@ -532,6 +722,7 @@ async def lifespan(app: FastAPI):
             state.audit = AuditLogger(
                 audit_path=state.config.observability.audit_log_path,
                 metrics_path=state.config.observability.metrics_log_path,
+                scanner=state.scanner,
             )
         except Exception:
             state.audit = None
@@ -655,15 +846,19 @@ def create_app() -> FastAPI:
                 )
 
             usage = _extract_usage(result, provider_name)
+            normalized = _normalize_response(result, provider_name, model_cfg.model_id)
+            resp_text = _extract_response_text(normalized)
             _record_request(
                 gw,
                 status_code=200,
                 latency_ms=round((time.monotonic() - t0) * 1000, 2),
                 usage=usage,
                 cost=_model_cost(model_cfg, usage),
+                messages=messages,
+                response_text=resp_text,
                 **meta,
             )
-            normalized = _normalize_response(result, provider_name, model_cfg.model_id)
+            normalized = _scan_response(gw, normalized, provider_name, model_cfg.model_id, source)
             return JSONResponse(normalized, headers={"X-Loom-Request-Id": request_id})
         except ProviderError as exc:
             _audit_error(gw, request_id, "/v1/chat/completions", source, exc.status_code)
@@ -737,14 +932,18 @@ def create_app() -> FastAPI:
                 )
 
             usage = _extract_usage(result, provider_name)
+            resp_text = _extract_response_text(result)
             _record_request(
                 gw,
                 status_code=200,
                 latency_ms=round((time.monotonic() - t0) * 1000, 2),
                 usage=usage,
                 cost=_model_cost(model_cfg, usage),
+                messages=messages,
+                response_text=resp_text,
                 **meta,
             )
+            result = _scan_response(gw, result, provider_name, model, source)
             return JSONResponse(result, headers={"X-Loom-Request-Id": request_id})
         except ProviderError as exc:
             _audit_error(gw, request_id, "/v1/messages", source, exc.status_code)
@@ -851,6 +1050,7 @@ def create_app() -> FastAPI:
             "routing_table_loaded": gw.routing is not None,
             "compression_enabled": gw.compression is not None,
             "detection_enabled": gw.detection is not None,
+            "scanner_enabled": gw.scanner is not None and gw.scanner.enabled,
         }
 
     # ------------------------------------------------------------------- models
@@ -937,6 +1137,42 @@ def create_app() -> FastAPI:
     async def api_config():
         gw = state()
         return _sanitized_config(gw.config)
+
+    # -------------------------------------------------------- scanner management
+    @app.get("/api/scanner/rules")
+    async def api_scanner_rules():
+        gw = state()
+        if gw.scanner is None:
+            return {"enabled": False, "rules": [], "skip_config": {}}
+        return {
+            "enabled": gw.scanner.enabled,
+            "rules": gw.scanner.rules_summary(),
+            "skip_config": gw.scanner.skip_config(),
+        }
+
+    @app.put("/api/scanner/rules/{name}")
+    async def api_scanner_update_rule(name: str, request: Request):
+        gw = state()
+        if gw.scanner is None:
+            return JSONResponse({"error": "scanner not available"}, status_code=503)
+        try:
+            body = await request.json()
+        except Exception:
+            return JSONResponse({"error": "invalid JSON"}, status_code=400)
+        allowed = {"enabled", "action", "mask_format", "streaming_mode"}
+        updates = {k: v for k, v in body.items() if k in allowed}
+        if not updates:
+            return JSONResponse({"error": "no valid fields"}, status_code=400)
+        if gw.scanner.update_rule(name, updates):
+            return {"status": "updated", "rule": name, "updates": updates}
+        return JSONResponse({"error": f"rule '{name}' not found"}, status_code=404)
+
+    @app.get("/api/scanner/stats")
+    async def api_scanner_stats():
+        gw = state()
+        if gw.scanner is None:
+            return {"enabled": False, "total_scans": 0, "total_detections": 0, "by_rule": {}}
+        return {"enabled": gw.scanner.enabled, **gw.scanner.stats()}
 
     # ----------------------------------------------------------- dashboard (SPA)
     # Mounted LAST so API routes always take priority over the static catch-all.

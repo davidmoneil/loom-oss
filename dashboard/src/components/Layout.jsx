@@ -4,6 +4,7 @@ const NAV = [
   { to: "/", label: "Overview", end: true, icon: GridIcon },
   { to: "/metrics", label: "Metrics", icon: ChartIcon },
   { to: "/audit", label: "Audit", icon: ListIcon },
+  { to: "/scanner", label: "Data Protection", icon: ShieldIcon },
 ];
 
 export default function Layout() {
@@ -45,6 +46,14 @@ export default function Layout() {
         <Outlet />
       </main>
     </div>
+  );
+}
+
+function ShieldIcon() {
+  return (
+    <svg className="h-5 w-5 shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth="2">
+      <path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z" />
+    </svg>
   );
 }
 

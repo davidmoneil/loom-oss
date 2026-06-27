@@ -18,13 +18,17 @@ class AuditLogger:
         self,
         audit_path: str = "logs/audit.jsonl",
         metrics_path: str = "logs/metrics.jsonl",
+        content_path: str = "logs/content.jsonl",
+        scanner: Any = None,
     ) -> None:
         self.audit_path = audit_path
         self.metrics_path = metrics_path
+        self.content_path = content_path
+        self._scanner = scanner
         self._ensure_dirs()
 
     def _ensure_dirs(self) -> None:
-        for path in (self.audit_path, self.metrics_path):
+        for path in (self.audit_path, self.metrics_path, self.content_path):
             parent = os.path.dirname(path)
             if parent:
                 try:
@@ -34,11 +38,12 @@ class AuditLogger:
 
     def _write(self, path: str, record: dict[str, Any]) -> None:
         try:
+            if self._scanner is not None:
+                record = self._scanner.sanitize_log_entry(record)
             line = json.dumps(record, default=str)
             with open(path, "a", encoding="utf-8") as fh:
                 fh.write(line + "\n")
         except Exception:
-            # Logging must never break the request path.
             pass
 
     def log_request(
@@ -100,3 +105,61 @@ class AuditLogger:
             "cost_estimate": cost_estimate,
         }
         self._write(self.metrics_path, record)
+
+    def log_content(
+        self,
+        request_id: str,
+        model: str,
+        source: str,
+        provider: str,
+        messages: Optional[list] = None,
+        response_text: Optional[str] = None,
+        content_logging: str = "off",
+    ) -> None:
+        """Log prompt/response content according to the content_logging level.
+
+        Levels:
+          off       — no-op
+          metadata  — no-op (metadata already in audit log)
+          after_scan — content after DLP scanner scrubs it
+          full      — original content (sanitized if scanner active)
+        """
+        if content_logging in ("off", "metadata") or not messages:
+            return
+
+        record: dict[str, Any] = {
+            "ts": time.time(),
+            "request_id": request_id,
+            "model": model,
+            "source": source,
+            "provider": provider,
+            "content_logging": content_logging,
+        }
+
+        if content_logging == "after_scan" and self._scanner is not None:
+            scanned_messages = []
+            for msg in messages:
+                content = msg.get("content", "")
+                if isinstance(content, str) and content:
+                    scanned, _ = self._scanner.apply(content, source=source, provider=provider)
+                    scanned_messages.append({**msg, "content": scanned})
+                else:
+                    scanned_messages.append(msg)
+            record["messages"] = scanned_messages
+            if response_text:
+                scanned_resp, _ = self._scanner.apply(response_text, source=source, provider=provider)
+                record["response"] = scanned_resp
+        elif content_logging == "full":
+            if self._scanner is not None:
+                record["messages"] = self._scanner.sanitize_log_entry({"m": messages})["m"]
+                if response_text:
+                    record["response"] = self._scanner.sanitize_log_entry({"r": response_text})["r"]
+            else:
+                record["messages"] = messages
+                if response_text:
+                    record["response"] = response_text
+        else:
+            return
+
+        record["message_count"] = len(messages)
+        self._write(self.content_path, record)

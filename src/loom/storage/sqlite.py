@@ -13,7 +13,7 @@ import sqlite3
 import time
 from typing import Any, Optional
 
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 
 
 class LoomStorage:
@@ -107,6 +107,14 @@ class LoomStorage:
             CREATE INDEX IF NOT EXISTS idx_compression_lookup
                 ON compression_cache (content_hash, age_ratio);
 
+            CREATE TABLE IF NOT EXISTS content_importance (
+                content_hash TEXT PRIMARY KEY,
+                source TEXT,
+                hit_count INTEGER DEFAULT 1,
+                last_seen REAL NOT NULL,
+                created_at REAL NOT NULL
+            );
+
             CREATE TABLE IF NOT EXISTS schema_version (
                 version INTEGER PRIMARY KEY,
                 applied_at REAL
@@ -131,6 +139,20 @@ class LoomStorage:
                     c.execute(f"ALTER TABLE metrics ADD COLUMN {col} {typ}")
                 except sqlite3.OperationalError:
                     pass  # column already exists
+
+        if current < 3:
+            try:
+                c.executescript("""
+                    CREATE TABLE IF NOT EXISTS content_importance (
+                        content_hash TEXT PRIMARY KEY,
+                        source TEXT,
+                        hit_count INTEGER DEFAULT 1,
+                        last_seen REAL NOT NULL,
+                        created_at REAL NOT NULL
+                    );
+                """)
+            except sqlite3.OperationalError:
+                pass
 
         if current < SCHEMA_VERSION:
             c.execute(
@@ -216,6 +238,57 @@ class LoomStorage:
             ),
         )
         self.conn.commit()
+
+    # ------------------------------------------------------ content importance
+    def record_content_importance(self, content_hash: str, source: str = "request") -> None:
+        now = time.time()
+        self.conn.execute(
+            """
+            INSERT INTO content_importance (content_hash, source, hit_count, last_seen, created_at)
+            VALUES (?, ?, 1, ?, ?)
+            ON CONFLICT (content_hash) DO UPDATE SET
+                hit_count = hit_count + 1,
+                last_seen = ?
+            """,
+            (content_hash, source, now, now, now),
+        )
+        self.conn.commit()
+
+    def get_content_importance(self, content_hashes: list[str]) -> dict[str, float]:
+        if not content_hashes:
+            return {}
+        placeholders = ",".join("?" for _ in content_hashes)
+        rows = self.conn.execute(
+            f"""
+            SELECT content_hash, hit_count, last_seen, created_at
+            FROM content_importance
+            WHERE content_hash IN ({placeholders})
+            """,
+            content_hashes,
+        ).fetchall()
+        scores: dict[str, float] = {}
+        now = time.time()
+        for row in rows:
+            age_hours = (now - row["last_seen"]) / 3600
+            hits = row["hit_count"]
+            if age_hours > 168:
+                score = 0.3
+            elif hits >= 3:
+                score = 0.9
+            elif hits >= 2:
+                score = 0.75
+            else:
+                score = 0.6
+            scores[row["content_hash"]] = score
+        return scores
+
+    def cleanup_stale_importance(self, max_age_hours: int = 168) -> int:
+        cutoff = time.time() - max_age_hours * 3600
+        cursor = self.conn.execute(
+            "DELETE FROM content_importance WHERE last_seen < ?", (cutoff,)
+        )
+        self.conn.commit()
+        return cursor.rowcount
 
     # ------------------------------------------------------------------ reads
     def get_routing_stats(self, hours: int = 24) -> dict:

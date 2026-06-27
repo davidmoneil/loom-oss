@@ -5,6 +5,7 @@ import Layout from "./components/Layout.jsx";
 import Overview from "./pages/Overview.jsx";
 import Metrics from "./pages/Metrics.jsx";
 import Audit from "./pages/Audit.jsx";
+import Scanner from "./pages/Scanner.jsx";
 import "./index.css";
 
 ReactDOM.createRoot(document.getElementById("root")).render(
@@ -15,6 +16,7 @@ ReactDOM.createRoot(document.getElementById("root")).render(
           <Route path="/" element={<Overview />} />
           <Route path="/metrics" element={<Metrics />} />
           <Route path="/audit" element={<Audit />} />
+          <Route path="/scanner" element={<Scanner />} />
           <Route path="*" element={<Navigate to="/" replace />} />
         </Route>
       </Routes>
