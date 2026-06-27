@@ -2,7 +2,7 @@ services:
   loom:
     build: .
     ports:
-      - "4000:4000"
+      - "4444:4444"
     volumes:
       - ./loom.yaml:/app/loom.yaml:ro
       - ./data:/app/data

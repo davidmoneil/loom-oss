@@ -8,6 +8,6 @@ COPY loom.example.yaml ./loom.example.yaml
 
 RUN pip install --no-cache-dir .
 
-EXPOSE 4000
+EXPOSE 4444
 
-CMD ["uvicorn", "loom.gateway.app:app", "--host", "0.0.0.0", "--port", "4000"]
+CMD ["uvicorn", "loom.gateway.app:app", "--host", "0.0.0.0", "--port", "4444"]
