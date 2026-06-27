@@ -35,7 +35,7 @@ from fastapi.staticfiles import StaticFiles
 
 from loom import __version__
 from loom.config import LoomConfig, ModelConfig, SourcePolicy
-from loom.storage import LoomStorage
+from loom.storage import LoomStorage, create_storage
 
 from .providers import (
     AnthropicBackend,
@@ -740,12 +740,22 @@ async def lifespan(app: FastAPI):
             except Exception:
                 state.scanner = None
 
-    if LoomStorage is not None:
+    # Configure scanner Postgres modules when DSN is available
+    pg_dsn = state.config.storage.postgres_dsn
+    if pg_dsn:
         try:
-            state.storage = LoomStorage(state.config.storage.database_path)
-            state.storage.connect()
-        except Exception:
-            state.storage = None
+            from loom.scanner import crypto, pseudonymizer
+
+            crypto.configure(pg_dsn)
+            pseudonymizer.configure(pg_dsn)
+        except ImportError:
+            pass
+
+    try:
+        state.storage = create_storage(state.config)
+        state.storage.connect()
+    except Exception:
+        state.storage = None
 
     if AuditLogger is not None:
         try:

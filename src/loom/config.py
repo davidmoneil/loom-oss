@@ -65,7 +65,9 @@ class CompressionConfig(BaseModel):
 
 
 class StorageConfig(BaseModel):
+    backend: str = "sqlite"
     database_path: str = "loom.db"
+    postgres_dsn: str = ""
 
 
 class ObservabilityConfig(BaseModel):
@@ -146,6 +148,12 @@ class LoomConfig(BaseModel):
         db_path = os.environ.get("LOOM_STORAGE_DATABASE_PATH")
         if db_path:
             self.storage.database_path = db_path
+        backend = os.environ.get("LOOM_STORAGE_BACKEND")
+        if backend:
+            self.storage.backend = backend
+        pg_dsn = os.environ.get("LOOM_POSTGRES_DSN")
+        if pg_dsn:
+            self.storage.postgres_dsn = pg_dsn
 
     # ------------------------------------------------------------------ accessors
     def get_provider(self, name: str) -> Optional[ProviderConfig]:

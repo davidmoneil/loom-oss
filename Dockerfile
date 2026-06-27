@@ -5,11 +5,17 @@ RUN groupadd -r loom && useradd -r -g loom -d /app -s /sbin/nologin loom
 
 WORKDIR /app
 
+ARG INSTALL_EXTRAS=""
+
 # Copy source + install (single layer for correct package-data inclusion)
 COPY pyproject.toml README.md ./
 COPY src/ ./src/
 COPY loom.example.yaml ./loom.example.yaml
-RUN pip install --no-cache-dir .
+RUN if [ -n "$INSTALL_EXTRAS" ]; then \
+      pip install --no-cache-dir ".[$INSTALL_EXTRAS]"; \
+    else \
+      pip install --no-cache-dir .; \
+    fi
 
 # Create data and log directories owned by loom user
 RUN mkdir -p /app/data /app/logs && chown -R loom:loom /app

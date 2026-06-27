@@ -11,6 +11,7 @@ build/
 .venv/
 venv/
 .env
+.env.*
 
 # Test / type-check caches
 .pytest_cache/
@@ -28,3 +29,4 @@ logs/
 
 # Local config (keep the example)
 loom.yaml
+loom.homelab.yaml
