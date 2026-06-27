@@ -16,6 +16,7 @@ import re
 import threading
 import time
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Optional
 
@@ -351,7 +352,7 @@ class SensitiveDataScanner:
             log_path = _DETECTIONS_DIR / "scanner-detections.jsonl"
             for match in matches:
                 entry = {
-                    "ts": time.time(),
+                    "ts": datetime.now(timezone.utc).isoformat(),
                     "rule": match.rule_name,
                     "action": next((r.action for r in self._rules if r.name == match.rule_name), "unknown"),
                     "session_id": session_id,

@@ -1,4 +1,6 @@
+import { useEffect } from "react";
 import { NavLink, Outlet } from "react-router-dom";
+import { api, setDisplayTimezone } from "../api.js";
 
 const NAV = [
   { to: "/", label: "Overview", end: true, icon: GridIcon },
@@ -8,6 +10,13 @@ const NAV = [
 ];
 
 export default function Layout() {
+  useEffect(() => {
+    api.config().then((cfg) => {
+      const tz = cfg?.server?.display_timezone;
+      if (tz) setDisplayTimezone(tz);
+    }).catch(() => {});
+  }, []);
+
   return (
     <div className="flex min-h-screen">
       <aside className="flex w-16 shrink-0 flex-col border-r border-border bg-card md:w-56">

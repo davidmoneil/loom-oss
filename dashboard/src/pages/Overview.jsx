@@ -13,7 +13,7 @@ import {
 } from "recharts";
 import StatCard from "../components/StatCard.jsx";
 import Chart, { CHART_COLORS, axisProps, tooltipStyle } from "../components/Chart.jsx";
-import { api, fmtNumber, fmtCost, fmtLatency } from "../api.js";
+import { api, fmtNumber, fmtCost, fmtLatency, fmtTimeShort } from "../api.js";
 
 const REFRESH_MS = 30000;
 
@@ -52,10 +52,7 @@ export default function Overview() {
 
   const m = metrics || {};
   const volume = (series?.buckets || []).map((b) => ({
-    label: new Date(b.ts * 1000).toLocaleTimeString([], {
-      hour: "2-digit",
-      minute: "2-digit",
-    }),
+    label: fmtTimeShort(b.ts),
     requests: b.requests,
   }));
   const byModel = Object.entries(series?.by_model || {}).map(([name, v]) => ({

@@ -15,7 +15,7 @@ import {
 } from "recharts";
 import Chart, { CHART_COLORS, axisProps, tooltipStyle } from "../components/Chart.jsx";
 import { Header } from "./Overview.jsx";
-import { api } from "../api.js";
+import { api, fmtTimeShort, fmtDateShort } from "../api.js";
 
 const RANGES = [
   { label: "24h", hours: 24, bucket: "1h" },
@@ -50,10 +50,7 @@ export default function Metrics() {
 
   const fmtBucket = useCallback(
     (ts) => {
-      const d = new Date(ts * 1000);
-      return range.bucket === "1d"
-        ? d.toLocaleDateString([], { month: "short", day: "numeric" })
-        : d.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+      return range.bucket === "1d" ? fmtDateShort(ts) : fmtTimeShort(ts);
     },
     [range]
   );

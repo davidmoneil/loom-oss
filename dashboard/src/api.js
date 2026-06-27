@@ -21,7 +21,21 @@ export const api = {
     });
     return getJSON(`/api/audit?${q.toString()}`);
   },
+  scannerRules: () => getJSON("/api/scanner/rules"),
+  scannerStats: () => getJSON("/api/scanner/stats"),
 };
+
+// Display timezone — loaded from server config, cached in module state.
+// Defaults to UTC until the config is fetched.
+let _displayTimezone = "UTC";
+
+export function setDisplayTimezone(tz) {
+  _displayTimezone = tz || "UTC";
+}
+
+export function getDisplayTimezone() {
+  return _displayTimezone;
+}
 
 export function fmtNumber(n) {
   if (n === null || n === undefined) return "—";
@@ -42,5 +56,43 @@ export function fmtLatency(ms) {
 
 export function fmtTime(epochSeconds) {
   if (!epochSeconds) return "—";
-  return new Date(epochSeconds * 1000).toLocaleString();
+  try {
+    return new Date(epochSeconds * 1000).toLocaleString(undefined, {
+      timeZone: _displayTimezone,
+    });
+  } catch {
+    return new Date(epochSeconds * 1000).toLocaleString();
+  }
+}
+
+export function fmtTimeShort(epochSeconds) {
+  if (!epochSeconds) return "—";
+  try {
+    return new Date(epochSeconds * 1000).toLocaleTimeString(undefined, {
+      timeZone: _displayTimezone,
+      hour: "2-digit",
+      minute: "2-digit",
+    });
+  } catch {
+    return new Date(epochSeconds * 1000).toLocaleTimeString([], {
+      hour: "2-digit",
+      minute: "2-digit",
+    });
+  }
+}
+
+export function fmtDateShort(epochSeconds) {
+  if (!epochSeconds) return "—";
+  try {
+    return new Date(epochSeconds * 1000).toLocaleDateString(undefined, {
+      timeZone: _displayTimezone,
+      month: "short",
+      day: "numeric",
+    });
+  } catch {
+    return new Date(epochSeconds * 1000).toLocaleDateString([], {
+      month: "short",
+      day: "numeric",
+    });
+  }
 }

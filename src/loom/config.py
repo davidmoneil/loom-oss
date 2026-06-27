@@ -90,6 +90,7 @@ class ServerConfig(BaseModel):
     host: str = "0.0.0.0"
     port: int = 4000
     log_level: str = "info"
+    display_timezone: str = "UTC"
 
 
 class LoomConfig(BaseModel):

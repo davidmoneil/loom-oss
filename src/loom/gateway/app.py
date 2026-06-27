@@ -1268,6 +1268,7 @@ def _sanitized_config(config: LoomConfig) -> dict:
             "host": config.server.host,
             "port": config.server.port,
             "log_level": config.server.log_level,
+            "display_timezone": config.server.display_timezone,
         },
         "providers": [
             {

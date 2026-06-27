@@ -10,7 +10,12 @@ from __future__ import annotations
 import json
 import os
 import time
+from datetime import datetime, timezone
 from typing import Any, Optional
+
+
+def _utc_iso() -> str:
+    return datetime.now(timezone.utc).isoformat()
 
 
 class AuditLogger:
@@ -66,7 +71,7 @@ class AuditLogger:
         status_code: int = 200,
     ) -> None:
         record = {
-            "ts": time.time(),
+            "ts": _utc_iso(),
             "request_id": request_id,
             "method": method,
             "path": path,
@@ -96,7 +101,7 @@ class AuditLogger:
         cost_estimate: float,
     ) -> None:
         record = {
-            "ts": time.time(),
+            "ts": _utc_iso(),
             "request_id": request_id,
             "model": model,
             "tokens_in": tokens_in,
@@ -128,7 +133,7 @@ class AuditLogger:
             return
 
         record: dict[str, Any] = {
-            "ts": time.time(),
+            "ts": _utc_iso(),
             "request_id": request_id,
             "model": model,
             "source": source,
