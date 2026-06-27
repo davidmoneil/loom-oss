@@ -78,6 +78,21 @@ try:
 except Exception:  # pragma: no cover - degraded mode
     SensitiveDataScanner = None  # type: ignore
 
+try:
+    from loom.compression.tiers import resolve_tier, strip_loom_tag, add_loom_tag, content_hash  # type: ignore
+except Exception:  # pragma: no cover - degraded mode
+    resolve_tier = None  # type: ignore
+
+try:
+    from loom.routing.programmatic_search import get_search_tier  # type: ignore
+except Exception:  # pragma: no cover - degraded mode
+    get_search_tier = None  # type: ignore
+
+try:
+    from loom.gateway.reroute import reroute_to_cloud, _ollama_generate_envelope, _ollama_chat_envelope  # type: ignore
+except Exception:  # pragma: no cover - degraded mode
+    reroute_to_cloud = None  # type: ignore
+
 
 # --------------------------------------------------------------------------- #
 #  Application state
@@ -1027,6 +1042,254 @@ def create_app() -> FastAPI:
         except Exception as exc:
             _audit_error(gw, request_id, "/v1/messages", source, 500)
             return _error_response(exc, request_id)
+
+    # ----------------------------------------------------------------- ollama-compat
+    @app.post("/api/generate")
+    async def ollama_generate(request: Request):
+        gw = state()
+        request_id = str(uuid.uuid4())
+        source = _source(request)
+        start = time.monotonic()
+        try:
+            body = await request.json()
+        except Exception:
+            return _error_response(ValueError("invalid JSON"), request_id, 400)
+
+        model_name = body.get("model", "")
+        prompt = body.get("prompt", "")
+        stream = body.get("stream", False)
+
+        if not model_name or not prompt:
+            return JSONResponse(
+                {"error": "model and prompt are required"},
+                status_code=400,
+                headers={"X-Loom-Request-Id": request_id},
+            )
+
+        # Programmatic search — skip LLM if search-shaped
+        if get_search_tier is not None and gw.config.routing.programmatic_search_enabled:
+            try:
+                search = get_search_tier(gw.config.routing.search_sources).search(prompt)
+                if search.tier == "zero-inference" and search.hits:
+                    lines = [f"{h.file}:{h.line_number}: {h.line}" for h in search.hits]
+                    result_text = f"Found {len(search.hits)} results:\n" + "\n".join(lines)
+                    elapsed_ms = (time.monotonic() - start) * 1000
+                    _record_request(
+                        gw, request_id=request_id, method="POST", path="/api/generate",
+                        source=source, provider="programmatic", model="zero-inference",
+                        requested_model=model_name, task_type="search",
+                        routing_reason=search.reason, status_code=200,
+                        latency_ms=elapsed_ms,
+                    )
+                    from loom.gateway.reroute import _ollama_generate_envelope
+                    return JSONResponse(
+                        _ollama_generate_envelope(
+                            model=model_name, response_text=result_text,
+                            total_duration_ns=int(elapsed_ms * 1e6),
+                        ),
+                        headers={"X-Loom-Request-Id": request_id},
+                    )
+            except Exception:
+                pass
+
+        resolved = gw.resolve_provider(model_name)
+        if resolved is None:
+            return JSONResponse(
+                {"error": f"unknown model: {model_name}"},
+                status_code=400,
+                headers={"X-Loom-Request-Id": request_id},
+            )
+        provider_name, model_cfg = resolved
+        backend = gw.backends.get(provider_name)
+        if backend is None:
+            return JSONResponse(
+                {"error": f"provider {provider_name} not configured"},
+                status_code=400,
+                headers={"X-Loom-Request-Id": request_id},
+            )
+
+        try:
+            if hasattr(backend, "generate"):
+                result = await backend.generate(
+                    model=model_cfg.model_id, prompt=prompt, stream=stream,
+                    **{k: body["options"][k] for k in body.get("options", {}) if k in ("temperature", "top_p", "top_k", "seed", "num_predict")},
+                )
+            else:
+                messages = [{"role": "user", "content": prompt}]
+                result = await backend.chat_completion(
+                    model=model_cfg.model_id, messages=messages,
+                    api_key=_bearer(request), stream=stream,
+                )
+
+            if stream:
+                return StreamingResponse(result, media_type="application/x-ndjson")
+
+            # Scan response
+            response_text = result.get("response", "")
+            if gw.scanner and gw.scanner.enabled and response_text:
+                scanned, _ = gw.scanner.apply(
+                    response_text, session_id=request_id,
+                    source=source, provider=provider_name, model=model_name,
+                )
+                if scanned != response_text:
+                    result["response"] = scanned
+
+            elapsed_ms = (time.monotonic() - start) * 1000
+            usage = _extract_usage(result, provider_name)
+            _record_request(
+                gw, request_id=request_id, method="POST", path="/api/generate",
+                source=source, provider=provider_name, model=model_cfg.model_id,
+                requested_model=model_name, task_type="general",
+                routing_reason="direct", status_code=200,
+                latency_ms=elapsed_ms, usage=usage,
+                cost=_model_cost(model_cfg, usage),
+            )
+            return JSONResponse(result, headers={"X-Loom-Request-Id": request_id})
+        except ProviderError as exc:
+            _audit_error(gw, request_id, "/api/generate", source, exc.status_code)
+            return _error_response(exc, request_id)
+        except Exception as exc:
+            _audit_error(gw, request_id, "/api/generate", source, 500)
+            return _error_response(exc, request_id)
+
+    @app.post("/api/chat")
+    async def ollama_chat(request: Request):
+        gw = state()
+        request_id = str(uuid.uuid4())
+        source = _source(request)
+        start = time.monotonic()
+        try:
+            body = await request.json()
+        except Exception:
+            return _error_response(ValueError("invalid JSON"), request_id, 400)
+
+        model_name = body.get("model", "")
+        messages = body.get("messages", [])
+        stream = body.get("stream", False)
+
+        if not model_name or not messages:
+            return JSONResponse(
+                {"error": "model and messages are required"},
+                status_code=400,
+                headers={"X-Loom-Request-Id": request_id},
+            )
+
+        resolved = gw.resolve_provider(model_name)
+        if resolved is None:
+            return JSONResponse(
+                {"error": f"unknown model: {model_name}"},
+                status_code=400,
+                headers={"X-Loom-Request-Id": request_id},
+            )
+        provider_name, model_cfg = resolved
+        backend = gw.backends.get(provider_name)
+        if backend is None:
+            return JSONResponse(
+                {"error": f"provider {provider_name} not configured"},
+                status_code=400,
+                headers={"X-Loom-Request-Id": request_id},
+            )
+
+        try:
+            result = await backend.chat_completion(
+                model=model_cfg.model_id, messages=messages,
+                api_key=_bearer(request), stream=stream,
+                **{k: body["options"][k] for k in body.get("options", {}) if k in ("temperature", "top_p", "top_k", "seed", "num_predict", "max_tokens")},
+            )
+
+            if stream:
+                return StreamingResponse(result, media_type="application/x-ndjson")
+
+            # Scan response
+            msg = result.get("message", {})
+            response_text = msg.get("content", "") if isinstance(msg, dict) else ""
+            if gw.scanner and gw.scanner.enabled and response_text:
+                scanned, _ = gw.scanner.apply(
+                    response_text, session_id=request_id,
+                    source=source, provider=provider_name, model=model_name,
+                )
+                if scanned != response_text and isinstance(msg, dict):
+                    result["message"]["content"] = scanned
+
+            elapsed_ms = (time.monotonic() - start) * 1000
+            usage = _extract_usage(result, provider_name)
+            _record_request(
+                gw, request_id=request_id, method="POST", path="/api/chat",
+                source=source, provider=provider_name, model=model_cfg.model_id,
+                requested_model=model_name, task_type="general",
+                routing_reason="direct", status_code=200,
+                latency_ms=elapsed_ms, usage=usage,
+                cost=_model_cost(model_cfg, usage), messages=messages,
+            )
+            return JSONResponse(result, headers={"X-Loom-Request-Id": request_id})
+        except ProviderError as exc:
+            _audit_error(gw, request_id, "/api/chat", source, exc.status_code)
+            return _error_response(exc, request_id)
+        except Exception as exc:
+            _audit_error(gw, request_id, "/api/chat", source, 500)
+            return _error_response(exc, request_id)
+
+    @app.get("/api/tags")
+    async def ollama_tags(request: Request):
+        gw = state()
+        models = []
+        for provider in gw.config.providers:
+            for model in provider.models:
+                models.append({
+                    "name": model.display_name or model.model_id,
+                    "model": model.model_id,
+                    "size": 0,
+                    "details": {
+                        "provider": provider.name,
+                        "tier": model.tier,
+                        "supports_tools": model.supports_tools,
+                    },
+                })
+        # Also fetch live Ollama models if available
+        ollama_backend = gw.backends.get("ollama")
+        if ollama_backend and hasattr(ollama_backend, "list_models_full"):
+            try:
+                live = await ollama_backend.list_models_full()
+                seen = {m["model"] for m in models}
+                for m in live.get("models", []):
+                    if m.get("name") not in seen and m.get("model") not in seen:
+                        models.append(m)
+            except Exception:
+                pass
+        return JSONResponse({"models": models})
+
+    @app.post("/api/show")
+    async def ollama_show(request: Request):
+        try:
+            body = await request.json()
+        except Exception:
+            return JSONResponse({"error": "invalid JSON"}, status_code=400)
+        name = body.get("name", "")
+        if not name:
+            return JSONResponse({"error": "name is required"}, status_code=400)
+        gw = state()
+        ollama_backend = gw.backends.get("ollama")
+        if ollama_backend and hasattr(ollama_backend, "show_model"):
+            try:
+                result = await ollama_backend.show_model(name)
+                if result:
+                    return JSONResponse(result)
+            except Exception:
+                pass
+        resolved = gw.resolve_provider(name)
+        if resolved:
+            _, model_cfg = resolved
+            return JSONResponse({
+                "modelfile": "",
+                "parameters": "",
+                "template": "",
+                "details": {
+                    "model_id": model_cfg.model_id,
+                    "tier": model_cfg.tier,
+                    "max_context_tokens": model_cfg.max_context_tokens,
+                },
+            })
+        return JSONResponse({"error": f"model not found: {name}"}, status_code=404)
 
     # ----------------------------------------------------------------- compress
     @app.post("/v1/compress")

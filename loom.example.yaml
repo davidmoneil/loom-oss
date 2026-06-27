@@ -34,8 +34,10 @@ providers:
         max_context_tokens: 128000
         cost_per_1k_input: 0.00015
         cost_per_1k_output: 0.0006
+  # In Docker: use http://host.docker.internal:11434
+  # On host: use http://localhost:11434
   - name: ollama
-    api_base: "http://localhost:11434"
+    api_base: "http://host.docker.internal:11434"
     models:
       - model_id: qwen2.5:7b
         display_name: qwen2.5:7b
@@ -59,6 +61,7 @@ routing:
 
 compression:
   enabled: true
+  default_tier: medium  # light | medium | heavy | extreme
 
 storage:
   database_path: data/loom.db
