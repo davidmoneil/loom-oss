@@ -630,8 +630,11 @@ async def _wrapped_stream(
                     full_text, source=source, provider=provider, model=model,
                 )
                 if matches:
+                    # Redactions change text length, so we can't slice by
+                    # original offsets. Instead, emit ALL scanned text in the
+                    # first content-bearing delta and empty subsequent ones.
                     rebuilt_lines = []
-                    text_offset = 0
+                    emitted = False
                     for line in lines:
                         if not line.startswith("data: "):
                             rebuilt_lines.append(line)
@@ -646,15 +649,13 @@ async def _wrapped_stream(
                             for choice in event.get("choices", []):
                                 delta = choice.get("delta", {})
                                 if "content" in delta and delta["content"]:
-                                    orig_len = len(delta["content"])
-                                    delta["content"] = scanned_text[text_offset:text_offset + orig_len]
-                                    text_offset += orig_len
+                                    delta["content"] = scanned_text if not emitted else ""
+                                    emitted = True
                                     changed = True
                             delta = event.get("delta", {})
                             if delta.get("type") == "text_delta" and delta.get("text"):
-                                orig_len = len(delta["text"])
-                                delta["text"] = scanned_text[text_offset:text_offset + orig_len]
-                                text_offset += orig_len
+                                delta["text"] = scanned_text if not emitted else ""
+                                emitted = True
                                 changed = True
                             if changed:
                                 rebuilt_lines.append(f"data: {json.dumps(event)}")

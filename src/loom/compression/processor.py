@@ -21,7 +21,7 @@ import re
 from collections import Counter
 from dataclasses import dataclass, field
 from datetime import datetime
-from typing import Optional
+from typing import Any, Optional
 
 logger = logging.getLogger(__name__)
 
@@ -308,6 +308,9 @@ def _extract_extension(source_hint: str) -> str:
 
 class ContentProcessor:
     """Evaluates content and applies adaptive compression."""
+
+    def __init__(self, config: Any = None) -> None:
+        self._config = config
 
     def detect_content_type(self, content: str, source_hint: str = "") -> str:
         hint_lower = source_hint.lower()
