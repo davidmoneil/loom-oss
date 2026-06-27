@@ -52,16 +52,21 @@ class SourcePolicy(BaseModel):
     )
     budget_tier: Optional[str] = None
     pinned_model: Optional[str] = None
+    compression_tier: Optional[str] = None
 
 
 class RoutingConfig(BaseModel):
     default_determinism_target: float = 0.7
     min_empirical_runs: int = 10
     routing_table_path: str = ""
+    reroute_enabled: bool = True
+    programmatic_search_enabled: bool = True
+    search_sources: dict[str, str] = Field(default_factory=dict)
 
 
 class CompressionConfig(BaseModel):
     enabled: bool = True
+    default_tier: str = "medium"
 
 
 class StorageConfig(BaseModel):
