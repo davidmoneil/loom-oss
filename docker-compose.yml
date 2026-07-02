@@ -1,14 +1,22 @@
 services:
   loom:
-    build: .
+    build:
+      context: .
+      args:
+        # setup.sh sets this to "postgres" in .env when a Postgres backend
+        # is selected, so psycopg + cryptography get baked into the image.
+        INSTALL_EXTRAS: ${LOOM_INSTALL_EXTRAS:-}
     ports:
-      - "4444:4444"
+      - "${LOOM_PORT:-4444}:4444"
     volumes:
       - ./loom.yaml:/app/loom.yaml:ro
       - loom-data:/app/data
       - loom-logs:/app/logs
     extra_hosts:
       - "host.docker.internal:host-gateway"
+    env_file:
+      - path: .env
+        required: false
     environment:
       LOOM_CONFIG: /app/loom.yaml
     deploy:
@@ -20,6 +28,26 @@ services:
           memory: 128M
     restart: unless-stopped
 
+  # Optional bundled database — enabled with the "postgres" profile
+  # (COMPOSE_PROFILES=postgres, written to .env by setup.sh).
+  postgres:
+    image: postgres:16-alpine
+    profiles: ["postgres"]
+    environment:
+      POSTGRES_DB: loom
+      POSTGRES_USER: loom
+      # setup.sh generates this; the postgres image refuses to start empty.
+      POSTGRES_PASSWORD: ${LOOM_PG_PASSWORD:-}
+    volumes:
+      - loom-pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U loom -d loom"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+
 volumes:
   loom-data:
   loom-logs:
+  loom-pgdata:

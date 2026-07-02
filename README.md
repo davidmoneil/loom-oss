@@ -7,39 +7,62 @@ EQRT — Empirically Qualified Routing Table — algorithm), **context compressi
 get cost-aware model selection, token reduction, and an audit trail without changing your
 application code.
 
-## Quickstart
+## Quickstart (Docker)
 
 ```bash
-# Install (editable, with dev extras)
-pip install -e ".[dev]"
-
-# Create your local config from the example
-cp loom.example.yaml loom.yaml
-# edit loom.yaml — add provider API keys via env vars, tune sources/routing
-
-# Run the gateway
-loom serve
-# or directly:
-uvicorn loom.gateway.app:app --host 0.0.0.0 --port 4000
+git clone <this repo> && cd loom-oss
+./setup.sh
 ```
 
-## Docker Quickstart
+`setup.sh` creates `loom.yaml` from the example, asks which storage backend you
+want — SQLite (default), an existing PostgreSQL (you provide the DSN), or a
+bundled PostgreSQL started alongside the gateway — writes `.env`, and brings the
+stack up with `docker compose`. The gateway listens on port `4444`.
+
+Manual equivalent:
 
 ```bash
 cp loom.example.yaml loom.yaml   # then edit
-docker compose up
+docker compose up -d --build
 ```
 
-The gateway listens on port `4000` by default.
+## Quickstart (bare Python)
+
+```bash
+pip install -e ".[dev]"          # add ,postgres for the Postgres backend
+cp loom.example.yaml loom.yaml   # then edit
+loom serve
+# or directly:
+uvicorn loom.gateway.app:app --host 0.0.0.0 --port 4444
+```
+
+Requests authenticate to upstream providers with the caller's own credentials
+(`Authorization` / `x-api-key` headers are passed through) — the gateway holds
+no provider keys.
+
+## Storage backends
+
+| Backend | Selection | Notes |
+|---------|-----------|-------|
+| SQLite (default) | `storage.backend: sqlite` | zero dependencies; `data/loom.db` |
+| PostgreSQL | `storage.backend: postgres` + `postgres_dsn` (or `LOOM_POSTGRES_DSN`) | install extras: `pip install -e ".[postgres]"` |
 
 ## Key Endpoints
 
 | Method | Path                       | Purpose                                       |
 |--------|----------------------------|-----------------------------------------------|
 | POST   | `/v1/chat/completions`     | OpenAI-compatible chat completions (proxied)  |
-| GET    | `/health`                  | Liveness/readiness check                      |
-| GET    | `/v1/models`               | List models available across configured providers |
-| GET    | `/stats`                   | Recent routing + usage statistics             |
+| POST   | `/v1/messages`             | Anthropic-compatible messages (proxied)       |
+| GET    | `/health`                  | Liveness + rollup counters                    |
+| GET    | `/api/models`              | Models available across configured providers  |
+| GET    | `/api/costs`               | Cost/usage/savings aggregates ([contract](docs/observability-api.md)) |
+| GET    | `/api/audit`               | Per-request audit trail                       |
+| GET    | `/api/sessions`            | Session rollup                                |
+| GET    | `/api/metrics`             | Recent routing + usage statistics             |
+
+The observability endpoints follow a stable v1 contract
+(`docs/observability-api.md`) so external dashboards and reporting tools are
+independent of the gateway implementation.
 
 ## Architecture
 
@@ -52,8 +75,12 @@ Loom is organized into a few focused layers:
 - **Detection** (`loom.detection`) — classifies incoming requests (task type, capability
   needs) to inform routing.
 - **Observability** (`loom.observability`) — fire-and-forget JSONL audit and metrics logs,
-  backed by a SQLite store (`loom.storage`) for routing decisions, metrics, sessions, and
-  the compression cache.
+  backed by a pluggable store (`loom.storage`, SQLite or PostgreSQL) for routing decisions,
+  metrics, and the compression cache.
 
 Configuration is loaded from `loom.yaml` (see `loom.example.yaml`) with `LOOM_*` environment
 variable overrides.
+
+## License
+
+Apache-2.0 — see [LICENSE](LICENSE).

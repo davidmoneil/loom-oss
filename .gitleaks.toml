@@ -1,0 +1,7 @@
+[extend]
+useDefault = true
+
+# tests/test_scanner.py contains intentional synthetic secrets (truncated key
+# headers, the jwt.io demo token) used as DLP scanner test vectors.
+[allowlist]
+paths = ["tests/test_scanner.py"]
