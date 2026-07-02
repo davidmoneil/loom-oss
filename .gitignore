@@ -30,3 +30,8 @@ logs/
 # Local config (keep the example)
 loom.yaml
 loom.homelab.yaml
+
+# Homelab/local environment files
+.env
+.env.*
+graphify-out/

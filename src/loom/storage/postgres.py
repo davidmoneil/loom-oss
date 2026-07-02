@@ -1,4 +1,4 @@
-"""Postgres storage backend for Loom (homelab branch).
+"""Postgres storage backend for Loom.
 
 Drop-in replacement for the SQLite :class:`LoomStorage` backend. Uses
 ``psycopg`` (v3) with ``autocommit=True`` and thread-safe connection management.
@@ -23,7 +23,7 @@ SCHEMA_VERSION = 3
 class PostgresStorage:
     """Postgres storage backend implementing the same interface as LoomStorage."""
 
-    def __init__(self, dsn: str = "postgresql://n8n@localhost:5434/pgvector_db") -> None:
+    def __init__(self, dsn: str = "postgresql://localhost:5432/loom") -> None:
         self.dsn = dsn
         self._conn = None
         self._conn_lock = threading.Lock()

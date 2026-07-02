@@ -64,7 +64,11 @@ compression:
   default_tier: medium  # light | medium | heavy | extreme
 
 storage:
+  backend: sqlite            # sqlite (default) | postgres
   database_path: data/loom.db
+  # For backend: postgres — install extras (pip install 'loom-gateway[postgres]')
+  # and provide a DSN here or via the LOOM_POSTGRES_DSN environment variable:
+  # postgres_dsn: postgresql://user:pass@localhost:5432/loom
 
 observability:
   audit_log_path: logs/audit.jsonl
