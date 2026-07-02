@@ -348,6 +348,102 @@ class PostgresStorage:
             "avg_latency_ms": metric_row[4] if metric_row else 0.0,
         }
 
+    _TOKENS_SAVED_SQL = (
+        "COALESCE(SUM(CASE WHEN compressed = 1 AND compression_ratio > 0 "
+        "AND compression_ratio < 1 "
+        "THEN CAST(tokens_in * (1.0 / compression_ratio - 1.0) AS INTEGER) "
+        "ELSE 0 END), 0)"
+    )
+
+    def get_cost_summary(self, days: int = 30) -> dict:
+        """Aggregates for the observability /api/costs contract.
+
+        compression_ratio is tokens_after / tokens_before, so the saved-token
+        estimate per row is tokens_in * (1/ratio - 1) for compressed rows.
+        """
+        since = time.time() - days * 86400
+        hour_since = time.time() - 24 * 3600
+        saved = self._TOKENS_SAVED_SQL
+
+        agg = (
+            "COUNT(*) AS requests, "
+            "COALESCE(SUM(tokens_in), 0) AS tokens_in, "
+            "COALESCE(SUM(tokens_out), 0) AS tokens_out, "
+            "COALESCE(SUM(cost_estimate), 0.0) AS cost_usd, "
+            f"{saved} AS tokens_saved"
+        )
+
+        def _bucket(row) -> dict:
+            return {
+                "requests": row[-5],
+                "tokens_in": int(row[-4]),
+                "tokens_out": int(row[-3]),
+                "cost_usd": float(row[-2]),
+                "tokens_saved": int(row[-1]),
+            }
+
+        t = self.conn.execute(
+            f"SELECT {agg} FROM metrics WHERE timestamp >= %s", (since,)
+        ).fetchone()
+        totals = _bucket(t)
+
+        by_model = [
+            {"model": r[0], **_bucket(r)}
+            for r in self.conn.execute(
+                f"""
+                SELECT COALESCE(model, 'unknown') AS model, {agg}
+                FROM metrics WHERE timestamp >= %s
+                GROUP BY model ORDER BY cost_usd DESC
+                """,
+                (since,),
+            ).fetchall()
+        ]
+        by_source = [
+            {"source": r[0], **_bucket(r)}
+            for r in self.conn.execute(
+                f"""
+                SELECT COALESCE(source, 'unknown') AS source, {agg}
+                FROM metrics WHERE timestamp >= %s
+                GROUP BY source ORDER BY cost_usd DESC
+                """,
+                (since,),
+            ).fetchall()
+        ]
+        by_day = [
+            {"date": r[0], **_bucket(r)}
+            for r in self.conn.execute(
+                f"""
+                SELECT to_char(to_timestamp(timestamp), 'YYYY-MM-DD') AS date, {agg}
+                FROM metrics WHERE timestamp >= %s
+                GROUP BY date ORDER BY date ASC
+                """,
+                (since,),
+            ).fetchall()
+        ]
+        by_hour = [
+            {"hour": r[0], "requests": r[1], "tokens_saved": int(r[2])}
+            for r in self.conn.execute(
+                f"""
+                SELECT to_char(date_trunc('hour', to_timestamp(timestamp)),
+                               'YYYY-MM-DD"T"HH24:00:00"Z"') AS hour,
+                       COUNT(*) AS requests, {saved} AS tokens_saved
+                FROM metrics WHERE timestamp >= %s
+                GROUP BY hour ORDER BY hour ASC
+                """,
+                (hour_since,),
+            ).fetchall()
+        ]
+
+        return {
+            "window_days": days,
+            "totals": totals,
+            "by_model": by_model,
+            "by_source": by_source,
+            "by_tier": [],
+            "by_day": by_day,
+            "by_hour": by_hour,
+        }
+
     def get_metrics_timeseries(
         self, hours: int = 24, bucket_seconds: int = 3600
     ) -> dict:

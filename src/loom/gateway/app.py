@@ -107,6 +107,9 @@ class GatewayState:
     """Holds long-lived objects created at startup and reused per request."""
 
     def __init__(self) -> None:
+        self.started_at: float = time.time()
+        self.request_count: int = 0
+        self.error_count: int = 0
         self.config: LoomConfig = LoomConfig()
         self.backends: dict[str, ProviderBackend] = {}
         # model id / display name -> (provider_name, ModelConfig)
@@ -946,7 +949,12 @@ def create_app() -> FastAPI:
                 status_code=429,
                 headers={"Retry-After": "60"},
             )
-        return await call_next(request)
+        gw = state()
+        gw.request_count += 1
+        response = await call_next(request)
+        if response.status_code >= 500:
+            gw.error_count += 1
+        return response
 
     def state() -> GatewayState:
         return app.state.gateway
@@ -1480,11 +1488,81 @@ def create_app() -> FastAPI:
         return {
             "status": "healthy",
             "version": __version__,
+            "uptime_seconds": round(time.time() - gw.started_at, 1),
+            "requests": gw.request_count,
+            "errors": gw.error_count,
             "providers": [p.name for p in gw.config.providers],
             "routing_table_loaded": gw.routing is not None,
-            "compression_enabled": gw.compression is not None,
             "detection_enabled": gw.detection is not None,
             "scanner_enabled": gw.scanner is not None and gw.scanner.enabled,
+            # Observability contract blocks (docs/observability-api.md).
+            # Token rollups stay zero until per-request compression savings
+            # are recorded (see docs/gap-analysis.md).
+            "compression": {
+                "enabled": gw.compression is not None,
+                "default_tier": gw.config.compression.default_tier,
+                "tokens_before": 0,
+                "tokens_after": 0,
+                "tokens_saved": 0,
+                "compression_ratio": 0.0,
+            },
+            "sessions": {"supported": False, "sessions": 0, "total_turns": 0},
+        }
+
+    # ------------------------------------------------------- costs (contract)
+    def _input_rate_per_1k(gw: GatewayState, model: str) -> float:
+        entry = gw.model_index.get(model)
+        return entry[1].cost_per_1k_input if entry else 0.0
+
+    @app.get("/api/costs")
+    async def api_costs(days: int = 30):
+        gw = state()
+        empty = {
+            "window_days": days,
+            "totals": {
+                "requests": 0,
+                "tokens_in": 0,
+                "tokens_out": 0,
+                "cost_usd": 0.0,
+                "tokens_saved": 0,
+                "savings_usd": 0.0,
+            },
+            "by_model": [],
+            "by_source": [],
+            "by_tier": [],
+            "by_day": [],
+            "by_hour": [],
+        }
+        if gw.storage is None:
+            return empty
+        try:
+            summary = _jsonable(gw.storage.get_cost_summary(days))
+        except Exception:
+            return empty
+
+        total_savings = 0.0
+        for bucket in summary["by_model"]:
+            rate = _input_rate_per_1k(gw, bucket["model"])
+            bucket["savings_usd"] = round(bucket["tokens_saved"] / 1000 * rate, 4)
+            total_savings += bucket["savings_usd"]
+        for bucket in summary["by_source"] + summary["by_day"]:
+            bucket.setdefault("savings_usd", 0.0)
+        for bucket in summary["by_hour"]:
+            bucket.setdefault("savings_usd", 0.0)
+        summary["totals"]["savings_usd"] = round(total_savings, 4)
+        return summary
+
+    # ---------------------------------------------------- sessions (contract)
+    @app.get("/api/sessions")
+    async def api_sessions(hours: int = 24):
+        # Session tracking is not yet implemented in loom-oss
+        # (docs/gap-analysis.md); the contract shape is served regardless.
+        return {
+            "supported": False,
+            "hours": hours,
+            "sessions": 0,
+            "total_turns": 0,
+            "entries": [],
         }
 
     # ------------------------------------------------------------------- models
