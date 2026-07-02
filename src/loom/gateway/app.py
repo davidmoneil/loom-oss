@@ -1005,6 +1005,24 @@ def create_app() -> FastAPI:
                 )
 
             forward = _passthrough_params(body)
+
+            # Session tracking.
+            session_id = derive_session_id(messages, source)
+            if gw.storage is not None and session_id != "unknown":
+                try:
+                    gw.storage.touch_session(session_id, source)
+                except Exception:
+                    pass
+
+            # Inline compression: compress older messages before forwarding.
+            comp_before = comp_after = 0
+            if gw.compression is not None and len(messages) > 2:
+                messages, comp_before, comp_after = _compress_messages_inline(
+                    gw.compression, messages, gw.storage
+                )
+                gw.comp_tokens_before += comp_before
+                gw.comp_tokens_after += comp_after
+
             result = await backend.chat_completion(
                 model=model_cfg.model_id,
                 messages=messages,
@@ -1023,6 +1041,10 @@ def create_app() -> FastAPI:
                 "requested_model": body.get("model"),
                 "task_type": task_type,
                 "routing_reason": routing_reason,
+                "compressed": comp_after < comp_before,
+                "compression_ratio": (
+                    round(comp_after / comp_before, 4) if comp_before > 0 else 1.0
+                ),
             }
 
             if stream:
