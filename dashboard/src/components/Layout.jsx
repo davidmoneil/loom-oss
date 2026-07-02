@@ -7,6 +7,7 @@ const NAV = [
   { to: "/metrics", label: "Metrics", icon: ChartIcon },
   { to: "/audit", label: "Audit", icon: ListIcon },
   { to: "/scanner", label: "Data Protection", icon: ShieldIcon },
+  { to: "/governor", label: "Governor", icon: GaugeIcon },
 ];
 
 export default function Layout() {
@@ -55,6 +56,16 @@ export default function Layout() {
         <Outlet />
       </main>
     </div>
+  );
+}
+
+function GaugeIcon() {
+  return (
+    <svg className="h-5 w-5 shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth="2">
+      <path d="M12 15a3 3 0 1 0 0-6 3 3 0 0 0 0 6z" />
+      <path d="M19.4 15a7.97 7.97 0 0 0 0-6M4.6 9a7.97 7.97 0 0 0 0 6" />
+      <path d="M12 3v3M4.9 4.9l2.1 2.1M19.1 4.9 17 7" />
+    </svg>
   );
 }
 

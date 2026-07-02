@@ -7,6 +7,22 @@ async function getJSON(path) {
   return res.json();
 }
 
+async function patchJSON(path, body) {
+  const res = await fetch(path, {
+    method: "PATCH",
+    headers: { "Content-Type": "application/json", Accept: "application/json" },
+    body: JSON.stringify(body),
+  });
+  if (!res.ok) throw new Error(`${path} -> ${res.status}`);
+  return res.json();
+}
+
+async function deleteJSON(path) {
+  const res = await fetch(path, { method: "DELETE", headers: { Accept: "application/json" } });
+  if (!res.ok) throw new Error(`${path} -> ${res.status}`);
+  return res.json();
+}
+
 export const api = {
   metrics: () => getJSON("/api/metrics"),
   timeseries: (hours = 24, bucket = "1h") =>
@@ -23,6 +39,11 @@ export const api = {
   },
   scannerRules: () => getJSON("/api/scanner/rules"),
   scannerStats: () => getJSON("/api/scanner/stats"),
+  governorSettings: () => getJSON("/api/governor"),
+  governorStatus: () => getJSON("/api/governor/status"),
+  updateGovernor: (updates) => patchJSON("/api/governor", updates),
+  deleteGovernorOverride: (job) =>
+    deleteJSON(`/api/governor/class-overrides/${encodeURIComponent(job)}`),
 };
 
 // Display timezone — loaded from server config, cached in module state.

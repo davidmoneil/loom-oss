@@ -79,6 +79,12 @@ except Exception:  # pragma: no cover - degraded mode
     SensitiveDataScanner = None  # type: ignore
 
 try:
+    from loom.governor import GovernorValidationError, ThrottleGovernor  # type: ignore
+except Exception:  # pragma: no cover - degraded mode
+    ThrottleGovernor = None  # type: ignore
+    GovernorValidationError = None  # type: ignore
+
+try:
     from loom.compression.tiers import resolve_tier, strip_loom_tag, add_loom_tag, content_hash  # type: ignore
 except Exception:  # pragma: no cover - degraded mode
     resolve_tier = None  # type: ignore
@@ -111,6 +117,7 @@ class GatewayState:
         self.detection: Any = None
         self.compression: Any = None
         self.scanner: Any = None
+        self.governor: Any = None
 
     def build_backend(self, provider_name: str, api_base: str) -> ProviderBackend:
         name = provider_name.lower()
@@ -817,6 +824,12 @@ async def lifespan(app: FastAPI):
         except Exception:
             state.storage = None
 
+    if ThrottleGovernor is not None:
+        try:
+            state.governor = ThrottleGovernor()
+        except Exception:
+            state.governor = None
+
     if AuditLogger is not None:
         try:
             state.audit = AuditLogger(
@@ -1052,6 +1065,11 @@ def create_app() -> FastAPI:
 
             forward = _passthrough_params(body, anthropic=True)
             actual_model = model_cfg.model_id if model_cfg else model
+
+            # Inline compression: compress older messages before forwarding.
+            if gw.compression is not None and len(messages) > 2:
+                messages = _compress_messages_inline(gw.compression, messages)
+
             result = await backend.chat_completion(
                 model=actual_model,
                 messages=messages,
@@ -1580,6 +1598,46 @@ def create_app() -> FastAPI:
             return {"enabled": False, "total_scans": 0, "total_detections": 0, "by_rule": {}}
         return {"enabled": gw.scanner.enabled, **gw.scanner.stats()}
 
+    # ----------------------------------------------------------- governor
+    @app.get("/api/governor/status")
+    async def api_governor_status():
+        gw = state()
+        if gw.governor is None:
+            return JSONResponse({"error": "governor not available"}, status_code=503)
+        return gw.governor.status()
+
+    @app.get("/api/governor")
+    async def api_governor_get():
+        gw = state()
+        if gw.governor is None:
+            return JSONResponse({"error": "governor not available"}, status_code=503)
+        return gw.governor.get_settings()
+
+    @app.patch("/api/governor")
+    async def api_governor_update(request: Request):
+        gw = state()
+        if gw.governor is None:
+            return JSONResponse({"error": "governor not available"}, status_code=503)
+        try:
+            body = await request.json()
+        except Exception:
+            return JSONResponse({"error": "invalid JSON"}, status_code=400)
+        allowed = {"enabled", "tier_thresholds", "class_overrides"}
+        updates = {k: v for k, v in body.items() if k in allowed}
+        if not updates:
+            return JSONResponse({"error": "no valid fields"}, status_code=400)
+        try:
+            return gw.governor.update(updates, actor="dashboard")
+        except GovernorValidationError as e:
+            return JSONResponse({"error": str(e)}, status_code=400)
+
+    @app.delete("/api/governor/class-overrides/{job}")
+    async def api_governor_delete_override(job: str):
+        gw = state()
+        if gw.governor is None:
+            return JSONResponse({"error": "governor not available"}, status_code=503)
+        return gw.governor.delete_class_override(job, actor="dashboard")
+
     # ----------------------------------------------------------- dashboard (SPA)
     # Mounted LAST so API routes always take priority over the static catch-all.
     dashboard_dir = (
@@ -1620,6 +1678,33 @@ _BUCKET_SIZES = {"5m": 300, "15m": 900, "1h": 3600, "1d": 86400}
 
 def _bucket_seconds(bucket: str) -> int:
     return _BUCKET_SIZES.get((bucket or "1h").lower(), 3600)
+
+
+def _compress_messages_inline(processor: Any, messages: list[dict]) -> list[dict]:
+    """Compress older messages in-place before forwarding to the provider.
+
+    Skips the last 2 messages (active context) and applies graduated
+    compression to everything else — oldest messages get compressed most.
+    """
+    n = len(messages)
+    if n <= 2:
+        return messages
+    compressed: list[dict] = []
+    for idx, msg in enumerate(messages):
+        if idx >= n - 2:
+            compressed.append(msg)
+            continue
+        content = msg.get("content", "")
+        text = content if isinstance(content, str) else json.dumps(content)
+        age_ratio = idx / max(n - 1, 1)
+        new_text = _run_compress_graduated(processor, text, age_ratio)
+        if new_text != text:
+            out = dict(msg)
+            out["content"] = new_text
+            compressed.append(out)
+        else:
+            compressed.append(msg)
+    return compressed
 
 
 def _run_compress_graduated(processor: Any, text: str, age_ratio: float) -> str:
