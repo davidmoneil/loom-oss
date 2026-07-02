@@ -1631,7 +1631,7 @@ def create_app() -> FastAPI:
         if gw.storage is None:
             return {"total": 0, "offset": offset, "limit": limit, "entries": []}
         try:
-            return _jsonable(
+            page = _jsonable(
                 gw.storage.get_audit_entries(
                     limit=limit,
                     offset=offset,
@@ -1641,6 +1641,12 @@ def create_app() -> FastAPI:
                     search=search,
                 )
             )
+            # Contract aliases (docs/observability-api.md) alongside the
+            # storage-native names so both consumer generations work.
+            for entry in page.get("entries", []):
+                entry.setdefault("model", entry.get("model_used"))
+                entry.setdefault("cost_usd", entry.get("cost_estimate"))
+            return page
         except Exception:
             return {"total": 0, "offset": offset, "limit": limit, "entries": []}
 
