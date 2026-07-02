@@ -1,0 +1,122 @@
+server:
+  host: "0.0.0.0"
+  port: 4444
+  log_level: info
+  display_timezone: "America/Denver"
+
+providers:
+  - name: anthropic
+    api_base: "https://api.anthropic.com"
+    models:
+      - model_id: claude-fable-5
+        display_name: fable-5
+        tier: premium
+        supports_tools: true
+        supports_json_mode: true
+        max_context_tokens: 200000
+        cost_per_1k_input: 0.010
+        cost_per_1k_output: 0.050
+      - model_id: claude-opus-4-8
+        display_name: opus-4.8
+        tier: premium
+        supports_tools: true
+        supports_json_mode: true
+        max_context_tokens: 1000000
+        cost_per_1k_input: 0.005
+        cost_per_1k_output: 0.025
+      - model_id: claude-sonnet-4-6
+        display_name: sonnet-4.6
+        tier: standard
+        supports_tools: true
+        supports_json_mode: true
+        max_context_tokens: 1000000
+        cost_per_1k_input: 0.003
+        cost_per_1k_output: 0.015
+      - model_id: claude-haiku-4-5-20251001
+        display_name: haiku-4.5
+        tier: economy
+        supports_tools: true
+        supports_json_mode: true
+        max_context_tokens: 200000
+        cost_per_1k_input: 0.001
+        cost_per_1k_output: 0.005
+  - name: openai
+    api_base: "https://api.openai.com/v1"
+    models:
+      - model_id: gpt-4o
+        display_name: gpt-4o
+        tier: standard
+        supports_tools: true
+        supports_json_mode: true
+        max_context_tokens: 128000
+        cost_per_1k_input: 0.005
+        cost_per_1k_output: 0.015
+      - model_id: gpt-4o-mini
+        display_name: gpt-4o-mini
+        tier: economy
+        supports_tools: true
+        supports_json_mode: true
+        max_context_tokens: 128000
+        cost_per_1k_input: 0.00015
+        cost_per_1k_output: 0.0006
+  - name: ollama
+    api_base: "http://host.docker.internal:11434"
+    models:
+      - model_id: qwen3:8b
+        display_name: qwen3-8b
+        tier: economy
+        supports_tools: false
+        max_context_tokens: 40960
+      - model_id: qwen3:1.7b
+        display_name: qwen3-1.7b
+        tier: economy
+        supports_tools: false
+        max_context_tokens: 32768
+
+sources:
+  default:
+    minimum_tier: economy
+    requires_tools: false
+    allowed_providers: [anthropic, openai, ollama]
+  critical:
+    minimum_tier: standard
+    requires_tools: true
+    allowed_providers: [anthropic]
+  headless:
+    minimum_tier: economy
+    requires_tools: false
+    allowed_providers: [anthropic, openai, ollama]
+
+routing:
+  default_determinism_target: 0.7
+  min_empirical_runs: 10
+
+compression:
+  enabled: true
+
+storage:
+  backend: postgres
+  database_path: data/loom.db
+  postgres_dsn: ""
+
+observability:
+  audit_log_path: logs/audit.jsonl
+  metrics_log_path: logs/metrics.jsonl
+
+scanner:
+  enabled: true
+  sanitize_logs: true
+  content_logging: "after_scan"
+  streaming_mode: buffer
+  log_detections: true
+  model_tags:
+    qwen3: [local]
+    llama3: [local]
+    gemma3: [local]
+    gemma4: [local]
+    mistral: [local]
+    phi4: [local]
+    deepseek: [local]
+    codestral: [local]
+  trusted_tags:
+    - local

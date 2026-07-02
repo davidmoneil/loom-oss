@@ -27,11 +27,12 @@ dashboard/.vite/
 data/
 logs/
 
-# Local config (keep the example)
+# Local config (keep the example; loom.homelab.yaml is tracked — it holds no
+# secrets, the Postgres DSN comes from .env.homelab / LOOM_POSTGRES_DSN)
 loom.yaml
-loom.homelab.yaml
 
-# Homelab/local environment files
+# Homelab/local environment files (keep *.example)
 .env
 .env.*
+!.env.homelab.example
 graphify-out/
