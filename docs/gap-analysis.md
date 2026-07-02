@@ -166,3 +166,38 @@
 3. **Pulse dual-write** — Your observability pipeline
 4. **Session/learn endpoints** — Nexus integration
 5. **Postgres pseudonymization + encryption keys** — DLP completeness
+
+---
+
+## Status Update — 2026-07-02
+
+Landed since this analysis was written:
+
+- **PORT items 1–4 + governor**: 4-tier compression, cloud rerouting, Ollama
+  proxy endpoints, programmatic search, throttle governor (commits `bed3c59`,
+  `bea1f01`).
+- **Postgres storage backend** (top PORT-HOMELAB item): merged from the
+  `homelab` branch into `main` behind a pluggable `create_storage()` factory —
+  SQLite default, Postgres via `storage.backend` / `LOOM_POSTGRES_DSN`. The
+  `homelab` branch is deleted; homelab deployment is now `main` +
+  `loom.homelab.yaml` + `.env.homelab` (both gitignored). Tests cover both
+  backends (`tests/test_storage.py`).
+- **Observability API v1** (`docs/observability-api.md`): `/api/costs`,
+  `/api/audit`, `/api/sessions`, extended `/health` — implemented here and as
+  an adapter on the internal proxy, consumed by the Nexus dashboard. This
+  replaces file-coupled consumers and makes cutover timing invisible to them.
+- **Portability**: `setup.sh`, compose `postgres` profile, `LOOM_PORT`
+  override, LICENSE, README overhaul. Repo pushed to private GitHub
+  (`davidmoneil/loom-oss`); fresh-clone acceptance test passed (clone → setup
+  → request via ollama → visible in `/api/audit`).
+
+Remaining before cutover of interactive traffic (AIProjects-wmhx):
+
+1. **Per-request compression savings recording** — `_record_request` does not
+   yet populate `compressed`/`compression_ratio`, so `/api/costs` savings and
+   `/health` compression rollups report zeros here.
+2. **Session tracking** — `sessions` table exists (Postgres) but nothing
+   writes it; `/api/sessions` reports `supported: false`.
+3. **`count_tokens` endpoint** — ~0.4% of interactive traffic.
+4. **Persona system, Pulse dual-write, session/learn endpoints** — unchanged
+   from the list above.
