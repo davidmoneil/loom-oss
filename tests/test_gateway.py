@@ -141,3 +141,18 @@ def test_high_entropy():
     assert _is_high_entropy("550e8400-e29b-41d4-a716-446655440000")  # UUID
     assert not _is_high_entropy("hello world")
     assert not _is_high_entropy("short")
+
+
+def test_anthropic_auth_header_style():
+    """OAuth tokens use Authorization: Bearer; API keys use x-api-key."""
+    from loom.gateway.providers.anthropic import AnthropicBackend
+
+    backend = AnthropicBackend("https://api.anthropic.com")
+    oauth = backend._headers("sk-ant-oat01-abc123")
+    assert oauth["Authorization"] == "Bearer sk-ant-oat01-abc123"
+    assert "x-api-key" not in oauth
+    assert oauth["anthropic-beta"] == "oauth-2025-04-20"
+
+    key = backend._headers("sk-ant-api03-xyz")
+    assert key["x-api-key"] == "sk-ant-api03-xyz"
+    assert "Authorization" not in key

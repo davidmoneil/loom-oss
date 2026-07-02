@@ -34,7 +34,14 @@ class AnthropicBackend(ProviderBackend):
             "anthropic-version": ANTHROPIC_VERSION,
         }
         if api_key:
-            headers["x-api-key"] = api_key
+            # OAuth access tokens (sk-ant-oat...) authenticate via
+            # Authorization: Bearer, not x-api-key — interactive Claude Code
+            # sessions use these. API keys keep the x-api-key header.
+            if api_key.startswith("sk-ant-oat"):
+                headers["Authorization"] = f"Bearer {api_key}"
+                headers["anthropic-beta"] = "oauth-2025-04-20"
+            else:
+                headers["x-api-key"] = api_key
         return headers
 
     async def chat_completion(
