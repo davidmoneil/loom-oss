@@ -20,8 +20,10 @@ affected feature degrades gracefully rather than crashing the process.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import pathlib
+import re
 import threading
 import time
 import uuid
@@ -110,6 +112,9 @@ class GatewayState:
         self.started_at: float = time.time()
         self.request_count: int = 0
         self.error_count: int = 0
+        # Cumulative compression rollup (estimated tokens) for /health.
+        self.comp_tokens_before: int = 0
+        self.comp_tokens_after: int = 0
         self.config: LoomConfig = LoomConfig()
         self.backends: dict[str, ProviderBackend] = {}
         # model id / display name -> (provider_name, ModelConfig)
@@ -221,6 +226,8 @@ def _record_request(
     cost: float = 0.0,
     messages: Optional[list[dict]] = None,
     response_text: Optional[str] = None,
+    compressed: bool = False,
+    compression_ratio: float = 1.0,
 ) -> None:
     """Persist + audit a completed request. Never raises into the request path."""
     tokens_in, tokens_out = _extract_tokens(usage)
@@ -238,6 +245,8 @@ def _record_request(
                 latency_ms=latency_ms,
                 cost=cost,
                 source=source,
+                compressed=compressed,
+                compression_ratio=compression_ratio,
             )
         except Exception:
             pass
@@ -1045,6 +1054,35 @@ def create_app() -> FastAPI:
             _audit_error(gw, request_id, "/v1/chat/completions", source, 500)
             return _error_response(exc, request_id)
 
+    # ------------------------------------------- count_tokens (Anthropic passthrough)
+    @app.post("/v1/messages/count_tokens")
+    async def count_tokens_endpoint(request: Request):
+        gw = state()
+        request_id = str(uuid.uuid4())
+        backend = gw.backends.get("anthropic")
+        counter = getattr(backend, "count_tokens", None)
+        if not callable(counter):
+            return _error_response(
+                ProviderError("no Anthropic backend configured", status_code=500),
+                request_id,
+                500,
+            )
+        try:
+            body = await request.json()
+        except Exception:
+            return _error_response(
+                ProviderError("invalid JSON body", status_code=400), request_id, 400
+            )
+        try:
+            status_code, payload = await counter(body, dict(request.headers))
+            return JSONResponse(
+                payload,
+                status_code=status_code,
+                headers={"X-Loom-Request-Id": request_id},
+            )
+        except ProviderError as exc:
+            return _error_response(exc, request_id)
+
     # -------------------------------------------------------- messages (Anthropic)
     @app.post("/v1/messages")
     async def messages_endpoint(request: Request):
@@ -1084,9 +1122,22 @@ def create_app() -> FastAPI:
             forward = _passthrough_params(body, anthropic=True)
             actual_model = model_cfg.model_id if model_cfg else model
 
+            # Session tracking: stable conversation fingerprint, turn counter.
+            session_id = derive_session_id(messages, source)
+            if gw.storage is not None and session_id != "unknown":
+                try:
+                    gw.storage.touch_session(session_id, source)
+                except Exception:
+                    pass
+
             # Inline compression: compress older messages before forwarding.
+            comp_before = comp_after = 0
             if gw.compression is not None and len(messages) > 2:
-                messages = _compress_messages_inline(gw.compression, messages)
+                messages, comp_before, comp_after = _compress_messages_inline(
+                    gw.compression, messages, gw.storage
+                )
+                gw.comp_tokens_before += comp_before
+                gw.comp_tokens_after += comp_after
 
             result = await backend.chat_completion(
                 model=actual_model,
@@ -1106,6 +1157,10 @@ def create_app() -> FastAPI:
                 "requested_model": body.get("model"),
                 "task_type": task_type,
                 "routing_reason": routing_reason,
+                "compressed": comp_after < comp_before,
+                "compression_ratio": (
+                    round(comp_after / comp_before, 4) if comp_before > 0 else 1.0
+                ),
             }
 
             if stream:
@@ -1496,17 +1551,21 @@ def create_app() -> FastAPI:
             "detection_enabled": gw.detection is not None,
             "scanner_enabled": gw.scanner is not None and gw.scanner.enabled,
             # Observability contract blocks (docs/observability-api.md).
-            # Token rollups stay zero until per-request compression savings
-            # are recorded (see docs/gap-analysis.md).
+            # Compression rollup covers this process lifetime (estimated
+            # tokens over compression-eligible messages).
             "compression": {
                 "enabled": gw.compression is not None,
                 "default_tier": gw.config.compression.default_tier,
-                "tokens_before": 0,
-                "tokens_after": 0,
-                "tokens_saved": 0,
-                "compression_ratio": 0.0,
+                "tokens_before": gw.comp_tokens_before,
+                "tokens_after": gw.comp_tokens_after,
+                "tokens_saved": gw.comp_tokens_before - gw.comp_tokens_after,
+                "compression_ratio": (
+                    round(1.0 - gw.comp_tokens_after / gw.comp_tokens_before, 3)
+                    if gw.comp_tokens_before > 0
+                    else 0.0
+                ),
             },
-            "sessions": {"supported": False, "sessions": 0, "total_turns": 0},
+            "sessions": _session_stats_block(gw),
         }
 
     # ------------------------------------------------------- costs (contract)
@@ -1553,17 +1612,26 @@ def create_app() -> FastAPI:
         return summary
 
     # ---------------------------------------------------- sessions (contract)
+    def _session_stats_block(gw: GatewayState) -> dict:
+        if gw.storage is None:
+            return {"supported": False, "sessions": 0, "total_turns": 0}
+        try:
+            stats = gw.storage.get_session_stats()
+            return {"supported": True, **stats}
+        except Exception:
+            return {"supported": False, "sessions": 0, "total_turns": 0}
+
     @app.get("/api/sessions")
     async def api_sessions(hours: int = 24):
-        # Session tracking is not yet implemented in loom-oss
-        # (docs/gap-analysis.md); the contract shape is served regardless.
-        return {
-            "supported": False,
-            "hours": hours,
-            "sessions": 0,
-            "total_turns": 0,
-            "entries": [],
-        }
+        gw = state()
+        block = _session_stats_block(gw)
+        entries: list[dict] = []
+        if block["supported"]:
+            try:
+                entries = _jsonable(gw.storage.list_sessions(hours=hours))
+            except Exception:
+                pass
+        return {**block, "hours": hours, "entries": entries}
 
     # ------------------------------------------------------------------- models
     @app.get("/api/models")
@@ -1774,45 +1842,147 @@ def _bucket_seconds(bucket: str) -> int:
     return _BUCKET_SIZES.get((bucket or "1h").lower(), 3600)
 
 
-def _compress_messages_inline(processor: Any, messages: list[dict]) -> list[dict]:
-    """Compress older messages in-place before forwarding to the provider.
+# Tag appended to compressed messages so the gateway skips re-compression on
+# subsequent turns of the same conversation: <!--loom:compressed:TIER:HASH-->
+_LOOM_TAG_RE = re.compile(r"<!--loom:compressed:(\w+):([a-f0-9]{8,16})-->\s*$")
+
+
+def _strip_loom_tag(text: str) -> tuple[str, Optional[str]]:
+    """Return (text, tier) — tier is None when the text carries no tag."""
+    m = _LOOM_TAG_RE.search(text)
+    if m:
+        return text, m.group(1)
+    return text, None
+
+
+def derive_session_id(messages: list[dict], source: str) -> str:
+    """Stable conversation fingerprint: source + first user message prefix.
+
+    Same derivation as the legacy proxy so session identities survive the
+    cutover within a running conversation.
+    """
+    first_user = next((m for m in messages if m.get("role") == "user"), None)
+    if first_user is None:
+        return "unknown"
+    content = first_user.get("content", "")
+    if isinstance(content, list):
+        for block in content:
+            if isinstance(block, dict) and block.get("type") == "text":
+                content = block.get("text", "")
+                break
+        else:
+            content = json.dumps(content)
+    seed = f"{source}:{str(content)[:256]}"
+    return "gw-" + hashlib.sha256(seed.encode()).hexdigest()[:16]
+
+
+def _estimate_tokens_safe(text: str) -> int:
+    try:
+        from loom.compression.processor import _estimate_tokens
+
+        return _estimate_tokens(text)
+    except Exception:
+        return max(1, len(text) // 4)
+
+
+def _compress_messages_inline(
+    processor: Any,
+    messages: list[dict],
+    storage: Any = None,
+) -> tuple[list[dict], int, int]:
+    """Compress older messages before forwarding to the provider.
 
     Skips the last 2 messages (active context) and applies graduated
     compression to everything else — oldest messages get compressed most.
+    Messages already carrying a loom:compressed tag are passed through
+    untouched (double-compression prevention); the storage compression cache
+    is consulted before compressing and updated after.
+
+    Returns (messages, tokens_before, tokens_after) — estimated tokens over
+    the compression-eligible messages only.
     """
     n = len(messages)
     if n <= 2:
-        return messages
+        return messages, 0, 0
     compressed: list[dict] = []
+    tokens_before = 0
+    tokens_after = 0
     for idx, msg in enumerate(messages):
         if idx >= n - 2:
             compressed.append(msg)
             continue
         content = msg.get("content", "")
         text = content if isinstance(content, str) else json.dumps(content)
+
+        _, existing_tier = _strip_loom_tag(text)
+        if existing_tier is not None:
+            # Compressed on a previous turn — count as already-saved via the
+            # tag, don't recompress (originals are gone).
+            tb = _estimate_tokens_safe(text)
+            tokens_before += tb
+            tokens_after += tb
+            compressed.append(msg)
+            continue
+
         age_ratio = idx / max(n - 1, 1)
-        new_text = _run_compress_graduated(processor, text, age_ratio)
+        tb = _estimate_tokens_safe(text)
+        tokens_before += tb
+
+        new_text = None
+        content_hash = hashlib.sha256(text.encode()).hexdigest()[:16]
+        if storage is not None:
+            try:
+                hit = storage.get_compression_cached(content_hash, age_ratio)
+                if hit:
+                    new_text = hit["compressed_text"]
+            except Exception:
+                pass
+
+        if new_text is None:
+            new_text, tier = _run_compress_graduated(processor, text, age_ratio)
+            if new_text != text and len(new_text) < len(text):
+                new_text = f"{new_text}\n<!--loom:compressed:{tier}:{content_hash}-->"
+                if storage is not None:
+                    try:
+                        storage.put_compression_cached(
+                            content_hash=content_hash,
+                            age_ratio=age_ratio,
+                            compressed=new_text,
+                            tier=tier,
+                            tokens_before=tb,
+                            tokens_after=_estimate_tokens_safe(new_text),
+                        )
+                    except Exception:
+                        pass
+            else:
+                new_text = text
+
+        ta = _estimate_tokens_safe(new_text)
+        tokens_after += ta
         if new_text != text:
             out = dict(msg)
             out["content"] = new_text
             compressed.append(out)
         else:
             compressed.append(msg)
-    return compressed
+    return compressed, tokens_before, tokens_after
 
 
-def _run_compress_graduated(processor: Any, text: str, age_ratio: float) -> str:
+def _run_compress_graduated(
+    processor: Any, text: str, age_ratio: float
+) -> tuple[str, str]:
+    """Returns (compressed_text, tier_name)."""
     fn = getattr(processor, "compress_graduated", None)
     if callable(fn):
         try:
             result = fn(text, age_ratio)
             if isinstance(result, tuple):
-                return result[0]
+                return result[0], str(result[1])
             if isinstance(result, str):
-                return result
+                return result, "medium"
         except Exception:
             pass
-    return text
+    return text, "full"
 
 
 def _run_detect(engine: Any, source: str, prompt: str) -> Any:

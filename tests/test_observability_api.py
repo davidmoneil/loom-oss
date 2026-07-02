@@ -41,9 +41,9 @@ def test_sessions_contract_shape():
     resp = _client().get("/api/sessions")
     assert resp.status_code == 200
     data = resp.json()
-    assert data["supported"] is False
-    assert data["sessions"] == 0
-    assert data["entries"] == []
+    assert isinstance(data["supported"], bool)
+    assert isinstance(data["sessions"], int)
+    assert isinstance(data["entries"], list)
 
 
 def test_audit_contract_shape():

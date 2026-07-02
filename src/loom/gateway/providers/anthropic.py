@@ -57,6 +57,33 @@ class AnthropicBackend(ProviderBackend):
             return self._stream(body, api_key)
         return await self._complete(body, api_key)
 
+    async def count_tokens(
+        self, body: dict, inbound_headers: dict[str, str]
+    ) -> tuple[int, dict]:
+        """Forward /v1/messages/count_tokens upstream with passthrough auth.
+
+        Auth headers are relayed as received (x-api-key or Authorization
+        bearer) so both API-key and OAuth callers work.
+        """
+        headers = {
+            "Content-Type": "application/json",
+            "anthropic-version": inbound_headers.get(
+                "anthropic-version", ANTHROPIC_VERSION
+            ),
+        }
+        for name in ("x-api-key", "authorization", "anthropic-beta"):
+            value = inbound_headers.get(name)
+            if value:
+                headers[name] = value
+        client = await self.get_client()
+        try:
+            resp = await client.post(
+                "/v1/messages/count_tokens", json=body, headers=headers
+            )
+        except httpx.HTTPError as exc:
+            raise ProviderError(f"anthropic request failed: {exc}") from exc
+        return resp.status_code, _safe_json(resp)
+
     async def _complete(self, body: dict, api_key: str) -> dict:
         client = await self.get_client()
         try:

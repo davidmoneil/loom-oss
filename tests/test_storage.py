@@ -112,6 +112,22 @@ def test_content_importance_scoring(storage):
     assert storage.get_content_importance([]) == {}
 
 
+def test_session_tracking(storage):
+    sid = f"sess-{uuid.uuid4().hex[:12]}"
+    assert storage.touch_session(sid, source="pytest") == 1
+    assert storage.touch_session(sid, source="pytest", tokens=100, cost=0.01) == 2
+
+    stats = storage.get_session_stats()
+    assert stats["sessions"] >= 1
+    assert stats["total_turns"] >= 2
+
+    entries = storage.list_sessions(hours=1)
+    mine = next(e for e in entries if e["session_id"] == sid)
+    assert mine["source"] == "pytest"
+    assert mine["turns"] == 2
+    assert mine["last_seen"] > 0
+
+
 class _Cfg:
     class storage:  # noqa: N801 — mimics loaded config shape
         backend = "postgres"

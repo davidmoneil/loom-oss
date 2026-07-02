@@ -17,7 +17,7 @@ from typing import Any, Optional
 
 logger = logging.getLogger("loom.storage.postgres")
 
-SCHEMA_VERSION = 3
+SCHEMA_VERSION = 4
 
 
 class PostgresStorage:
@@ -174,6 +174,14 @@ class PostgresStorage:
                     created_at DOUBLE PRECISION NOT NULL
                 )
             """)
+
+        if current < 4:
+            # Session tracking (contract /api/sessions): sessions gains the
+            # calling source; ended_at doubles as last_seen, request_count as
+            # the turn counter.
+            conn.execute(
+                "ALTER TABLE sessions ADD COLUMN IF NOT EXISTS source TEXT"
+            )
 
         if current < SCHEMA_VERSION:
             conn.execute(
@@ -347,6 +355,61 @@ class PostgresStorage:
             "total_cost": metric_row[3] if metric_row else 0.0,
             "avg_latency_ms": metric_row[4] if metric_row else 0.0,
         }
+
+    # ------------------------------------------------------------ sessions
+    def touch_session(
+        self, session_id: str, source: str = "", tokens: int = 0, cost: float = 0.0
+    ) -> int:
+        """Upsert a session row and increment its turn counter.
+
+        Returns the turn number after the update (1 for a new session).
+        ended_at doubles as last_seen; request_count is the turn counter.
+        """
+        now = time.time()
+        row = self.conn.execute(
+            """
+            INSERT INTO sessions
+                (session_id, source, started_at, ended_at,
+                 request_count, total_tokens, total_cost)
+            VALUES (%s, %s, %s, %s, 1, %s, %s)
+            ON CONFLICT (session_id) DO UPDATE SET
+                ended_at = EXCLUDED.ended_at,
+                source = COALESCE(EXCLUDED.source, sessions.source),
+                request_count = sessions.request_count + 1,
+                total_tokens = sessions.total_tokens + EXCLUDED.total_tokens,
+                total_cost = sessions.total_cost + EXCLUDED.total_cost
+            RETURNING request_count
+            """,
+            (session_id, source, now, now, tokens, cost),
+        ).fetchone()
+        return int(row[0]) if row else 1
+
+    def get_session_stats(self) -> dict:
+        row = self.conn.execute(
+            "SELECT COUNT(*), COALESCE(SUM(request_count), 0) FROM sessions"
+        ).fetchone()
+        return {"sessions": row[0], "total_turns": int(row[1])}
+
+    def list_sessions(self, hours: int = 24, limit: int = 200) -> list[dict]:
+        cutoff = time.time() - hours * 3600
+        rows = self.conn.execute(
+            """
+            SELECT session_id, COALESCE(source, 'unknown'),
+                   request_count, ended_at
+            FROM sessions WHERE ended_at >= %s
+            ORDER BY ended_at DESC LIMIT %s
+            """,
+            (cutoff, limit),
+        ).fetchall()
+        return [
+            {
+                "session_id": r[0],
+                "source": r[1],
+                "turns": r[2],
+                "last_seen": float(r[3]),
+            }
+            for r in rows
+        ]
 
     _TOKENS_SAVED_SQL = (
         "COALESCE(SUM(CASE WHEN compressed = 1 AND compression_ratio > 0 "
