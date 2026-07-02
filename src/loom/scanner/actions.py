@@ -93,7 +93,19 @@ def apply_action(
     if action == "mask":
         return _apply_mask_format(matched_text, mask_format)
     if action == "pseudonymize":
-        return _pseudonymize(matched_text, rule_name, ctx.session_id)
+        try:
+            from . import pseudonymizer
+
+            return pseudonymizer.pseudonymize(matched_text, rule_name, ctx.session_id)
+        except ImportError:
+            return _pseudonymize(matched_text, rule_name, ctx.session_id)
+    if action == "encrypt":
+        try:
+            from . import crypto
+
+            return crypto.encrypt(matched_text, ctx.session_id)
+        except (ImportError, Exception):
+            return f"[ENCRYPTED:unavailable]"
     if action == "log_only":
         return matched_text
     return matched_text
