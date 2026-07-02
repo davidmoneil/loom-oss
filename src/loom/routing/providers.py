@@ -145,6 +145,18 @@ class ProviderRegistry:
     def default(cls) -> "ProviderRegistry":
         """A small set of sensible defaults across the common providers."""
         return cls.from_dict({
+            "fable": {
+                "provider": "anthropic",
+                "model_id": "claude-fable-5",
+                "display_name": "fable",
+                "engine": "anthropic",
+                "supports_tools": True,
+                "supports_json_mode": True,
+                "cost_per_1k_input": 0.010,
+                "cost_per_1k_output": 0.050,
+                "max_context_tokens": 200000,
+                "tier": "premium",
+            },
             "opus": {
                 "provider": "anthropic",
                 "model_id": "claude-opus-4-8",
@@ -152,9 +164,9 @@ class ProviderRegistry:
                 "engine": "anthropic",
                 "supports_tools": True,
                 "supports_json_mode": True,
-                "cost_per_1k_input": 0.015,
-                "cost_per_1k_output": 0.075,
-                "max_context_tokens": 200000,
+                "cost_per_1k_input": 0.005,
+                "cost_per_1k_output": 0.025,
+                "max_context_tokens": 1000000,
                 "tier": "premium",
             },
             "sonnet": {
@@ -166,7 +178,7 @@ class ProviderRegistry:
                 "supports_json_mode": True,
                 "cost_per_1k_input": 0.003,
                 "cost_per_1k_output": 0.015,
-                "max_context_tokens": 200000,
+                "max_context_tokens": 1000000,
                 "tier": "standard",
             },
             "haiku": {
@@ -176,8 +188,8 @@ class ProviderRegistry:
                 "engine": "anthropic",
                 "supports_tools": True,
                 "supports_json_mode": True,
-                "cost_per_1k_input": 0.0008,
-                "cost_per_1k_output": 0.004,
+                "cost_per_1k_input": 0.001,
+                "cost_per_1k_output": 0.005,
                 "max_context_tokens": 200000,
                 "tier": "economy",
             },
