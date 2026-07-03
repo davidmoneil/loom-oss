@@ -69,6 +69,7 @@ class AuditLogger:
         compression_ratio: float = 1.0,
         routing_reason: Optional[str] = None,
         status_code: int = 200,
+        upstream_headers: Optional[dict[str, str]] = None,
     ) -> None:
         record = {
             "ts": _utc_iso(),
@@ -89,6 +90,8 @@ class AuditLogger:
             "routing_reason": routing_reason,
             "status_code": status_code,
         }
+        if upstream_headers:
+            record["upstream_headers"] = upstream_headers
         self._write(self.audit_path, record)
 
     def log_metrics(

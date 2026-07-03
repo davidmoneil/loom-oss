@@ -22,8 +22,10 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 import pathlib
 import re
+import sys
 import threading
 import time
 import uuid
@@ -228,6 +230,7 @@ def _record_request(
     response_text: Optional[str] = None,
     compressed: bool = False,
     compression_ratio: float = 1.0,
+    upstream_headers: dict[str, str] | None = None,
 ) -> None:
     """Persist + audit a completed request. Never raises into the request path."""
     tokens_in, tokens_out = _extract_tokens(usage)
@@ -261,6 +264,16 @@ def _record_request(
             )
         except Exception:
             pass
+        if upstream_headers:
+            try:
+                state.storage.record_rate_limits(
+                    request_id=request_id,
+                    model=model,
+                    source=source,
+                    upstream_headers=upstream_headers,
+                )
+            except Exception:
+                pass
 
     if state.audit is not None:
         try:
@@ -279,6 +292,7 @@ def _record_request(
                 cost_estimate=cost,
                 routing_reason=routing_reason,
                 status_code=status_code,
+                upstream_headers=upstream_headers,
             )
         except Exception:
             pass
@@ -320,7 +334,35 @@ def _record_request(
             pass
 
 
-def _audit_error(state: GatewayState, request_id: str, path: str, source: str, status_code: int) -> None:
+_logger = logging.getLogger("uvicorn.error")
+
+
+def _audit_error(
+    state: GatewayState,
+    request_id: str,
+    path: str,
+    source: str,
+    status_code: int,
+    exc: Exception | None = None,
+) -> None:
+    error_detail = ""
+    if isinstance(exc, ProviderError) and exc.payload:
+        error_detail = json.dumps(exc.payload, default=str)
+    elif exc:
+        error_detail = str(exc)
+
+    if state.config.server.log_level.lower() == "debug":
+        line = json.dumps({
+            "ts": time.time(),
+            "level": "error",
+            "request_id": request_id,
+            "path": path,
+            "source": source,
+            "status_code": status_code,
+            "error": error_detail or None,
+        }, default=str)
+        print(line, file=sys.stderr, flush=True)
+
     if state.audit is None:
         return
     try:
@@ -562,6 +604,18 @@ def _source(request: Request) -> str:
     return request.headers.get("x-loom-source", "default")
 
 
+_FORWARD_ANTHROPIC_HEADERS = {"anthropic-version", "anthropic-beta"}
+
+
+def _extract_anthropic_headers(request: Request) -> dict[str, str]:
+    """Extract Anthropic-specific headers from the client request for forwarding."""
+    return {
+        name: value
+        for name, value in request.headers.items()
+        if name.lower() in _FORWARD_ANTHROPIC_HEADERS
+    }
+
+
 def _extract_response_text(result: dict) -> Optional[str]:
     """Extract the assistant's text content from any response format."""
     for choice in result.get("choices", []):
@@ -616,8 +670,7 @@ def _error_response(exc: Exception, request_id: str, status: int = 500) -> JSONR
         if isinstance(payload.get("error"), dict):
             payload["error"].setdefault("request_id", request_id)
         return JSONResponse(payload, status_code=exc.status_code)
-    import logging as _log
-    _log.getLogger("loom.gateway").exception("Unhandled error (request_id=%s)", request_id)
+    _logger.exception("Unhandled error (request_id=%s)", request_id)
     return JSONResponse(
         {
             "error": {
@@ -687,9 +740,10 @@ async def _scan_ollama_stream(
 
 async def _wrapped_stream(
     state: GatewayState,
-    upstream: AsyncIterator[bytes],
+    upstream,
     meta: dict,
     t0: float,
+    upstream_headers: dict[str, str] | None = None,
 ) -> AsyncIterator[bytes]:
     """Forward upstream bytes, scanning for sensitive data when buffering is enabled.
 
@@ -796,12 +850,14 @@ async def _wrapped_stream(
             body = json.dumps(exc.payload).encode("utf-8")
             yield b"data: " + body + b"\n\n"
 
+    resolved_headers = upstream_headers or getattr(upstream, "upstream_headers", None) or {}
     _record_request(
         state,
         status_code=status,
         latency_ms=round((time.monotonic() - t0) * 1000, 2),
         usage=None,
         cost=0.0,
+        upstream_headers=resolved_headers,
         **meta,
     )
 
@@ -1049,11 +1105,14 @@ def create_app() -> FastAPI:
 
             if stream:
                 return StreamingResponse(
-                    _wrapped_stream(gw, result, meta, t0),  # type: ignore[arg-type]
+                    _wrapped_stream(gw, result, meta, t0),
                     media_type="text/event-stream",
                     headers={"X-Loom-Request-Id": request_id},
                 )
 
+            upstream_headers = {}
+            if isinstance(result, dict):
+                upstream_headers = result.pop("_upstream_headers", None) or {}
             usage = _extract_usage(result, provider_name)
             normalized = _normalize_response(result, provider_name, model_cfg.model_id)
             resp_text = _extract_response_text(normalized)
@@ -1065,15 +1124,16 @@ def create_app() -> FastAPI:
                 cost=_model_cost(model_cfg, usage),
                 messages=messages,
                 response_text=resp_text,
+                upstream_headers=upstream_headers,
                 **meta,
             )
             normalized = _scan_response(gw, normalized, provider_name, model_cfg.model_id, source)
             return JSONResponse(normalized, headers={"X-Loom-Request-Id": request_id})
         except ProviderError as exc:
-            _audit_error(gw, request_id, "/v1/chat/completions", source, exc.status_code)
+            _audit_error(gw, request_id, "/v1/chat/completions", source, exc.status_code, exc)
             return _error_response(exc, request_id)
         except Exception as exc:  # never crash
-            _audit_error(gw, request_id, "/v1/chat/completions", source, 500)
+            _audit_error(gw, request_id, "/v1/chat/completions", source, 500, exc)
             return _error_response(exc, request_id)
 
     # ------------------------------------------- count_tokens (Anthropic passthrough)
@@ -1111,9 +1171,19 @@ def create_app() -> FastAPI:
         gw = state()
         request_id = str(uuid.uuid4())
         t0 = time.monotonic()
+        raw_body = b""
         try:
-            body = await request.json()
-        except Exception:
+            raw_body = await request.body()
+            body = json.loads(raw_body)
+        except Exception as parse_exc:
+            if gw.config.server.log_level.lower() == "debug":
+                snippet = raw_body[:500] if raw_body else b"(empty)"
+                _logger.warning(
+                    "json_parse_fail request_id=%s body=%s error=%s",
+                    request_id,
+                    snippet.decode("utf-8", errors="replace"),
+                    str(parse_exc),
+                )
             return _error_response(
                 ProviderError("invalid JSON body", status_code=400), request_id, 400
             )
@@ -1122,6 +1192,9 @@ def create_app() -> FastAPI:
         api_key = request.headers.get("x-api-key", "") or _bearer(request)
         source = _source(request)
         stream = bool(body.get("stream", False))
+
+        # Capture client headers that must be forwarded to Anthropic.
+        client_headers = _extract_anthropic_headers(request)
 
         try:
             model, task_type, routing_reason = _select_model(
@@ -1166,6 +1239,7 @@ def create_app() -> FastAPI:
                 messages=messages,
                 api_key=api_key,
                 stream=stream,
+                client_headers=client_headers,
                 **forward,
             )
 
@@ -1187,11 +1261,12 @@ def create_app() -> FastAPI:
 
             if stream:
                 return StreamingResponse(
-                    _wrapped_stream(gw, result, meta, t0),  # type: ignore[arg-type]
+                    _wrapped_stream(gw, result, meta, t0),
                     media_type="text/event-stream",
                     headers={"X-Loom-Request-Id": request_id},
                 )
 
+            upstream_headers = result.pop("_upstream_headers", None) or {}
             usage = _extract_usage(result, provider_name)
             resp_text = _extract_response_text(result)
             _record_request(
@@ -1202,15 +1277,16 @@ def create_app() -> FastAPI:
                 cost=_model_cost(model_cfg, usage),
                 messages=messages,
                 response_text=resp_text,
+                upstream_headers=upstream_headers,
                 **meta,
             )
             result = _scan_response(gw, result, provider_name, model, source)
             return JSONResponse(result, headers={"X-Loom-Request-Id": request_id})
         except ProviderError as exc:
-            _audit_error(gw, request_id, "/v1/messages", source, exc.status_code)
+            _audit_error(gw, request_id, "/v1/messages", source, exc.status_code, exc)
             return _error_response(exc, request_id)
         except Exception as exc:
-            _audit_error(gw, request_id, "/v1/messages", source, 500)
+            _audit_error(gw, request_id, "/v1/messages", source, 500, exc)
             return _error_response(exc, request_id)
 
     # ----------------------------------------------------------------- ollama-compat
@@ -1321,10 +1397,10 @@ def create_app() -> FastAPI:
             )
             return JSONResponse(result, headers={"X-Loom-Request-Id": request_id})
         except ProviderError as exc:
-            _audit_error(gw, request_id, "/api/generate", source, exc.status_code)
+            _audit_error(gw, request_id, "/api/generate", source, exc.status_code, exc)
             return _error_response(exc, request_id)
         except Exception as exc:
-            _audit_error(gw, request_id, "/api/generate", source, 500)
+            _audit_error(gw, request_id, "/api/generate", source, 500, exc)
             return _error_response(exc, request_id)
 
     @app.post("/api/chat")
@@ -1403,10 +1479,10 @@ def create_app() -> FastAPI:
             )
             return JSONResponse(result, headers={"X-Loom-Request-Id": request_id})
         except ProviderError as exc:
-            _audit_error(gw, request_id, "/api/chat", source, exc.status_code)
+            _audit_error(gw, request_id, "/api/chat", source, exc.status_code, exc)
             return _error_response(exc, request_id)
         except Exception as exc:
-            _audit_error(gw, request_id, "/api/chat", source, 500)
+            _audit_error(gw, request_id, "/api/chat", source, 500, exc)
             return _error_response(exc, request_id)
 
     @app.get("/api/tags")
@@ -1788,7 +1864,16 @@ def create_app() -> FastAPI:
         gw = state()
         if gw.governor is None:
             return JSONResponse({"error": "governor not available"}, status_code=503)
-        return gw.governor.status()
+        result = gw.governor.status()
+        if gw.storage is not None:
+            try:
+                rl = gw.storage.get_rate_limit_current()
+                if rl:
+                    result["util_5h"] = rl.get("util_5h") or 0.0
+                    result["util_7d"] = rl.get("util_7d") or 0.0
+            except Exception:
+                pass
+        return result
 
     @app.get("/api/governor")
     async def api_governor_get():
@@ -1822,6 +1907,39 @@ def create_app() -> FastAPI:
             return JSONResponse({"error": "governor not available"}, status_code=503)
         return gw.governor.delete_class_override(job, actor="dashboard")
 
+    # ----------------------------------------------------------- rate limits
+    @app.get("/api/rate-limits")
+    async def api_rate_limits(hours: int = 48):
+        gw = state()
+        empty: dict[str, Any] = {"current": None, "trend": [], "hours": hours}
+        if gw.storage is None:
+            return empty
+        try:
+            current = gw.storage.get_rate_limit_current()
+            trend = gw.storage.get_rate_limit_trend(hours)
+        except Exception:
+            return empty
+        result: dict[str, Any] = {
+            "hours": hours,
+            "current": None,
+            "trend": trend,
+        }
+        if current:
+            result["current"] = {
+                "util_5h": current.get("util_5h") or 0.0,
+                "util_7d": current.get("util_7d") or 0.0,
+                "status": current.get("unified_status") or "unknown",
+                "status_5h": current.get("status_5h"),
+                "status_7d": current.get("status_7d"),
+                "last_request_at": current.get("timestamp"),
+                "reset": current.get("unified_reset"),
+                "model_util_7d": current.get("model_util_7d"),
+                "model_name_7d": current.get("model_name_7d"),
+                "model_status_7d": current.get("model_status_7d"),
+                "retry_after": current.get("retry_after"),
+            }
+        return result
+
     # ----------------------------------------------------------- dashboard (SPA)
     # Mounted LAST so API routes always take priority over the static catch-all.
     dashboard_dir = (
@@ -1848,7 +1966,7 @@ _OPENAI_PASSTHROUGH = (
 )
 _ANTHROPIC_PASSTHROUGH = (
     "temperature", "top_p", "top_k", "max_tokens", "stop_sequences", "system",
-    "tools", "tool_choice", "metadata",
+    "tools", "tool_choice", "metadata", "thinking",
 )
 
 

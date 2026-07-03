@@ -18,9 +18,62 @@ import threading
 import time
 from typing import Any, Optional
 
-SCHEMA_VERSION = 4
+SCHEMA_VERSION = 5
 
 _FLUSH_INTERVAL_SECONDS = 2.0
+
+import re
+
+_MODEL_UTIL_RE = re.compile(
+    r"^anthropic-ratelimit-unified-7d_(.+)-(utilization|status)$"
+)
+
+
+def _parse_unified_headers(headers: dict[str, str]) -> Optional[dict]:
+    """Extract unified rate-limit fields from upstream response headers.
+
+    Returns None if no unified headers are present.
+    """
+    status = headers.get("anthropic-ratelimit-unified-status")
+    if status is None:
+        return None
+    util_5h = headers.get("anthropic-ratelimit-unified-5h-utilization")
+    util_7d = headers.get("anthropic-ratelimit-unified-7d-utilization")
+    model_name = None
+    model_util = None
+    model_status = None
+    for key, value in headers.items():
+        m = _MODEL_UTIL_RE.match(key.lower())
+        if m:
+            name, field = m.group(1), m.group(2)
+            if field == "utilization":
+                model_name = name
+                model_util = _safe_float(value)
+            elif field == "status":
+                if model_name is None:
+                    model_name = name
+                model_status = value
+    return {
+        "unified_status": status,
+        "unified_reset": headers.get("anthropic-ratelimit-unified-reset"),
+        "util_5h": _safe_float(util_5h),
+        "status_5h": headers.get("anthropic-ratelimit-unified-5h-status"),
+        "util_7d": _safe_float(util_7d),
+        "status_7d": headers.get("anthropic-ratelimit-unified-7d-status"),
+        "model_util_7d": model_util,
+        "model_name_7d": model_name,
+        "model_status_7d": model_status,
+        "retry_after": _safe_float(headers.get("retry-after")),
+    }
+
+
+def _safe_float(v: Optional[str]) -> Optional[float]:
+    if v is None:
+        return None
+    try:
+        return float(v)
+    except (ValueError, TypeError):
+        return None
 
 
 class LoomStorage:
@@ -154,6 +207,28 @@ class LoomStorage:
                 created_at REAL NOT NULL
             );
 
+            CREATE TABLE IF NOT EXISTS rate_limits (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                timestamp REAL NOT NULL,
+                request_id TEXT,
+                model TEXT,
+                source TEXT,
+                unified_status TEXT,
+                unified_reset TEXT,
+                util_5h REAL,
+                status_5h TEXT,
+                util_7d REAL,
+                status_7d TEXT,
+                model_util_7d REAL,
+                model_name_7d TEXT,
+                model_status_7d TEXT,
+                retry_after REAL,
+                upstream_headers_json TEXT
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_rate_limits_timestamp
+                ON rate_limits (timestamp);
+
             CREATE INDEX IF NOT EXISTS idx_metrics_timestamp
                 ON metrics (timestamp);
             CREATE INDEX IF NOT EXISTS idx_routing_timestamp
@@ -217,6 +292,33 @@ class LoomStorage:
                     c.execute(idx)
                 except sqlite3.OperationalError:
                     pass
+
+        if current < 5:
+            try:
+                c.executescript("""
+                    CREATE TABLE IF NOT EXISTS rate_limits (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        timestamp REAL NOT NULL,
+                        request_id TEXT,
+                        model TEXT,
+                        source TEXT,
+                        unified_status TEXT,
+                        unified_reset TEXT,
+                        util_5h REAL,
+                        status_5h TEXT,
+                        util_7d REAL,
+                        status_7d TEXT,
+                        model_util_7d REAL,
+                        model_name_7d TEXT,
+                        model_status_7d TEXT,
+                        retry_after REAL,
+                        upstream_headers_json TEXT
+                    );
+                    CREATE INDEX IF NOT EXISTS idx_rate_limits_timestamp
+                        ON rate_limits (timestamp);
+                """)
+            except sqlite3.OperationalError:
+                pass
 
         if current < SCHEMA_VERSION:
             c.execute(
@@ -724,6 +826,102 @@ class LoomStorage:
         ]
 
         return {"total": total, "offset": offset, "limit": limit, "entries": entries}
+
+    # ------------------------------------------------------------------ rate limits
+    def record_rate_limits(
+        self,
+        request_id: str,
+        model: str,
+        source: str,
+        upstream_headers: dict[str, str],
+    ) -> None:
+        parsed = _parse_unified_headers(upstream_headers)
+        if not parsed:
+            return
+        with self._write_lock:
+            self.conn.execute(
+                """
+                INSERT INTO rate_limits (
+                    timestamp, request_id, model, source,
+                    unified_status, unified_reset,
+                    util_5h, status_5h, util_7d, status_7d,
+                    model_util_7d, model_name_7d, model_status_7d,
+                    retry_after, upstream_headers_json
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    time.time(), request_id, model, source,
+                    parsed["unified_status"], parsed["unified_reset"],
+                    parsed["util_5h"], parsed["status_5h"],
+                    parsed["util_7d"], parsed["status_7d"],
+                    parsed["model_util_7d"], parsed["model_name_7d"],
+                    parsed["model_status_7d"],
+                    parsed["retry_after"],
+                    json.dumps(upstream_headers),
+                ),
+            )
+            self._schedule_flush()
+
+    def get_rate_limit_current(self) -> Optional[dict]:
+        row = self.conn.execute(
+            """
+            SELECT timestamp, model, source,
+                   unified_status, unified_reset,
+                   util_5h, status_5h, util_7d, status_7d,
+                   model_util_7d, model_name_7d, model_status_7d,
+                   retry_after
+            FROM rate_limits
+            WHERE unified_status IS NOT NULL
+            ORDER BY timestamp DESC LIMIT 1
+            """
+        ).fetchone()
+        if row is None:
+            return None
+        return {
+            "timestamp": row["timestamp"],
+            "model": row["model"],
+            "source": row["source"],
+            "unified_status": row["unified_status"],
+            "unified_reset": row["unified_reset"],
+            "util_5h": row["util_5h"],
+            "status_5h": row["status_5h"],
+            "util_7d": row["util_7d"],
+            "status_7d": row["status_7d"],
+            "model_util_7d": row["model_util_7d"],
+            "model_name_7d": row["model_name_7d"],
+            "model_status_7d": row["model_status_7d"],
+            "retry_after": row["retry_after"],
+        }
+
+    def get_rate_limit_trend(self, hours: int = 48) -> list[dict]:
+        since = time.time() - hours * 3600
+        rows = self.conn.execute(
+            """
+            SELECT
+                strftime('%Y-%m-%dT%H:00:00Z', timestamp, 'unixepoch') AS hour,
+                AVG(util_5h) AS avg_5h,
+                AVG(util_7d) AS avg_7d,
+                MIN(util_5h) AS min_5h,
+                MAX(util_5h) AS max_5h,
+                COUNT(*) AS samples
+            FROM rate_limits
+            WHERE timestamp >= ? AND unified_status IS NOT NULL
+            GROUP BY hour
+            ORDER BY hour ASC
+            """,
+            (since,),
+        ).fetchall()
+        return [
+            {
+                "hour": r["hour"],
+                "avg_5h": r["avg_5h"],
+                "avg_7d": r["avg_7d"],
+                "min_5h": r["min_5h"],
+                "max_5h": r["max_5h"],
+                "samples": r["samples"],
+            }
+            for r in rows
+        ]
 
     # ------------------------------------------------------------------ compression cache
     def get_compression_cached(

@@ -17,7 +17,7 @@ from typing import Any, Optional
 
 logger = logging.getLogger("loom.storage.postgres")
 
-SCHEMA_VERSION = 4
+SCHEMA_VERSION = 5
 
 
 class PostgresStorage:
@@ -140,6 +140,29 @@ class PostgresStorage:
             "CREATE INDEX IF NOT EXISTS idx_metrics_request_id ON metrics (request_id)"
         )
         conn.execute("""
+            CREATE TABLE IF NOT EXISTS rate_limits (
+                id SERIAL PRIMARY KEY,
+                timestamp DOUBLE PRECISION NOT NULL,
+                request_id TEXT,
+                model TEXT,
+                source TEXT,
+                unified_status TEXT,
+                unified_reset TEXT,
+                util_5h DOUBLE PRECISION,
+                status_5h TEXT,
+                util_7d DOUBLE PRECISION,
+                status_7d TEXT,
+                model_util_7d DOUBLE PRECISION,
+                model_name_7d TEXT,
+                model_status_7d TEXT,
+                retry_after DOUBLE PRECISION,
+                upstream_headers_json TEXT
+            )
+        """)
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_rate_limits_timestamp ON rate_limits (timestamp)"
+        )
+        conn.execute("""
             CREATE TABLE IF NOT EXISTS schema_version (
                 version INTEGER PRIMARY KEY,
                 applied_at DOUBLE PRECISION
@@ -176,11 +199,34 @@ class PostgresStorage:
             """)
 
         if current < 4:
-            # Session tracking (contract /api/sessions): sessions gains the
-            # calling source; ended_at doubles as last_seen, request_count as
-            # the turn counter.
             conn.execute(
                 "ALTER TABLE sessions ADD COLUMN IF NOT EXISTS source TEXT"
+            )
+
+        if current < 5:
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS rate_limits (
+                    id SERIAL PRIMARY KEY,
+                    timestamp DOUBLE PRECISION NOT NULL,
+                    request_id TEXT,
+                    model TEXT,
+                    source TEXT,
+                    unified_status TEXT,
+                    unified_reset TEXT,
+                    util_5h DOUBLE PRECISION,
+                    status_5h TEXT,
+                    util_7d DOUBLE PRECISION,
+                    status_7d TEXT,
+                    model_util_7d DOUBLE PRECISION,
+                    model_name_7d TEXT,
+                    model_status_7d TEXT,
+                    retry_after DOUBLE PRECISION,
+                    upstream_headers_json TEXT
+                )
+            """)
+            conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_rate_limits_timestamp "
+                "ON rate_limits (timestamp)"
             )
 
         if current < SCHEMA_VERSION:
@@ -693,6 +739,102 @@ class PostgresStorage:
         ]
 
         return {"total": total, "offset": offset, "limit": limit, "entries": entries}
+
+    # ------------------------------------------------------------------ rate limits
+    def record_rate_limits(
+        self,
+        request_id: str,
+        model: str,
+        source: str,
+        upstream_headers: dict[str, str],
+    ) -> None:
+        from .sqlite import _parse_unified_headers
+        parsed = _parse_unified_headers(upstream_headers)
+        if not parsed:
+            return
+        self.conn.execute(
+            """
+            INSERT INTO rate_limits (
+                timestamp, request_id, model, source,
+                unified_status, unified_reset,
+                util_5h, status_5h, util_7d, status_7d,
+                model_util_7d, model_name_7d, model_status_7d,
+                retry_after, upstream_headers_json
+            ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+            """,
+            (
+                time.time(), request_id, model, source,
+                parsed["unified_status"], parsed["unified_reset"],
+                parsed["util_5h"], parsed["status_5h"],
+                parsed["util_7d"], parsed["status_7d"],
+                parsed["model_util_7d"], parsed["model_name_7d"],
+                parsed["model_status_7d"],
+                parsed["retry_after"],
+                json.dumps(upstream_headers),
+            ),
+        )
+
+    def get_rate_limit_current(self) -> Optional[dict]:
+        row = self.conn.execute(
+            """
+            SELECT timestamp, model, source,
+                   unified_status, unified_reset,
+                   util_5h, status_5h, util_7d, status_7d,
+                   model_util_7d, model_name_7d, model_status_7d,
+                   retry_after
+            FROM rate_limits
+            WHERE unified_status IS NOT NULL
+            ORDER BY timestamp DESC LIMIT 1
+            """
+        ).fetchone()
+        if row is None:
+            return None
+        return {
+            "timestamp": row[0],
+            "model": row[1],
+            "source": row[2],
+            "unified_status": row[3],
+            "unified_reset": row[4],
+            "util_5h": row[5],
+            "status_5h": row[6],
+            "util_7d": row[7],
+            "status_7d": row[8],
+            "model_util_7d": row[9],
+            "model_name_7d": row[10],
+            "model_status_7d": row[11],
+            "retry_after": row[12],
+        }
+
+    def get_rate_limit_trend(self, hours: int = 48) -> list[dict]:
+        since = time.time() - hours * 3600
+        rows = self.conn.execute(
+            """
+            SELECT
+                to_char(date_trunc('hour', to_timestamp(timestamp)),
+                        'YYYY-MM-DD"T"HH24:00:00"Z"') AS hour,
+                AVG(util_5h) AS avg_5h,
+                AVG(util_7d) AS avg_7d,
+                MIN(util_5h) AS min_5h,
+                MAX(util_5h) AS max_5h,
+                COUNT(*) AS samples
+            FROM rate_limits
+            WHERE timestamp >= %s AND unified_status IS NOT NULL
+            GROUP BY hour
+            ORDER BY hour ASC
+            """,
+            (since,),
+        ).fetchall()
+        return [
+            {
+                "hour": r[0],
+                "avg_5h": float(r[1]) if r[1] is not None else None,
+                "avg_7d": float(r[2]) if r[2] is not None else None,
+                "min_5h": float(r[3]) if r[3] is not None else None,
+                "max_5h": float(r[4]) if r[4] is not None else None,
+                "samples": r[5],
+            }
+            for r in rows
+        ]
 
     # ------------------------------------------------------------------ compression cache
     def get_compression_cached(
