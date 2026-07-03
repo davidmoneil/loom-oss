@@ -201,3 +201,33 @@ Remaining before cutover of interactive traffic (AIProjects-wmhx):
 3. **`count_tokens` endpoint** — ~0.4% of interactive traffic.
 4. **Persona system, Pulse dual-write, session/learn endpoints** — unchanged
    from the list above.
+
+### z69c Parity Items — Completed 2026-07-02
+
+All three cutover blockers resolved:
+
+1. **Per-request compression savings** — `_compress_messages_inline()` now
+   measures tokens before/after, writes `loom:compressed:TIER:HASH` tags
+   (double-compression prevention across turns), uses the storage compression
+   cache, and records `compressed`/`compression_ratio` per-request in metrics.
+   Both `/v1/messages` and `/v1/chat/completions` paths handle this identically.
+   `/health` compression block shows live rollups; `/api/costs` `tokens_saved`
+   and `savings_usd` are real.
+
+2. **Session tracking** — `derive_session_id()` (source + first-user-message
+   hash, same derivation as the legacy proxy for cutover continuity) +
+   `touch_session()` on both storage backends (schema v4). `/api/sessions`
+   reports `supported: true` with entries.
+
+3. **`/v1/messages/count_tokens`** — passthrough to Anthropic upstream with
+   full auth relay (x-api-key and OAuth bearer).
+
+Also fixed: Anthropic OAuth tokens (`sk-ant-oat...`) must use
+`Authorization: Bearer` + `anthropic-beta: oauth-2025-04-20`, not `x-api-key`
+— interactive Claude Code sessions need this for the cutover.
+
+Remaining before cutover (wmhx):
+
+- Persona system (maps to source policies but needs profile port)
+- 48h dual-run comparison (`/api/costs` on both ports)
+- Point `settings.json` + guard hooks at :4444, decommission :8711
