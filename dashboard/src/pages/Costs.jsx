@@ -19,6 +19,7 @@ import { Header } from "./Overview.jsx";
 import { api, fmtNumber, fmtCost } from "../api.js";
 
 const RANGES = [
+  { label: "24h", days: 1 },
   { label: "7d", days: 7 },
   { label: "30d", days: 30 },
 ];

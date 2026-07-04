@@ -1,9 +1,24 @@
 import { useEffect, useState, useCallback } from "react";
-import { api } from "../api.js";
+import { api, setDisplayTimezone } from "../api.js";
 
 const TIER_OPTIONS = ["economy", "standard", "premium"];
 const PROVIDER_OPTIONS = ["anthropic", "openai", "google", "ollama"];
 const COMPRESSION_OPTIONS = ["", "low", "medium", "high"];
+
+const TIMEZONE_OPTIONS = [
+  "UTC",
+  "America/New_York",
+  "America/Chicago",
+  "America/Denver",
+  "America/Los_Angeles",
+  "America/Phoenix",
+  "America/Anchorage",
+  "Pacific/Honolulu",
+  "Europe/London",
+  "Europe/Berlin",
+  "Asia/Tokyo",
+  "Australia/Sydney",
+];
 
 export default function Settings() {
   const [config, setConfig] = useState(null);
@@ -132,6 +147,46 @@ export default function Settings() {
           </div>
           <div className="mt-1 text-xs text-gray-500">
             Determinism target &middot; Min {routing.min_empirical_runs ?? "—"} runs
+          </div>
+        </div>
+      </div>
+
+      {/* Server Settings */}
+      <div className="mb-6 rounded-lg border border-border bg-card p-5">
+        <h2 className="mb-4 text-sm font-semibold uppercase text-gray-400">Server</h2>
+        <div className="space-y-3">
+          <div className="flex items-center justify-between">
+            <div>
+              <span className="text-sm text-white">Display timezone</span>
+              <p className="text-xs text-gray-500">
+                All timestamps in the dashboard are displayed in this timezone.
+                Data is always stored in UTC.
+              </p>
+            </div>
+            <select
+              value={config?.server?.display_timezone || "UTC"}
+              onChange={async (e) => {
+                const tz = e.target.value;
+                setSaving(true);
+                setError(null);
+                try {
+                  const updated = await api.updateServerConfig({ display_timezone: tz });
+                  setConfig(updated);
+                  setDisplayTimezone(tz);
+                  flashSuccess(`Timezone set to ${tz}`);
+                } catch (err) {
+                  setError(err.message || "Failed to update timezone");
+                } finally {
+                  setSaving(false);
+                }
+              }}
+              disabled={saving}
+              className="rounded border border-border bg-gray-800 px-2 py-1 text-sm text-white"
+            >
+              {TIMEZONE_OPTIONS.map((tz) => (
+                <option key={tz} value={tz}>{tz.replace(/_/g, " ")}</option>
+              ))}
+            </select>
           </div>
         </div>
       </div>

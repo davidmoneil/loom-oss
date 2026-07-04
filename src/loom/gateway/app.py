@@ -1678,12 +1678,12 @@ def create_app() -> FastAPI:
 
     # ------------------------------------------------------------------ metrics
     @app.get("/api/metrics")
-    async def api_metrics():
+    async def api_metrics(hours: int = 24):
         gw = state()
         if gw.storage is None:
             return {"available": False, "metrics": {}}
         try:
-            return {"available": True, "metrics": _jsonable(gw.storage.get_routing_stats(24))}
+            return {"available": True, "metrics": _jsonable(gw.storage.get_routing_stats(hours))}
         except Exception:
             return {"available": False, "metrics": {}}
 
@@ -1745,6 +1745,21 @@ def create_app() -> FastAPI:
     @app.get("/api/config")
     async def api_config():
         gw = state()
+        return _sanitized_config(gw.config)
+
+    @app.patch("/api/config/server")
+    async def api_update_server_config(request: Request):
+        gw = state()
+        try:
+            body = await request.json()
+        except Exception:
+            return JSONResponse({"error": "invalid JSON"}, status_code=400)
+        allowed = {"display_timezone", "log_level"}
+        updates = {k: v for k, v in body.items() if k in allowed}
+        if not updates:
+            return JSONResponse({"error": "no valid fields"}, status_code=400)
+        for k, v in updates.items():
+            setattr(gw.config.server, k, v)
         return _sanitized_config(gw.config)
 
     @app.patch("/api/config/sources/{source_name}")
@@ -1904,7 +1919,7 @@ def _passthrough_params(body: dict, anthropic: bool = False) -> dict:
     return {k: body[k] for k in keys if k in body and body[k] is not None}
 
 
-_BUCKET_SIZES = {"5m": 300, "15m": 900, "1h": 3600, "1d": 86400}
+_BUCKET_SIZES = {"5m": 300, "15m": 900, "1h": 3600, "6h": 21600, "1d": 86400}
 
 
 def _bucket_seconds(bucket: str) -> int:

@@ -34,7 +34,7 @@ async function deleteJSON(path) {
 }
 
 export const api = {
-  metrics: () => getJSON("/api/metrics"),
+  metrics: (hours = 24) => getJSON(`/api/metrics?hours=${hours}`),
   timeseries: (hours = 24, bucket = "1h") =>
     getJSON(`/api/metrics/timeseries?hours=${hours}&bucket=${bucket}`),
   models: () => getJSON("/api/models"),
@@ -56,6 +56,7 @@ export const api = {
     deleteJSON(`/api/governor/class-overrides/${encodeURIComponent(job)}`),
   sessions: (hours = 24) => getJSON(`/api/sessions?hours=${hours}`),
   costs: (days = 30) => getJSON(`/api/costs?days=${days}`),
+  updateServerConfig: (updates) => patchJSON("/api/config/server", updates),
   updateSourcePolicy: (name, updates) =>
     patchJSON(`/api/config/sources/${encodeURIComponent(name)}`, updates),
   createSourcePolicy: (name, fields) =>
