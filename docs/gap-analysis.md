@@ -4,6 +4,14 @@
 **Internal Loom**: ~/Code/loom/ (~25K LOC, 115 Python files)
 **OSS Loom**: ~/Code/loom-oss/ (~6K LOC, 30 Python files)
 
+## Design Principles
+
+- **Dashboard-first configuration**: Every configuration value must be manageable
+  through the web dashboard, not just through code or YAML. The gateway exposes
+  CRUD API endpoints for each config domain; the dashboard consumes them. Code
+  should accept dynamic values from the API, not hardcode fixed sets. YAML files
+  provide initial defaults; the dashboard provides runtime overrides.
+
 ## Status Legend
 - **PORTED** — Already in loom-oss
 - **PORT** — Should be ported to loom-oss
