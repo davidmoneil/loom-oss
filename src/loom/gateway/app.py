@@ -1149,7 +1149,6 @@ def create_app() -> FastAPI:
                     "no Anthropic backend configured", status_code=500
                 )
 
-            forward = _passthrough_params(body, anthropic=True)
             actual_model = model_cfg.model_id if model_cfg else model
 
             # Capture inbound headers & query string for upstream forwarding.
@@ -1185,7 +1184,7 @@ def create_app() -> FastAPI:
                 stream=stream,
                 inbound_headers=client_headers,
                 query_string=query_string,
-                **forward,
+                raw_body=body,
             )
 
             meta = {

@@ -28,20 +28,34 @@ _KNOWN_MODELS = [
 class AnthropicBackend(ProviderBackend):
     name = "anthropic"
 
+    _HOP_BY_HOP = frozenset({
+        "host", "connection", "keep-alive", "proxy-authenticate",
+        "proxy-authorization", "te", "trailers", "transfer-encoding",
+        "upgrade", "accept-encoding", "content-length",
+    })
+
     def _headers(
         self,
         api_key: str,
         inbound_headers: dict[str, str] | None = None,
     ) -> dict[str, str]:
-        headers = {
-            "Content-Type": "application/json",
-            "anthropic-version": ANTHROPIC_VERSION,
-        }
         if inbound_headers:
-            if "anthropic-version" in inbound_headers:
-                headers["anthropic-version"] = inbound_headers["anthropic-version"]
-            if "anthropic-beta" in inbound_headers:
-                headers["anthropic-beta"] = inbound_headers["anthropic-beta"]
+            headers = {
+                k: v
+                for k, v in inbound_headers.items()
+                if k.lower() not in self._HOP_BY_HOP
+            }
+            headers["Content-Type"] = "application/json"
+            headers.setdefault("anthropic-version", ANTHROPIC_VERSION)
+            upstream_host = self.api_base.replace("https://", "").replace(
+                "http://", ""
+            ).split("/")[0]
+            headers["host"] = upstream_host
+        else:
+            headers = {
+                "Content-Type": "application/json",
+                "anthropic-version": ANTHROPIC_VERSION,
+            }
         if api_key:
             if api_key.startswith("sk-ant-oat"):
                 headers["Authorization"] = f"Bearer {api_key}"
@@ -63,18 +77,22 @@ class AnthropicBackend(ProviderBackend):
         stream: bool = False,
         inbound_headers: dict[str, str] | None = None,
         query_string: str = "",
+        raw_body: dict | None = None,
         **kwargs,
     ) -> dict | AsyncIterator[bytes]:
-        body: dict = {"model": model, "messages": messages}
-        for key, value in kwargs.items():
-            if value is not None:
-                body[key] = value
-        # Anthropic requires max_tokens; supply a default if the client omitted
-        # it — but not when extended thinking is enabled (thinking sets its own
-        # budget and max_tokens is handled differently).
-        if "thinking" not in body:
-            body.setdefault("max_tokens", 4096)
-        body["stream"] = stream
+        if raw_body is not None:
+            body = dict(raw_body)
+            body["model"] = model
+            body["messages"] = messages
+            body["stream"] = stream
+        else:
+            body = {"model": model, "messages": messages}
+            for key, value in kwargs.items():
+                if value is not None:
+                    body[key] = value
+            if "thinking" not in body:
+                body.setdefault("max_tokens", 4096)
+            body["stream"] = stream
 
         if stream:
             return self._stream(body, api_key, inbound_headers, query_string)
@@ -116,17 +134,27 @@ class AnthropicBackend(ProviderBackend):
     ) -> dict:
         client = await self.get_client()
         url = f"/v1/messages?{query_string}" if query_string else "/v1/messages"
+        headers = self._headers(api_key, inbound_headers)
         try:
-            resp = await client.post(
-                url, json=body, headers=self._headers(api_key, inbound_headers)
-            )
+            resp = await client.post(url, json=body, headers=headers)
         except httpx.HTTPError as exc:
             raise ProviderError(f"anthropic request failed: {exc}") from exc
         if resp.status_code >= 400:
+            payload = _safe_json(resp)
+            import logging
+            logging.getLogger("loom.anthropic").error(
+                "upstream %d | model=%s thinking=%s headers=%s body_keys=%s | resp=%s",
+                resp.status_code,
+                body.get("model"),
+                "thinking" in body,
+                {k: v for k, v in headers.items() if k != "x-api-key" and k != "Authorization"},
+                list(body.keys()),
+                payload,
+            )
             raise ProviderError(
                 f"anthropic returned {resp.status_code}",
                 status_code=resp.status_code,
-                payload=_safe_json(resp),
+                payload=payload,
             )
         return resp.json()
 
@@ -144,10 +172,22 @@ class AnthropicBackend(ProviderBackend):
         ) as resp:
             if resp.status_code >= 400:
                 await resp.aread()
+                payload = _safe_json(resp)
+                import logging
+                logging.getLogger("loom.anthropic").error(
+                    "upstream stream %d | model=%s thinking=%s headers=%s body_keys=%s | resp=%s",
+                    resp.status_code,
+                    body.get("model"),
+                    "thinking" in body,
+                    {k: v for k, v in self._headers(api_key, inbound_headers).items()
+                     if k not in ("x-api-key", "Authorization")},
+                    list(body.keys()),
+                    payload,
+                )
                 raise ProviderError(
                     f"anthropic stream returned {resp.status_code}",
                     status_code=resp.status_code,
-                    payload=_safe_json(resp),
+                    payload=payload,
                 )
             async for chunk in resp.aiter_raw():
                 if chunk:
