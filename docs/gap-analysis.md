@@ -128,6 +128,14 @@
 
 ---
 
+## 10. Design Considerations (Future)
+
+| Feature | Internal | OSS | Status | Notes |
+|---------|----------|-----|--------|-------|
+| Per-turn model routing | Not implemented | — | **DESIGN** | [Design doc](design/per-turn-routing.md) — route different turns within an interactive session to different models based on complexity. Infrastructure exists (per-request routing in gateway); needs data + policy before implementing. |
+
+---
+
 ## Summary
 
 | Category | PORTED | PORT | PORT-HOMELAB | BUILD | CUT | NEW-OSS |
