@@ -3,6 +3,8 @@ import ReactDOM from "react-dom/client";
 import { HashRouter, Routes, Route, Navigate } from "react-router-dom";
 import Layout from "./components/Layout.jsx";
 import Overview from "./pages/Overview.jsx";
+import Sessions from "./pages/Sessions.jsx";
+import Costs from "./pages/Costs.jsx";
 import Metrics from "./pages/Metrics.jsx";
 import Audit from "./pages/Audit.jsx";
 import Scanner from "./pages/Scanner.jsx";
@@ -15,6 +17,8 @@ ReactDOM.createRoot(document.getElementById("root")).render(
       <Routes>
         <Route element={<Layout />}>
           <Route path="/" element={<Overview />} />
+          <Route path="/sessions" element={<Sessions />} />
+          <Route path="/costs" element={<Costs />} />
           <Route path="/metrics" element={<Metrics />} />
           <Route path="/audit" element={<Audit />} />
           <Route path="/scanner" element={<Scanner />} />

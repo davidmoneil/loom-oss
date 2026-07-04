@@ -4,6 +4,8 @@ import { api, setDisplayTimezone } from "../api.js";
 
 const NAV = [
   { to: "/", label: "Overview", end: true, icon: GridIcon },
+  { to: "/sessions", label: "Sessions", icon: UsersIcon },
+  { to: "/costs", label: "Costs", icon: DollarIcon },
   { to: "/metrics", label: "Metrics", icon: ChartIcon },
   { to: "/audit", label: "Audit", icon: ListIcon },
   { to: "/scanner", label: "Data Protection", icon: ShieldIcon },
@@ -93,6 +95,26 @@ function ChartIcon() {
     <svg className="h-5 w-5 shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth="2">
       <path d="M3 3v18h18" />
       <path d="M7 14l3-4 3 3 4-6" />
+    </svg>
+  );
+}
+
+function UsersIcon() {
+  return (
+    <svg className="h-5 w-5 shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth="2">
+      <path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2" />
+      <circle cx="9" cy="7" r="4" />
+      <path d="M23 21v-2a4 4 0 0 0-3-3.87" />
+      <path d="M16 3.13a4 4 0 0 1 0 7.75" />
+    </svg>
+  );
+}
+
+function DollarIcon() {
+  return (
+    <svg className="h-5 w-5 shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth="2">
+      <line x1="12" y1="1" x2="12" y2="23" />
+      <path d="M17 5H9.5a3.5 3.5 0 0 0 0 7h5a3.5 3.5 0 0 1 0 7H6" />
     </svg>
   );
 }

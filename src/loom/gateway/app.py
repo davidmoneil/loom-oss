@@ -61,9 +61,10 @@ except Exception:  # pragma: no cover - degraded mode
     RoutingEngine = None  # type: ignore
 
 try:
-    from loom.detection.engine import DetectionEngine  # type: ignore
+    from loom.detection.engine import DetectionEngine, classify_task_type as _detection_classify  # type: ignore
 except Exception:  # pragma: no cover - degraded mode
     DetectionEngine = None  # type: ignore
+    _detection_classify = None
 
 try:
     from loom.compression.processor import ContentProcessor  # type: ignore
@@ -446,22 +447,22 @@ def _model_cost(model_cfg: Optional[ModelConfig], usage: Any) -> float:
 #  Routing helpers
 # --------------------------------------------------------------------------- #
 def _classify_task_type(body: dict, messages: list[dict]) -> str:
-    """Lightweight task-type heuristic used to seed routing decisions."""
+    """Classify the task type for routing decisions.
+
+    Delegates to the detection engine's 7-type classifier when available,
+    falling back to a lightweight heuristic for tool_use detection (which
+    the detection engine doesn't cover since it's request-structure-based).
+    """
     if body.get("tools") or body.get("functions"):
         return "tool_use"
+    if _detection_classify is not None:
+        return _detection_classify(messages)
     response_format = body.get("response_format")
     if isinstance(response_format, dict) and response_format.get("type") in (
         "json_object",
         "json_schema",
     ):
         return "json_generation"
-    blob = " ".join(
-        str(m.get("content", "")) for m in messages if isinstance(m, dict)
-    ).lower()
-    if "json" in blob:
-        return "json_generation"
-    if any(k in blob for k in ("story", "poem", "creative", "imagine")):
-        return "story_generation"
     return "general"
 
 
@@ -508,7 +509,7 @@ def _select_model(
     task_type = _classify_task_type(body, messages)
 
     explicit = requested_model not in (None, "", "auto", "loom-auto")
-    if explicit:
+    if explicit and not policy.per_turn_routing:
         return requested_model, task_type, "client_specified"  # type: ignore[return-value]
 
     if policy.pinned_model:
@@ -1746,6 +1747,52 @@ def create_app() -> FastAPI:
         gw = state()
         return _sanitized_config(gw.config)
 
+    @app.patch("/api/config/sources/{source_name}")
+    async def api_update_source_policy(source_name: str, request: Request):
+        gw = state()
+        try:
+            body = await request.json()
+        except Exception:
+            return JSONResponse({"error": "invalid JSON"}, status_code=400)
+        allowed = {
+            "minimum_tier", "requires_tools", "allowed_providers",
+            "budget_tier", "pinned_model", "compression_tier",
+            "per_turn_routing",
+        }
+        updates = {k: v for k, v in body.items() if k in allowed}
+        if not updates:
+            return JSONResponse({"error": "no valid fields"}, status_code=400)
+        if source_name not in gw.config.sources:
+            gw.config.sources[source_name] = SourcePolicy()
+        policy = gw.config.sources[source_name]
+        for k, v in updates.items():
+            setattr(policy, k, v)
+        return _sanitized_config(gw.config)
+
+    @app.put("/api/config/sources/{source_name}")
+    async def api_create_source_policy(source_name: str, request: Request):
+        gw = state()
+        try:
+            body = await request.json()
+        except Exception:
+            return JSONResponse({"error": "invalid JSON"}, status_code=400)
+        allowed = {
+            "minimum_tier", "requires_tools", "allowed_providers",
+            "budget_tier", "pinned_model", "compression_tier",
+            "per_turn_routing",
+        }
+        fields = {k: v for k, v in body.items() if k in allowed}
+        gw.config.sources[source_name] = SourcePolicy(**fields)
+        return _sanitized_config(gw.config)
+
+    @app.delete("/api/config/sources/{source_name}")
+    async def api_delete_source_policy(source_name: str):
+        gw = state()
+        if source_name not in gw.config.sources:
+            return JSONResponse({"error": "source not found"}, status_code=404)
+        del gw.config.sources[source_name]
+        return _sanitized_config(gw.config)
+
     # -------------------------------------------------------- scanner management
     @app.get("/api/scanner/rules")
     async def api_scanner_rules():
@@ -2062,6 +2109,8 @@ def _sanitized_config(config: LoomConfig) -> dict:
                 "allowed_providers": s.allowed_providers,
                 "budget_tier": s.budget_tier,
                 "pinned_model": s.pinned_model,
+                "compression_tier": s.compression_tier,
+                "per_turn_routing": s.per_turn_routing,
             }
             for name, s in config.sources.items()
         },

@@ -17,6 +17,16 @@ async function patchJSON(path, body) {
   return res.json();
 }
 
+async function putJSON(path, body) {
+  const res = await fetch(path, {
+    method: "PUT",
+    headers: { "Content-Type": "application/json", Accept: "application/json" },
+    body: JSON.stringify(body),
+  });
+  if (!res.ok) throw new Error(`${path} -> ${res.status}`);
+  return res.json();
+}
+
 async function deleteJSON(path) {
   const res = await fetch(path, { method: "DELETE", headers: { Accept: "application/json" } });
   if (!res.ok) throw new Error(`${path} -> ${res.status}`);
@@ -44,6 +54,14 @@ export const api = {
   updateGovernor: (updates) => patchJSON("/api/governor", updates),
   deleteGovernorOverride: (job) =>
     deleteJSON(`/api/governor/class-overrides/${encodeURIComponent(job)}`),
+  sessions: (hours = 24) => getJSON(`/api/sessions?hours=${hours}`),
+  costs: (days = 30) => getJSON(`/api/costs?days=${days}`),
+  updateSourcePolicy: (name, updates) =>
+    patchJSON(`/api/config/sources/${encodeURIComponent(name)}`, updates),
+  createSourcePolicy: (name, fields) =>
+    putJSON(`/api/config/sources/${encodeURIComponent(name)}`, fields),
+  deleteSourcePolicy: (name) =>
+    deleteJSON(`/api/config/sources/${encodeURIComponent(name)}`),
 };
 
 // Display timezone — loaded from server config, cached in module state.

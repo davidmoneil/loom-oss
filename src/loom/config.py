@@ -53,6 +53,7 @@ class SourcePolicy(BaseModel):
     budget_tier: Optional[str] = None
     pinned_model: Optional[str] = None
     compression_tier: Optional[str] = None
+    per_turn_routing: bool = False
 
 
 class RoutingConfig(BaseModel):

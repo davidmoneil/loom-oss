@@ -25,16 +25,20 @@ export default function Overview() {
   const [updatedAt, setUpdatedAt] = useState(null);
   const [error, setError] = useState(null);
 
+  const [sessions, setSessions] = useState(null);
+
   const load = useCallback(async () => {
     try {
-      const [m, ts, h] = await Promise.all([
+      const [m, ts, h, s] = await Promise.all([
         api.metrics(),
         api.timeseries(24, "1h"),
         api.health().catch(() => null),
+        api.sessions(24).catch(() => null),
       ]);
       setMetrics(m?.metrics ?? {});
       setSeries(ts);
       setHealth(h);
+      setSessions(s);
       setUpdatedAt(new Date());
       setError(null);
     } catch (e) {
@@ -91,6 +95,21 @@ export default function Overview() {
           loading={loading}
         />
       </div>
+
+      {sessions?.supported && (
+        <div className="mt-4 grid grid-cols-2 gap-4 lg:grid-cols-4">
+          <StatCard
+            label="Active Sessions (24h)"
+            value={fmtNumber(sessions.sessions)}
+            loading={loading}
+          />
+          <StatCard
+            label="Total Turns (24h)"
+            value={fmtNumber(sessions.total_turns)}
+            loading={loading}
+          />
+        </div>
+      )}
 
       <div className="mt-6 grid grid-cols-1 gap-4 lg:grid-cols-3">
         <div className="lg:col-span-2">
