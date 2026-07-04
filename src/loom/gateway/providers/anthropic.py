@@ -28,18 +28,29 @@ _KNOWN_MODELS = [
 class AnthropicBackend(ProviderBackend):
     name = "anthropic"
 
-    def _headers(self, api_key: str) -> dict[str, str]:
+    def _headers(
+        self,
+        api_key: str,
+        inbound_headers: dict[str, str] | None = None,
+    ) -> dict[str, str]:
         headers = {
             "Content-Type": "application/json",
             "anthropic-version": ANTHROPIC_VERSION,
         }
+        if inbound_headers:
+            if "anthropic-version" in inbound_headers:
+                headers["anthropic-version"] = inbound_headers["anthropic-version"]
+            if "anthropic-beta" in inbound_headers:
+                headers["anthropic-beta"] = inbound_headers["anthropic-beta"]
         if api_key:
-            # OAuth access tokens (sk-ant-oat...) authenticate via
-            # Authorization: Bearer, not x-api-key — interactive Claude Code
-            # sessions use these. API keys keep the x-api-key header.
             if api_key.startswith("sk-ant-oat"):
                 headers["Authorization"] = f"Bearer {api_key}"
-                headers["anthropic-beta"] = "oauth-2025-04-20"
+                existing_beta = headers.get("anthropic-beta", "")
+                oauth_beta = "oauth-2025-04-20"
+                if oauth_beta not in existing_beta:
+                    headers["anthropic-beta"] = (
+                        f"{existing_beta},{oauth_beta}" if existing_beta else oauth_beta
+                    )
             else:
                 headers["x-api-key"] = api_key
         return headers
@@ -50,19 +61,24 @@ class AnthropicBackend(ProviderBackend):
         messages: list[dict],
         api_key: str,
         stream: bool = False,
+        inbound_headers: dict[str, str] | None = None,
+        query_string: str = "",
         **kwargs,
     ) -> dict | AsyncIterator[bytes]:
         body: dict = {"model": model, "messages": messages}
         for key, value in kwargs.items():
             if value is not None:
                 body[key] = value
-        # Anthropic requires max_tokens; supply a default if the client omitted it.
-        body.setdefault("max_tokens", 4096)
+        # Anthropic requires max_tokens; supply a default if the client omitted
+        # it — but not when extended thinking is enabled (thinking sets its own
+        # budget and max_tokens is handled differently).
+        if "thinking" not in body:
+            body.setdefault("max_tokens", 4096)
         body["stream"] = stream
 
         if stream:
-            return self._stream(body, api_key)
-        return await self._complete(body, api_key)
+            return self._stream(body, api_key, inbound_headers, query_string)
+        return await self._complete(body, api_key, inbound_headers, query_string)
 
     async def count_tokens(
         self, body: dict, inbound_headers: dict[str, str]
@@ -91,11 +107,18 @@ class AnthropicBackend(ProviderBackend):
             raise ProviderError(f"anthropic request failed: {exc}") from exc
         return resp.status_code, _safe_json(resp)
 
-    async def _complete(self, body: dict, api_key: str) -> dict:
+    async def _complete(
+        self,
+        body: dict,
+        api_key: str,
+        inbound_headers: dict[str, str] | None = None,
+        query_string: str = "",
+    ) -> dict:
         client = await self.get_client()
+        url = f"/v1/messages?{query_string}" if query_string else "/v1/messages"
         try:
             resp = await client.post(
-                "/v1/messages", json=body, headers=self._headers(api_key)
+                url, json=body, headers=self._headers(api_key, inbound_headers)
             )
         except httpx.HTTPError as exc:
             raise ProviderError(f"anthropic request failed: {exc}") from exc
@@ -107,10 +130,17 @@ class AnthropicBackend(ProviderBackend):
             )
         return resp.json()
 
-    async def _stream(self, body: dict, api_key: str) -> AsyncIterator[bytes]:
+    async def _stream(
+        self,
+        body: dict,
+        api_key: str,
+        inbound_headers: dict[str, str] | None = None,
+        query_string: str = "",
+    ) -> AsyncIterator[bytes]:
         client = await self.get_client()
+        url = f"/v1/messages?{query_string}" if query_string else "/v1/messages"
         async with client.stream(
-            "POST", "/v1/messages", json=body, headers=self._headers(api_key)
+            "POST", url, json=body, headers=self._headers(api_key, inbound_headers)
         ) as resp:
             if resp.status_code >= 400:
                 await resp.aread()

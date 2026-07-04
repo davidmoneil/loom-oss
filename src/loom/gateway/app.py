@@ -115,6 +115,9 @@ class GatewayState:
         # Cumulative compression rollup (estimated tokens) for /health.
         self.comp_tokens_before: int = 0
         self.comp_tokens_after: int = 0
+        # Cumulative thinking-block stripping stats.
+        self.thinking_blocks_stripped: int = 0
+        self.thinking_bytes_saved: int = 0
         self.config: LoomConfig = LoomConfig()
         self.backends: dict[str, ProviderBackend] = {}
         # model id / display name -> (provider_name, ModelConfig)
@@ -1014,6 +1017,11 @@ def create_app() -> FastAPI:
                 except Exception:
                     pass
 
+            # Strip thinking blocks from prior assistant turns.
+            messages, thinking_stripped, thinking_bytes = _strip_thinking_blocks(messages)
+            gw.thinking_blocks_stripped += thinking_stripped
+            gw.thinking_bytes_saved += thinking_bytes
+
             # Inline compression: compress older messages before forwarding.
             comp_before = comp_after = 0
             if gw.compression is not None and len(messages) > 2:
@@ -1144,6 +1152,10 @@ def create_app() -> FastAPI:
             forward = _passthrough_params(body, anthropic=True)
             actual_model = model_cfg.model_id if model_cfg else model
 
+            # Capture inbound headers & query string for upstream forwarding.
+            client_headers = dict(request.headers)
+            query_string = request.url.query or ""
+
             # Session tracking: stable conversation fingerprint, turn counter.
             session_id = derive_session_id(messages, source)
             if gw.storage is not None and session_id != "unknown":
@@ -1151,6 +1163,11 @@ def create_app() -> FastAPI:
                     gw.storage.touch_session(session_id, source)
                 except Exception:
                     pass
+
+            # Strip thinking blocks from prior assistant turns.
+            messages, thinking_stripped, thinking_bytes = _strip_thinking_blocks(messages)
+            gw.thinking_blocks_stripped += thinking_stripped
+            gw.thinking_bytes_saved += thinking_bytes
 
             # Inline compression: compress older messages before forwarding.
             comp_before = comp_after = 0
@@ -1166,6 +1183,8 @@ def create_app() -> FastAPI:
                 messages=messages,
                 api_key=api_key,
                 stream=stream,
+                inbound_headers=client_headers,
+                query_string=query_string,
                 **forward,
             )
 
@@ -1587,6 +1606,10 @@ def create_app() -> FastAPI:
                     else 0.0
                 ),
             },
+            "thinking_strip": {
+                "blocks_stripped": gw.thinking_blocks_stripped,
+                "bytes_saved": gw.thinking_bytes_saved,
+            },
             "sessions": _session_stats_block(gw),
         }
 
@@ -1859,7 +1882,7 @@ _OPENAI_PASSTHROUGH = (
 )
 _ANTHROPIC_PASSTHROUGH = (
     "temperature", "top_p", "top_k", "max_tokens", "stop_sequences", "system",
-    "tools", "tool_choice", "metadata",
+    "tools", "tool_choice", "metadata", "thinking",
 )
 
 
@@ -1907,6 +1930,53 @@ def derive_session_id(messages: list[dict], source: str) -> str:
             content = json.dumps(content)
     seed = f"{source}:{str(content)[:256]}"
     return "gw-" + hashlib.sha256(seed.encode()).hexdigest()[:16]
+
+
+
+def _strip_thinking_blocks(
+    messages: list[dict],
+) -> tuple[list[dict], int, int]:
+    """Remove thinking blocks from prior assistant turns.
+
+    Walks the *messages* array and strips content blocks with
+    type: "thinking" from every assistant message **except** the last
+    one (which may still be relevant for the current turn).
+
+    Returns (*messages*, *blocks_stripped*, *bytes_saved*).
+    """
+    # Find the index of the last assistant message.
+    last_assistant_idx: int = -1
+    for i in range(len(messages) - 1, -1, -1):
+        if messages[i].get("role") == "assistant":
+            last_assistant_idx = i
+            break
+
+    blocks_stripped = 0
+    bytes_saved = 0
+
+    for idx, msg in enumerate(messages):
+        if msg.get("role") != "assistant" or idx == last_assistant_idx:
+            continue
+        content = msg.get("content")
+        if not isinstance(content, list):
+            continue
+        filtered: list[dict] = []
+        for block in content:
+            if isinstance(block, dict) and block.get("type") == "thinking":
+                blocks_stripped += 1
+                # Estimate bytes from the thinking text.
+                thinking_text = block.get("thinking", "")
+                bytes_saved += len(thinking_text.encode("utf-8", errors="replace"))
+            else:
+                filtered.append(block)
+        if len(filtered) != len(content):
+            # If all blocks were thinking blocks, keep a minimal text block
+            # so the message content array is never empty.
+            if not filtered:
+                filtered = [{"type": "text", "text": ""}]
+            msg["content"] = filtered
+
+    return messages, blocks_stripped, bytes_saved
 
 
 def _estimate_tokens_safe(text: str) -> int:
