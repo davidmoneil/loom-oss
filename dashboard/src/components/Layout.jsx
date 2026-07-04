@@ -8,6 +8,10 @@ const NAV = [
   { to: "/audit", label: "Audit", icon: ListIcon },
   { to: "/scanner", label: "Data Protection", icon: ShieldIcon },
   { to: "/governor", label: "Governor", icon: GaugeIcon },
+  { to: "/rate-limits", label: "Rate Limits", icon: SpeedIcon },
+  { to: "/costs", label: "Costs", icon: DollarIcon },
+  { to: "/sessions", label: "Sessions", icon: UsersIcon },
+  { to: "/routing", label: "Routing", icon: RouteIcon },
 ];
 
 export default function Layout() {
@@ -106,6 +110,44 @@ function ListIcon() {
       <circle cx="3.5" cy="6" r="1" />
       <circle cx="3.5" cy="12" r="1" />
       <circle cx="3.5" cy="18" r="1" />
+    </svg>
+  );
+}
+
+function SpeedIcon() {
+  return (
+    <svg className="h-5 w-5 shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth="2">
+      <path d="M12 12m-10 0a10 10 0 1 0 20 0" />
+      <path d="M12 12l3.5-6" />
+      <circle cx="12" cy="12" r="1.5" />
+    </svg>
+  );
+}
+
+function DollarIcon() {
+  return (
+    <svg className="h-5 w-5 shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth="2">
+      <path d="M12 2v20M17 5H9.5a3.5 3.5 0 0 0 0 7h5a3.5 3.5 0 0 1 0 7H6" />
+    </svg>
+  );
+}
+
+function UsersIcon() {
+  return (
+    <svg className="h-5 w-5 shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth="2">
+      <path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2" />
+      <circle cx="9" cy="7" r="4" />
+      <path d="M23 21v-2a4 4 0 0 0-3-3.87M16 3.13a4 4 0 0 1 0 7.75" />
+    </svg>
+  );
+}
+
+function RouteIcon() {
+  return (
+    <svg className="h-5 w-5 shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth="2">
+      <circle cx="6" cy="19" r="3" />
+      <circle cx="18" cy="5" r="3" />
+      <path d="M12 19h4.5a3.5 3.5 0 0 0 0-7h-9a3.5 3.5 0 0 1 0-7H12" />
     </svg>
   );
 }

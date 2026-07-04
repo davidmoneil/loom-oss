@@ -44,6 +44,11 @@ export const api = {
   updateGovernor: (updates) => patchJSON("/api/governor", updates),
   deleteGovernorOverride: (job) =>
     deleteJSON(`/api/governor/class-overrides/${encodeURIComponent(job)}`),
+  rateLimits: (hours = 48) => getJSON(`/api/rate-limits?hours=${hours}`),
+  costs: (days = 30) => getJSON(`/api/costs?days=${days}`),
+  sessions: (hours = 24) => getJSON(`/api/sessions?hours=${hours}`),
+  routing: (hours = 24, limit = 200) =>
+    getJSON(`/api/routing?hours=${hours}&limit=${limit}`),
 };
 
 // Display timezone — loaded from server config, cached in module state.

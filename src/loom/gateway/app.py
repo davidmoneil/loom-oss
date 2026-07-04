@@ -1655,6 +1655,17 @@ def create_app() -> FastAPI:
                 pass
         return {**block, "hours": hours, "entries": entries}
 
+    # -------------------------------------------------------------- routing log
+    @app.get("/api/routing")
+    async def api_routing(hours: int = 24, limit: int = 200):
+        gw = state()
+        if gw.storage is None:
+            return {"available": False, "hours": hours, "total": 0, "entries": [], "by_reason": {}, "overrides": 0}
+        try:
+            return {"available": True, **_jsonable(gw.storage.get_routing_decisions(hours=hours, limit=limit))}
+        except Exception:
+            return {"available": False, "hours": hours, "total": 0, "entries": [], "by_reason": {}, "overrides": 0}
+
     # ------------------------------------------------------------------- models
     @app.get("/api/models")
     async def api_models():
