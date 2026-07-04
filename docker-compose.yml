@@ -19,6 +19,9 @@ services:
         required: false
     environment:
       LOOM_CONFIG: /app/loom.yaml
+    networks:
+      - default
+      - n8n_n8n-network
     deploy:
       resources:
         limits:
@@ -46,6 +49,10 @@ services:
       timeout: 5s
       retries: 5
     restart: unless-stopped
+
+networks:
+  n8n_n8n-network:
+    external: true
 
 volumes:
   loom-data:
