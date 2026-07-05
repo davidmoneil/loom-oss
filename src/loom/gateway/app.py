@@ -1169,6 +1169,7 @@ def create_app() -> FastAPI:
                 api_key=api_key,
                 stream=stream,
                 inbound_headers=inbound_hdrs,
+                query_string=request.url.query or "",
                 **forward,
             )
 

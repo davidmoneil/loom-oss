@@ -28,7 +28,11 @@ _KNOWN_MODELS = [
 class AnthropicBackend(ProviderBackend):
     name = "anthropic"
 
-    _FORWARDED_HEADERS = ("anthropic-version", "anthropic-beta")
+    _STRIP_HEADERS = frozenset({
+        "host", "connection", "keep-alive", "proxy-authenticate",
+        "proxy-authorization", "te", "trailers", "transfer-encoding",
+        "upgrade", "accept-encoding", "content-length", "content-type",
+    })
 
     def _headers(
         self,
@@ -40,9 +44,8 @@ class AnthropicBackend(ProviderBackend):
             "anthropic-version": ANTHROPIC_VERSION,
         }
         if inbound_headers:
-            for name in self._FORWARDED_HEADERS:
-                value = inbound_headers.get(name)
-                if value:
+            for name, value in inbound_headers.items():
+                if name.lower() not in self._STRIP_HEADERS:
                     headers[name] = value
         if api_key:
             if api_key.startswith("sk-ant-oat"):
@@ -62,6 +65,7 @@ class AnthropicBackend(ProviderBackend):
         api_key: str,
         stream: bool = False,
         inbound_headers: dict[str, str] | None = None,
+        query_string: str = "",
         **kwargs,
     ) -> dict | AsyncIterator[bytes]:
         body: dict = {"model": model, "messages": messages}
@@ -72,8 +76,8 @@ class AnthropicBackend(ProviderBackend):
         body["stream"] = stream
 
         if stream:
-            return self._stream(body, api_key, inbound_headers)
-        return await self._complete(body, api_key, inbound_headers)
+            return self._stream(body, api_key, inbound_headers, query_string)
+        return await self._complete(body, api_key, inbound_headers, query_string)
 
     async def count_tokens(
         self, body: dict, inbound_headers: dict[str, str]
@@ -102,16 +106,23 @@ class AnthropicBackend(ProviderBackend):
             raise ProviderError(f"anthropic request failed: {exc}") from exc
         return resp.status_code, _safe_json(resp)
 
+    def _upstream_url(self, path: str, query_string: str) -> str:
+        if query_string:
+            return f"{path}?{query_string}"
+        return path
+
     async def _complete(
         self,
         body: dict,
         api_key: str,
         inbound_headers: dict[str, str] | None = None,
+        query_string: str = "",
     ) -> dict:
         client = await self.get_client()
+        url = self._upstream_url("/v1/messages", query_string)
         try:
             resp = await client.post(
-                "/v1/messages",
+                url,
                 json=body,
                 headers=self._headers(api_key, inbound_headers),
             )
@@ -130,11 +141,13 @@ class AnthropicBackend(ProviderBackend):
         body: dict,
         api_key: str,
         inbound_headers: dict[str, str] | None = None,
+        query_string: str = "",
     ) -> AsyncIterator[bytes]:
         client = await self.get_client()
+        url = self._upstream_url("/v1/messages", query_string)
         async with client.stream(
             "POST",
-            "/v1/messages",
+            url,
             json=body,
             headers=self._headers(api_key, inbound_headers),
         ) as resp:
