@@ -1162,11 +1162,13 @@ def create_app() -> FastAPI:
                 gw.comp_tokens_before += comp_before
                 gw.comp_tokens_after += comp_after
 
+            inbound_hdrs = dict(request.headers)
             result = await backend.chat_completion(
                 model=actual_model,
                 messages=messages,
                 api_key=api_key,
                 stream=stream,
+                inbound_headers=inbound_hdrs,
                 **forward,
             )
 
@@ -1910,7 +1912,7 @@ _OPENAI_PASSTHROUGH = (
 )
 _ANTHROPIC_PASSTHROUGH = (
     "temperature", "top_p", "top_k", "max_tokens", "stop_sequences", "system",
-    "tools", "tool_choice", "metadata",
+    "tools", "tool_choice", "metadata", "thinking",
 )
 
 

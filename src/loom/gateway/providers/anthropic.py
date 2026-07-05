@@ -28,18 +28,29 @@ _KNOWN_MODELS = [
 class AnthropicBackend(ProviderBackend):
     name = "anthropic"
 
-    def _headers(self, api_key: str) -> dict[str, str]:
-        headers = {
+    _FORWARDED_HEADERS = ("anthropic-version", "anthropic-beta")
+
+    def _headers(
+        self,
+        api_key: str,
+        inbound_headers: dict[str, str] | None = None,
+    ) -> dict[str, str]:
+        headers: dict[str, str] = {
             "Content-Type": "application/json",
             "anthropic-version": ANTHROPIC_VERSION,
         }
+        if inbound_headers:
+            for name in self._FORWARDED_HEADERS:
+                value = inbound_headers.get(name)
+                if value:
+                    headers[name] = value
         if api_key:
-            # OAuth access tokens (sk-ant-oat...) authenticate via
-            # Authorization: Bearer, not x-api-key — interactive Claude Code
-            # sessions use these. API keys keep the x-api-key header.
             if api_key.startswith("sk-ant-oat"):
                 headers["Authorization"] = f"Bearer {api_key}"
-                headers["anthropic-beta"] = "oauth-2025-04-20"
+                beta = headers.get("anthropic-beta", "")
+                oauth_flag = "oauth-2025-04-20"
+                if oauth_flag not in beta:
+                    headers["anthropic-beta"] = f"{beta},{oauth_flag}".lstrip(",")
             else:
                 headers["x-api-key"] = api_key
         return headers
@@ -50,19 +61,19 @@ class AnthropicBackend(ProviderBackend):
         messages: list[dict],
         api_key: str,
         stream: bool = False,
+        inbound_headers: dict[str, str] | None = None,
         **kwargs,
     ) -> dict | AsyncIterator[bytes]:
         body: dict = {"model": model, "messages": messages}
         for key, value in kwargs.items():
             if value is not None:
                 body[key] = value
-        # Anthropic requires max_tokens; supply a default if the client omitted it.
         body.setdefault("max_tokens", 4096)
         body["stream"] = stream
 
         if stream:
-            return self._stream(body, api_key)
-        return await self._complete(body, api_key)
+            return self._stream(body, api_key, inbound_headers)
+        return await self._complete(body, api_key, inbound_headers)
 
     async def count_tokens(
         self, body: dict, inbound_headers: dict[str, str]
@@ -91,11 +102,18 @@ class AnthropicBackend(ProviderBackend):
             raise ProviderError(f"anthropic request failed: {exc}") from exc
         return resp.status_code, _safe_json(resp)
 
-    async def _complete(self, body: dict, api_key: str) -> dict:
+    async def _complete(
+        self,
+        body: dict,
+        api_key: str,
+        inbound_headers: dict[str, str] | None = None,
+    ) -> dict:
         client = await self.get_client()
         try:
             resp = await client.post(
-                "/v1/messages", json=body, headers=self._headers(api_key)
+                "/v1/messages",
+                json=body,
+                headers=self._headers(api_key, inbound_headers),
             )
         except httpx.HTTPError as exc:
             raise ProviderError(f"anthropic request failed: {exc}") from exc
@@ -107,10 +125,18 @@ class AnthropicBackend(ProviderBackend):
             )
         return resp.json()
 
-    async def _stream(self, body: dict, api_key: str) -> AsyncIterator[bytes]:
+    async def _stream(
+        self,
+        body: dict,
+        api_key: str,
+        inbound_headers: dict[str, str] | None = None,
+    ) -> AsyncIterator[bytes]:
         client = await self.get_client()
         async with client.stream(
-            "POST", "/v1/messages", json=body, headers=self._headers(api_key)
+            "POST",
+            "/v1/messages",
+            json=body,
+            headers=self._headers(api_key, inbound_headers),
         ) as resp:
             if resp.status_code >= 400:
                 await resp.aread()
