@@ -502,10 +502,13 @@ class PostgresStorage:
         ).fetchone()
         return int(row[0]) if row else 1
 
-    def get_session_stats(self) -> dict:
-        row = self.conn.execute(
-            "SELECT COUNT(*), COALESCE(SUM(request_count), 0) FROM sessions"
-        ).fetchone()
+    def get_session_stats(self, hours: int | None = None) -> dict:
+        sql = "SELECT COUNT(*), COALESCE(SUM(request_count), 0) FROM sessions"
+        params: tuple = ()
+        if hours is not None:
+            sql += " WHERE ended_at >= %s"
+            params = (time.time() - hours * 3600,)
+        row = self.conn.execute(sql, params).fetchone()
         return {"sessions": row[0], "total_turns": int(row[1])}
 
     def list_sessions(self, hours: int = 24, limit: int = 200) -> list[dict]:

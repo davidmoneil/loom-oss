@@ -208,6 +208,30 @@ def test_rate_limits_empty_skipped(storage):
 def test_rate_limits_no_data(storage):
     assert storage.get_rate_limit_current("anthropic") is None
     assert storage.get_rate_limit_trend(hours=1) == []
+def test_session_stats_windowed(storage):
+    """Windowed stats match windowed entries so the dashboard header and
+    table agree; a session outside the window is excluded from both."""
+    import time
+
+    recent = f"sess-{uuid.uuid4().hex[:12]}"
+    stale = f"sess-{uuid.uuid4().hex[:12]}"
+    storage.touch_session(recent, source="pytest")
+    storage.touch_session(stale, source="pytest")
+
+    ph = "%s" if type(storage).__name__ == "PostgresStorage" else "?"
+    storage.conn.execute(
+        f"UPDATE sessions SET ended_at = {ph} WHERE session_id = {ph}",
+        (time.time() - 72 * 3600, stale),
+    )
+    storage.conn.commit()
+
+    windowed = storage.get_session_stats(hours=24)
+    assert windowed["sessions"] == len(storage.list_sessions(hours=24))
+    listed = {e["session_id"] for e in storage.list_sessions(hours=24)}
+    assert recent in listed
+    assert stale not in listed
+    # Lifetime stats still count the stale session.
+    assert storage.get_session_stats()["sessions"] > windowed["sessions"]
 
 
 class _Cfg:
