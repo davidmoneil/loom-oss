@@ -25,8 +25,52 @@ _KNOWN_MODELS = [
 ]
 
 
+_RATELIMIT_HEADER_MAP = {
+    "anthropic-ratelimit-requests-limit": "ratelimit_requests_limit",
+    "anthropic-ratelimit-requests-remaining": "ratelimit_requests_remaining",
+    "anthropic-ratelimit-requests-reset": "ratelimit_requests_reset",
+    "anthropic-ratelimit-tokens-limit": "ratelimit_tokens_limit",
+    "anthropic-ratelimit-tokens-remaining": "ratelimit_tokens_remaining",
+    "anthropic-ratelimit-tokens-reset": "ratelimit_tokens_reset",
+    "anthropic-ratelimit-input-tokens-limit": "ratelimit_input_tokens_limit",
+    "anthropic-ratelimit-input-tokens-remaining": "ratelimit_input_tokens_remaining",
+    "anthropic-ratelimit-input-tokens-reset": "ratelimit_input_tokens_reset",
+    "anthropic-ratelimit-output-tokens-limit": "ratelimit_output_tokens_limit",
+    "anthropic-ratelimit-output-tokens-remaining": "ratelimit_output_tokens_remaining",
+    "anthropic-ratelimit-output-tokens-reset": "ratelimit_output_tokens_reset",
+    "retry-after": "retry_after",
+}
+
+
+def _extract_ratelimit_headers(resp: httpx.Response) -> dict:
+    out: dict = {}
+    for hdr, key in _RATELIMIT_HEADER_MAP.items():
+        raw = resp.headers.get(hdr)
+        if raw is None:
+            out[key] = None
+            continue
+        if key.endswith("_reset") or key == "retry_after":
+            out[key] = raw
+        else:
+            try:
+                out[key] = int(raw)
+            except (ValueError, TypeError):
+                out[key] = raw
+
+    for bucket in ("tokens", "input_tokens", "output_tokens"):
+        limit = out.get(f"ratelimit_{bucket}_limit")
+        remaining = out.get(f"ratelimit_{bucket}_remaining")
+        if isinstance(limit, int) and isinstance(remaining, int) and limit > 0:
+            out[f"ratelimit_{bucket}_utilization"] = round(1.0 - remaining / limit, 4)
+        else:
+            out[f"ratelimit_{bucket}_utilization"] = None
+
+    return out
+
+
 class AnthropicBackend(ProviderBackend):
     name = "anthropic"
+    _last_ratelimit: dict = {}
 
     _STRIP_HEADERS = frozenset({
         "host", "connection", "keep-alive", "proxy-authenticate",
@@ -135,6 +179,7 @@ class AnthropicBackend(ProviderBackend):
             )
         except httpx.HTTPError as exc:
             raise ProviderError(f"anthropic request failed: {exc}") from exc
+        self._last_ratelimit = _extract_ratelimit_headers(resp)
         if resp.status_code >= 400:
             payload = _safe_json(resp)
             import logging
@@ -167,6 +212,7 @@ class AnthropicBackend(ProviderBackend):
             json=body,
             headers=self._headers(api_key, inbound_headers),
         ) as resp:
+            self._last_ratelimit = _extract_ratelimit_headers(resp)
             if resp.status_code >= 400:
                 await resp.aread()
                 payload = _safe_json(resp)

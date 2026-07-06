@@ -229,6 +229,7 @@ def _record_request(
     response_text: Optional[str] = None,
     compressed: bool = False,
     compression_ratio: float = 1.0,
+    ratelimit: Optional[dict] = None,
 ) -> None:
     """Persist + audit a completed request. Never raises into the request path."""
     tokens_in, tokens_out = _extract_tokens(usage)
@@ -265,7 +266,7 @@ def _record_request(
 
     if state.audit is not None:
         try:
-            state.audit.log_request(
+            audit_kwargs: dict = dict(
                 request_id=request_id,
                 method=method,
                 path=path,
@@ -281,6 +282,9 @@ def _record_request(
                 routing_reason=routing_reason,
                 status_code=status_code,
             )
+            if ratelimit:
+                audit_kwargs["ratelimit"] = ratelimit
+            state.audit.log_request(**audit_kwargs)
         except Exception:
             pass
         try:
@@ -691,6 +695,7 @@ async def _wrapped_stream(
     upstream: AsyncIterator[bytes],
     meta: dict,
     t0: float,
+    backend: Any = None,
 ) -> AsyncIterator[bytes]:
     """Forward upstream bytes, scanning for sensitive data when buffering is enabled.
 
@@ -797,12 +802,14 @@ async def _wrapped_stream(
             body = json.dumps(exc.payload).encode("utf-8")
             yield b"data: " + body + b"\n\n"
 
+    rl = getattr(backend, "_last_ratelimit", None) if backend else None
     _record_request(
         state,
         status_code=status,
         latency_ms=round((time.monotonic() - t0) * 1000, 2),
         usage=None,
         cost=0.0,
+        ratelimit=rl,
         **meta,
     )
 
@@ -1050,11 +1057,12 @@ def create_app() -> FastAPI:
 
             if stream:
                 return StreamingResponse(
-                    _wrapped_stream(gw, result, meta, t0),  # type: ignore[arg-type]
+                    _wrapped_stream(gw, result, meta, t0, backend=backend),  # type: ignore[arg-type]
                     media_type="text/event-stream",
                     headers={"X-Loom-Request-Id": request_id},
                 )
 
+            rl = getattr(backend, "_last_ratelimit", None)
             usage = _extract_usage(result, provider_name)
             normalized = _normalize_response(result, provider_name, model_cfg.model_id)
             resp_text = _extract_response_text(normalized)
@@ -1066,6 +1074,7 @@ def create_app() -> FastAPI:
                 cost=_model_cost(model_cfg, usage),
                 messages=messages,
                 response_text=resp_text,
+                ratelimit=rl,
                 **meta,
             )
             normalized = _scan_response(gw, normalized, provider_name, model_cfg.model_id, source)
@@ -1190,11 +1199,12 @@ def create_app() -> FastAPI:
 
             if stream:
                 return StreamingResponse(
-                    _wrapped_stream(gw, result, meta, t0),  # type: ignore[arg-type]
+                    _wrapped_stream(gw, result, meta, t0, backend=backend),  # type: ignore[arg-type]
                     media_type="text/event-stream",
                     headers={"X-Loom-Request-Id": request_id},
                 )
 
+            rl = getattr(backend, "_last_ratelimit", None)
             usage = _extract_usage(result, provider_name)
             resp_text = _extract_response_text(result)
             _record_request(
@@ -1205,6 +1215,7 @@ def create_app() -> FastAPI:
                 cost=_model_cost(model_cfg, usage),
                 messages=messages,
                 response_text=resp_text,
+                ratelimit=rl,
                 **meta,
             )
             result = _scan_response(gw, result, provider_name, model, source)
