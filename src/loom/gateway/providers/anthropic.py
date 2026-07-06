@@ -66,14 +66,21 @@ class AnthropicBackend(ProviderBackend):
         stream: bool = False,
         inbound_headers: dict[str, str] | None = None,
         query_string: str = "",
+        raw_body: dict | None = None,
         **kwargs,
     ) -> dict | AsyncIterator[bytes]:
-        body: dict = {"model": model, "messages": messages}
-        for key, value in kwargs.items():
-            if value is not None:
-                body[key] = value
-        body.setdefault("max_tokens", 4096)
-        body["stream"] = stream
+        if raw_body is not None:
+            body = dict(raw_body)
+            body["model"] = model
+            body["messages"] = messages
+            body["stream"] = stream
+        else:
+            body = {"model": model, "messages": messages}
+            for key, value in kwargs.items():
+                if value is not None:
+                    body[key] = value
+            body.setdefault("max_tokens", 4096)
+            body["stream"] = stream
 
         if stream:
             return self._stream(body, api_key, inbound_headers, query_string)
@@ -129,10 +136,19 @@ class AnthropicBackend(ProviderBackend):
         except httpx.HTTPError as exc:
             raise ProviderError(f"anthropic request failed: {exc}") from exc
         if resp.status_code >= 400:
+            payload = _safe_json(resp)
+            import logging
+            logging.getLogger("loom.anthropic").error(
+                "upstream %s — headers sent: %s — payload: %s",
+                resp.status_code,
+                {k: v for k, v in self._headers(api_key, inbound_headers).items()
+                 if k.lower() != "x-api-key" and k.lower() != "authorization"},
+                payload,
+            )
             raise ProviderError(
                 f"anthropic returned {resp.status_code}",
                 status_code=resp.status_code,
-                payload=_safe_json(resp),
+                payload=payload,
             )
         return resp.json()
 
@@ -153,10 +169,19 @@ class AnthropicBackend(ProviderBackend):
         ) as resp:
             if resp.status_code >= 400:
                 await resp.aread()
+                payload = _safe_json(resp)
+                import logging
+                logging.getLogger("loom.anthropic").error(
+                    "upstream stream %s — headers sent: %s — payload: %s",
+                    resp.status_code,
+                    {k: v for k, v in self._headers(api_key, inbound_headers).items()
+                     if k.lower() != "x-api-key" and k.lower() != "authorization"},
+                    payload,
+                )
                 raise ProviderError(
                     f"anthropic stream returned {resp.status_code}",
                     status_code=resp.status_code,
-                    payload=_safe_json(resp),
+                    payload=payload,
                 )
             async for chunk in resp.aiter_raw():
                 if chunk:

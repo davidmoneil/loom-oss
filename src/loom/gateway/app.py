@@ -1142,7 +1142,6 @@ def create_app() -> FastAPI:
                     "no Anthropic backend configured", status_code=500
                 )
 
-            forward = _passthrough_params(body, anthropic=True)
             actual_model = model_cfg.model_id if model_cfg else model
 
             # Session tracking: stable conversation fingerprint, turn counter.
@@ -1170,7 +1169,7 @@ def create_app() -> FastAPI:
                 stream=stream,
                 inbound_headers=inbound_hdrs,
                 query_string=request.url.query or "",
-                **forward,
+                raw_body=body,
             )
 
             meta = {
