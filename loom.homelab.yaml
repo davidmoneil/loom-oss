@@ -113,7 +113,7 @@ compression:
 storage:
   backend: postgres
   database_path: data/loom.db
-  postgres_dsn: ""
+  postgres_dsn: "postgresql://n8n@postgres-unified:5432/loom"
 
 observability:
   audit_log_path: logs/audit.jsonl
