@@ -14,6 +14,7 @@ services:
       - .env.homelab
     environment:
       LOOM_CONFIG: /app/loom.yaml
+      LOOM_POSTGRES_DSN: "postgresql://n8n@postgres-unified:5432/loom"
     extra_hosts:
       - "host.docker.internal:host-gateway"
     networks:
