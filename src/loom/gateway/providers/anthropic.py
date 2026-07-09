@@ -91,6 +91,8 @@ class AnthropicBackend(ProviderBackend):
             for name, value in inbound_headers.items():
                 if name.lower() not in self._STRIP_HEADERS:
                     headers[name] = value
+        upstream_host = self.api_base.replace("https://", "").replace("http://", "").split("/")[0]
+        headers["host"] = upstream_host
         if api_key:
             if api_key.startswith("sk-ant-oat"):
                 headers["Authorization"] = f"Bearer {api_key}"
