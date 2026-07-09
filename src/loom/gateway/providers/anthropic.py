@@ -158,8 +158,6 @@ class AnthropicBackend(ProviderBackend):
         return resp.status_code, _safe_json(resp)
 
     def _upstream_url(self, path: str, query_string: str) -> str:
-        if query_string:
-            return f"{path}?{query_string}"
         return path
 
     async def _complete(
