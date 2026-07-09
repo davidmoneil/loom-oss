@@ -643,6 +643,10 @@ async def _scan_ollama_stream(
     provider: str,
     model: str,
     text_key: str,
+    *,
+    path: str = "/api/generate",
+    t0: float = 0.0,
+    model_cfg: Any = None,
 ) -> AsyncIterator[bytes]:
     """Buffer an Ollama NDJSON stream, scan assembled text, re-emit."""
     chunks: list[dict] = []
@@ -688,6 +692,43 @@ async def _scan_ollama_stream(
     else:
         for line_bytes in raw_lines:
             yield line_bytes
+
+    if t0:
+        _record_request(
+            gw, request_id=request_id, method="POST", path=path,
+            source=source, provider=provider,
+            model=model_cfg.model_id if model_cfg else model,
+            requested_model=model, task_type="general",
+            routing_reason="direct", status_code=200,
+            latency_ms=round((time.monotonic() - t0) * 1000, 2),
+        )
+
+
+async def _passthrough_ollama_stream(
+    upstream: AsyncIterator[bytes],
+    gw: GatewayState,
+    request_id: str,
+    source: str,
+    provider: str,
+    model: str,
+    *,
+    path: str = "/api/generate",
+    t0: float = 0.0,
+    model_cfg: Any = None,
+) -> AsyncIterator[bytes]:
+    """Forward an Ollama NDJSON stream and record the request afterwards."""
+    async for line_bytes in upstream:
+        yield line_bytes
+
+    if t0:
+        _record_request(
+            gw, request_id=request_id, method="POST", path=path,
+            source=source, provider=provider,
+            model=model_cfg.model_id if model_cfg else model,
+            requested_model=model, task_type="general",
+            routing_reason="direct", status_code=200,
+            latency_ms=round((time.monotonic() - t0) * 1000, 2),
+        )
 
 
 async def _wrapped_stream(
@@ -985,6 +1026,7 @@ def create_app() -> FastAPI:
         try:
             body = await request.json()
         except Exception:
+            _audit_error(gw, request_id, "/v1/chat/completions", _source(request), 400)
             return _error_response(
                 ProviderError("invalid JSON body", status_code=400), request_id, 400
             )
@@ -1124,6 +1166,7 @@ def create_app() -> FastAPI:
         try:
             body = await request.json()
         except Exception:
+            _audit_error(gw, request_id, "/v1/messages", _source(request), 400)
             return _error_response(
                 ProviderError("invalid JSON body", status_code=400), request_id, 400
             )
@@ -1237,6 +1280,7 @@ def create_app() -> FastAPI:
         try:
             body = await request.json()
         except Exception:
+            _audit_error(gw, request_id, "/api/generate", source, 400)
             return _error_response(ValueError("invalid JSON"), request_id, 400)
 
         model_name = body.get("model", "")
@@ -1244,6 +1288,7 @@ def create_app() -> FastAPI:
         stream = body.get("stream", False)
 
         if not model_name or not prompt:
+            _audit_error(gw, request_id, "/api/generate", source, 400)
             return JSONResponse(
                 {"error": "model and prompt are required"},
                 status_code=400,
@@ -1278,6 +1323,7 @@ def create_app() -> FastAPI:
 
         resolved = gw.resolve_provider(model_name)
         if resolved is None:
+            _audit_error(gw, request_id, "/api/generate", source, 400)
             return JSONResponse(
                 {"error": f"unknown model: {model_name}"},
                 status_code=400,
@@ -1286,6 +1332,7 @@ def create_app() -> FastAPI:
         provider_name, model_cfg = resolved
         backend = gw.backends.get(provider_name)
         if backend is None:
+            _audit_error(gw, request_id, "/api/generate", source, 400)
             return JSONResponse(
                 {"error": f"provider {provider_name} not configured"},
                 status_code=400,
@@ -1306,12 +1353,16 @@ def create_app() -> FastAPI:
                 )
 
             if stream:
+                stream_kwargs = dict(path="/api/generate", t0=start, model_cfg=model_cfg)
                 if gw.scanner and gw.scanner.enabled and gw.scanner.has_buffer_rules():
                     return StreamingResponse(
-                        _scan_ollama_stream(result, gw, request_id, source, provider_name, model_name, "response"),
+                        _scan_ollama_stream(result, gw, request_id, source, provider_name, model_name, "response", **stream_kwargs),
                         media_type="application/x-ndjson",
                     )
-                return StreamingResponse(result, media_type="application/x-ndjson")
+                return StreamingResponse(
+                    _passthrough_ollama_stream(result, gw, request_id, source, provider_name, model_name, **stream_kwargs),
+                    media_type="application/x-ndjson",
+                )
 
             # Scan response
             response_text = result.get("response", "")
@@ -1350,6 +1401,7 @@ def create_app() -> FastAPI:
         try:
             body = await request.json()
         except Exception:
+            _audit_error(gw, request_id, "/api/chat", source, 400)
             return _error_response(ValueError("invalid JSON"), request_id, 400)
 
         model_name = body.get("model", "")
@@ -1357,6 +1409,7 @@ def create_app() -> FastAPI:
         stream = body.get("stream", False)
 
         if not model_name or not messages:
+            _audit_error(gw, request_id, "/api/chat", source, 400)
             return JSONResponse(
                 {"error": "model and messages are required"},
                 status_code=400,
@@ -1365,6 +1418,7 @@ def create_app() -> FastAPI:
 
         resolved = gw.resolve_provider(model_name)
         if resolved is None:
+            _audit_error(gw, request_id, "/api/chat", source, 400)
             return JSONResponse(
                 {"error": f"unknown model: {model_name}"},
                 status_code=400,
@@ -1373,6 +1427,7 @@ def create_app() -> FastAPI:
         provider_name, model_cfg = resolved
         backend = gw.backends.get(provider_name)
         if backend is None:
+            _audit_error(gw, request_id, "/api/chat", source, 400)
             return JSONResponse(
                 {"error": f"provider {provider_name} not configured"},
                 status_code=400,
@@ -1387,12 +1442,16 @@ def create_app() -> FastAPI:
             )
 
             if stream:
+                stream_kwargs = dict(path="/api/chat", t0=start, model_cfg=model_cfg)
                 if gw.scanner and gw.scanner.enabled and gw.scanner.has_buffer_rules():
                     return StreamingResponse(
-                        _scan_ollama_stream(result, gw, request_id, source, provider_name, model_name, "message.content"),
+                        _scan_ollama_stream(result, gw, request_id, source, provider_name, model_name, "message.content", **stream_kwargs),
                         media_type="application/x-ndjson",
                     )
-                return StreamingResponse(result, media_type="application/x-ndjson")
+                return StreamingResponse(
+                    _passthrough_ollama_stream(result, gw, request_id, source, provider_name, model_name, **stream_kwargs),
+                    media_type="application/x-ndjson",
+                )
 
             # Scan response
             msg = result.get("message", {})
