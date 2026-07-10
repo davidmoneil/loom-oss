@@ -128,6 +128,41 @@ def test_session_tracking(storage):
     assert mine["last_seen"] > 0
 
 
+def test_session_metadata_columns(storage):
+    """touch_session stores and retrieves client metadata (schema v6)."""
+    sid = f"sess-meta-{uuid.uuid4().hex[:12]}"
+    storage.touch_session(
+        sid, source="pytest",
+        client_type="claude-code",
+        user_id="test@example.com",
+        api_key_suffix="abcd1234",
+        system_hash="abc123def456",
+    )
+    entries = storage.list_sessions(hours=1)
+    mine = next(e for e in entries if e["session_id"] == sid)
+    assert mine["client_type"] == "claude-code"
+    assert mine["user_id"] == "test@example.com"
+    assert mine["api_key_suffix"] == "abcd1234"
+    assert mine["system_hash"] == "abc123def456"
+
+
+def test_session_metadata_coalesces_on_update(storage):
+    """Metadata is preserved across upserts when not re-supplied."""
+    sid = f"sess-coal-{uuid.uuid4().hex[:12]}"
+    storage.touch_session(
+        sid, source="pytest",
+        client_type="sdk-python",
+        user_id="alice@example.com",
+    )
+    # Second touch without metadata — values should persist.
+    storage.touch_session(sid, source="pytest")
+    entries = storage.list_sessions(hours=1)
+    mine = next(e for e in entries if e["session_id"] == sid)
+    assert mine["client_type"] == "sdk-python"
+    assert mine["user_id"] == "alice@example.com"
+    assert mine["turns"] == 2
+
+
 def test_rate_limits_roundtrip(storage):
     rid = f"req-{uuid.uuid4().hex[:12]}"
     rl = {

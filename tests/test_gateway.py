@@ -156,3 +156,106 @@ def test_anthropic_auth_header_style():
     key = backend._headers("sk-ant-api03-xyz")
     assert key["x-api-key"] == "sk-ant-api03-xyz"
     assert "Authorization" not in key
+
+
+# --- Session fingerprinting ---
+
+def test_extract_session_signals_basic():
+    """_extract_session_signals returns a valid session_id and metadata."""
+    from loom.gateway.app import _extract_session_signals
+
+    messages = [{"role": "user", "content": "Hello world"}]
+    signals = _extract_session_signals(messages, "default")
+    assert signals["session_id"].startswith("gw-")
+    assert len(signals["session_id"]) == 3 + 16  # 'gw-' + 16 hex chars
+    assert signals["client_type"] == "api"  # no headers
+    assert signals["user_id"] == ""
+    assert signals["api_key_suffix"] == ""
+    assert signals["system_hash"] == ""
+
+
+def test_extract_session_signals_different_keys():
+    """Different API keys produce different session_ids."""
+    from loom.gateway.app import _extract_session_signals
+
+    msgs = [{"role": "user", "content": "fix the build"}]
+    s1 = _extract_session_signals(
+        msgs, "default",
+        headers={"x-api-key": "sk-ant-api03-AAAAAAAAbbbbcccc"},
+    )
+    s2 = _extract_session_signals(
+        msgs, "default",
+        headers={"x-api-key": "sk-ant-api03-XXXXXXXXyyyyzzzz"},
+    )
+    assert s1["session_id"] != s2["session_id"]
+    assert s1["api_key_suffix"] == "bbbbcccc"
+    assert s2["api_key_suffix"] == "yyyyzzzz"
+
+
+def test_extract_session_signals_metadata_user_id():
+    """metadata.user_id is used in the fingerprint and stored."""
+    from loom.gateway.app import _extract_session_signals
+
+    msgs = [{"role": "user", "content": "fix the build"}]
+    s1 = _extract_session_signals(
+        msgs, "default",
+        body={"metadata": {"user_id": "alice@corp.com"}},
+    )
+    s2 = _extract_session_signals(
+        msgs, "default",
+        body={"metadata": {"user_id": "bob@corp.com"}},
+    )
+    assert s1["session_id"] != s2["session_id"]
+    assert s1["user_id"] == "alice@corp.com"
+    assert s2["user_id"] == "bob@corp.com"
+
+
+def test_extract_session_signals_system_hash():
+    """Different system prompts produce different session_ids."""
+    from loom.gateway.app import _extract_session_signals
+
+    msgs = [{"role": "user", "content": "fix the build"}]
+    s1 = _extract_session_signals(
+        msgs, "default",
+        body={"system": "You are helping with project A."},
+    )
+    s2 = _extract_session_signals(
+        msgs, "default",
+        body={"system": "You are helping with project B."},
+    )
+    assert s1["session_id"] != s2["session_id"]
+    assert s1["system_hash"] != s2["system_hash"]
+    assert len(s1["system_hash"]) == 12
+
+
+def test_extract_session_signals_claude_code_detection():
+    """Claude Code is detected from beta header."""
+    from loom.gateway.app import _extract_session_signals
+
+    msgs = [{"role": "user", "content": "hello"}]
+    signals = _extract_session_signals(
+        msgs, "default",
+        headers={"anthropic-beta": "prompt-caching-2024-07-31"},
+    )
+    assert signals["client_type"] == "claude-code"
+
+
+def test_extract_session_signals_no_user_message():
+    """Returns 'unknown' when there is no user message."""
+    from loom.gateway.app import _extract_session_signals
+
+    signals = _extract_session_signals(
+        [{"role": "assistant", "content": "hi"}], "default",
+    )
+    assert signals["session_id"] == "unknown"
+
+
+def test_derive_session_id_legacy_compat():
+    """derive_session_id still returns a string (backward compat)."""
+    from loom.gateway.app import derive_session_id
+
+    sid = derive_session_id(
+        [{"role": "user", "content": "hello"}], "default",
+    )
+    assert isinstance(sid, str)
+    assert sid.startswith("gw-")

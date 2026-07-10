@@ -144,16 +144,18 @@ export default function Sessions() {
             <tr>
               <Th>Session</Th>
               <Th>Source</Th>
+              <Th>Client</Th>
+              <Th>User</Th>
               <Th className="text-right">Turns</Th>
               <Th className="text-right">Last Seen</Th>
             </tr>
           </thead>
           <tbody className="divide-y divide-border">
             {loading ? (
-              <SkeletonRows cols={4} />
+              <SkeletonRows cols={6} />
             ) : entries.length === 0 ? (
               <tr>
-                <td colSpan={4} className="p-8 text-center text-gray-500">
+                <td colSpan={6} className="p-8 text-center text-gray-500">
                   No sessions in this window
                 </td>
               </tr>
@@ -165,6 +167,18 @@ export default function Sessions() {
                   </Td>
                   <Td>
                     <SourceBadge source={e.source} />
+                  </Td>
+                  <Td>
+                    {e.client_type ? (
+                      <ClientBadge type={e.client_type} />
+                    ) : (
+                      <span className="text-gray-500">—</span>
+                    )}
+                  </Td>
+                  <Td>
+                    <span className="text-xs text-gray-400" title={e.user_id || ""}>
+                      {e.user_id || "—"}
+                    </span>
                   </Td>
                   <Td className="text-right tabular-nums text-gray-200">
                     {e.turns}
@@ -190,6 +204,21 @@ function SourceBadge({ source }) {
   return (
     <span className={`rounded-full px-2 py-0.5 text-xs font-medium ${colors}`}>
       {source}
+    </span>
+  );
+}
+
+function ClientBadge({ type }) {
+  const palette = {
+    "claude-code": "bg-green-500/15 text-green-400",
+    "sdk-python": "bg-yellow-500/15 text-yellow-400",
+    "sdk-node": "bg-cyan-500/15 text-cyan-400",
+    api: "bg-gray-500/15 text-gray-400",
+  };
+  const colors = palette[type] || palette.api;
+  return (
+    <span className={`rounded-full px-2 py-0.5 text-xs font-medium ${colors}`}>
+      {type}
     </span>
   );
 }
