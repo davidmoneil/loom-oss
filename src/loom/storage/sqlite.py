@@ -18,7 +18,7 @@ import threading
 import time
 from typing import Any, Optional
 
-SCHEMA_VERSION = 4
+SCHEMA_VERSION = 5
 
 _FLUSH_INTERVAL_SECONDS = 2.0
 
@@ -154,6 +154,29 @@ class LoomStorage:
                 created_at REAL NOT NULL
             );
 
+            CREATE TABLE IF NOT EXISTS rate_limits (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                timestamp REAL NOT NULL,
+                request_id TEXT,
+                provider TEXT NOT NULL,
+                model TEXT,
+                requests_limit INTEGER,
+                requests_remaining INTEGER,
+                tokens_limit INTEGER,
+                tokens_remaining INTEGER,
+                input_tokens_limit INTEGER,
+                input_tokens_remaining INTEGER,
+                output_tokens_limit INTEGER,
+                output_tokens_remaining INTEGER,
+                tokens_utilization REAL,
+                input_tokens_utilization REAL,
+                output_tokens_utilization REAL
+            );
+            CREATE INDEX IF NOT EXISTS idx_rate_limits_timestamp
+                ON rate_limits (timestamp);
+            CREATE INDEX IF NOT EXISTS idx_rate_limits_provider
+                ON rate_limits (provider, timestamp);
+
             CREATE INDEX IF NOT EXISTS idx_metrics_timestamp
                 ON metrics (timestamp);
             CREATE INDEX IF NOT EXISTS idx_routing_timestamp
@@ -217,6 +240,35 @@ class LoomStorage:
                     c.execute(idx)
                 except sqlite3.OperationalError:
                     pass
+
+        if current < 5:
+            try:
+                c.executescript("""
+                    CREATE TABLE IF NOT EXISTS rate_limits (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        timestamp REAL NOT NULL,
+                        request_id TEXT,
+                        provider TEXT NOT NULL,
+                        model TEXT,
+                        requests_limit INTEGER,
+                        requests_remaining INTEGER,
+                        tokens_limit INTEGER,
+                        tokens_remaining INTEGER,
+                        input_tokens_limit INTEGER,
+                        input_tokens_remaining INTEGER,
+                        output_tokens_limit INTEGER,
+                        output_tokens_remaining INTEGER,
+                        tokens_utilization REAL,
+                        input_tokens_utilization REAL,
+                        output_tokens_utilization REAL
+                    );
+                    CREATE INDEX IF NOT EXISTS idx_rate_limits_timestamp
+                        ON rate_limits (timestamp);
+                    CREATE INDEX IF NOT EXISTS idx_rate_limits_provider
+                        ON rate_limits (provider, timestamp);
+                """)
+            except sqlite3.OperationalError:
+                pass
 
         if current < SCHEMA_VERSION:
             c.execute(
@@ -301,6 +353,48 @@ class LoomStorage:
                     compression_ratio,
                     message_count,
                     source,
+                ),
+            )
+            self._schedule_flush()
+
+    def record_rate_limits(
+        self,
+        request_id: str,
+        provider: str,
+        model: Optional[str] = None,
+        ratelimit: Optional[dict] = None,
+    ) -> None:
+        if not ratelimit:
+            return
+        with self._write_lock:
+            self.conn.execute(
+                """
+                INSERT INTO rate_limits (
+                    timestamp, request_id, provider, model,
+                    requests_limit, requests_remaining,
+                    tokens_limit, tokens_remaining,
+                    input_tokens_limit, input_tokens_remaining,
+                    output_tokens_limit, output_tokens_remaining,
+                    tokens_utilization, input_tokens_utilization,
+                    output_tokens_utilization
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    time.time(),
+                    request_id,
+                    provider,
+                    model,
+                    ratelimit.get("ratelimit_requests_limit"),
+                    ratelimit.get("ratelimit_requests_remaining"),
+                    ratelimit.get("ratelimit_tokens_limit"),
+                    ratelimit.get("ratelimit_tokens_remaining"),
+                    ratelimit.get("ratelimit_input_tokens_limit"),
+                    ratelimit.get("ratelimit_input_tokens_remaining"),
+                    ratelimit.get("ratelimit_output_tokens_limit"),
+                    ratelimit.get("ratelimit_output_tokens_remaining"),
+                    ratelimit.get("ratelimit_tokens_utilization"),
+                    ratelimit.get("ratelimit_input_tokens_utilization"),
+                    ratelimit.get("ratelimit_output_tokens_utilization"),
                 ),
             )
             self._schedule_flush()
@@ -724,6 +818,50 @@ class LoomStorage:
         ]
 
         return {"total": total, "offset": offset, "limit": limit, "entries": entries}
+
+    # ------------------------------------------------------------------ rate limits
+    def get_rate_limit_current(self, provider: str = "anthropic") -> Optional[dict]:
+        row = self.conn.execute(
+            """
+            SELECT timestamp, request_id, provider, model,
+                   requests_limit, requests_remaining,
+                   tokens_limit, tokens_remaining,
+                   input_tokens_limit, input_tokens_remaining,
+                   output_tokens_limit, output_tokens_remaining,
+                   tokens_utilization, input_tokens_utilization,
+                   output_tokens_utilization
+            FROM rate_limits
+            WHERE provider = ?
+            ORDER BY timestamp DESC LIMIT 1
+            """,
+            (provider,),
+        ).fetchone()
+        if row is None:
+            return None
+        return dict(row)
+
+    def get_rate_limit_trend(
+        self, hours: int = 48, provider: str = "anthropic"
+    ) -> list[dict]:
+        since = time.time() - hours * 3600
+        rows = self.conn.execute(
+            """
+            SELECT
+                strftime('%Y-%m-%dT%H:00:00Z', timestamp, 'unixepoch') AS hour,
+                AVG(tokens_utilization) AS avg_tokens_util,
+                AVG(input_tokens_utilization) AS avg_input_util,
+                AVG(output_tokens_utilization) AS avg_output_util,
+                MAX(tokens_utilization) AS max_tokens_util,
+                MIN(tokens_remaining) AS min_tokens_remaining,
+                COUNT(*) AS samples
+            FROM rate_limits
+            WHERE timestamp >= ? AND provider = ?
+            GROUP BY hour
+            ORDER BY hour ASC
+            """,
+            (since, provider),
+        ).fetchall()
+        return [dict(r) for r in rows]
 
     # ------------------------------------------------------------------ compression cache
     def get_compression_cached(
