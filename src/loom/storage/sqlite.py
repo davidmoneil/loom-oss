@@ -18,7 +18,7 @@ import threading
 import time
 from typing import Any, Optional
 
-SCHEMA_VERSION = 5
+SCHEMA_VERSION = 6
 
 _FLUSH_INTERVAL_SECONDS = 2.0
 
@@ -270,6 +270,19 @@ class LoomStorage:
             except sqlite3.OperationalError:
                 pass
 
+        if current < 6:
+            # Multi-signal session fingerprinting: add metadata columns to sessions.
+            for col, typ in [
+                ('client_type', 'TEXT'),
+                ('user_id', 'TEXT'),
+                ('api_key_suffix', 'TEXT'),
+                ('system_hash', 'TEXT'),
+            ]:
+                try:
+                    c.execute(f"ALTER TABLE sessions ADD COLUMN {col} {typ}")
+                except sqlite3.OperationalError:
+                    pass
+
         if current < SCHEMA_VERSION:
             c.execute(
                 "INSERT OR REPLACE INTO schema_version (version, applied_at) VALUES (?, ?)",
@@ -495,12 +508,22 @@ class LoomStorage:
 
     # ------------------------------------------------------------ sessions
     def touch_session(
-        self, session_id: str, source: str = "", tokens: int = 0, cost: float = 0.0
+        self,
+        session_id: str,
+        source: str = "",
+        tokens: int = 0,
+        cost: float = 0.0,
+        *,
+        client_type: str = "",
+        user_id: str = "",
+        api_key_suffix: str = "",
+        system_hash: str = "",
     ) -> int:
         """Upsert a session row and increment its turn counter.
 
         Returns the turn number after the update (1 for a new session).
         ended_at doubles as last_seen; request_count is the turn counter.
+        Optional keyword args store session metadata for dashboard display.
         """
         now = time.time()
         with self._write_lock:
@@ -508,17 +531,24 @@ class LoomStorage:
                 """
                 INSERT INTO sessions
                     (session_id, source, started_at, ended_at,
-                     request_count, total_tokens, total_cost)
-                VALUES (?, ?, ?, ?, 1, ?, ?)
+                     request_count, total_tokens, total_cost,
+                     client_type, user_id, api_key_suffix, system_hash)
+                VALUES (?, ?, ?, ?, 1, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(session_id) DO UPDATE SET
                     ended_at = excluded.ended_at,
                     source = COALESCE(excluded.source, sessions.source),
                     request_count = sessions.request_count + 1,
                     total_tokens = sessions.total_tokens + excluded.total_tokens,
-                    total_cost = sessions.total_cost + excluded.total_cost
+                    total_cost = sessions.total_cost + excluded.total_cost,
+                    client_type = COALESCE(excluded.client_type, sessions.client_type),
+                    user_id = COALESCE(excluded.user_id, sessions.user_id),
+                    api_key_suffix = COALESCE(excluded.api_key_suffix, sessions.api_key_suffix),
+                    system_hash = COALESCE(excluded.system_hash, sessions.system_hash)
                 RETURNING request_count
                 """,
-                (session_id, source, now, now, tokens, cost),
+                (session_id, source, now, now, tokens, cost,
+                 client_type or None, user_id or None,
+                 api_key_suffix or None, system_hash or None),
             ).fetchone()
             self._schedule_flush()
         return int(row[0]) if row else 1
@@ -535,7 +565,8 @@ class LoomStorage:
         rows = self.conn.execute(
             """
             SELECT session_id, COALESCE(source, 'unknown') AS source,
-                   request_count AS turns, ended_at AS last_seen
+                   request_count AS turns, ended_at AS last_seen,
+                   client_type, user_id, api_key_suffix, system_hash
             FROM sessions WHERE ended_at >= ?
             ORDER BY ended_at DESC LIMIT ?
             """,

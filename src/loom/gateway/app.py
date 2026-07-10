@@ -1066,11 +1066,22 @@ def create_app() -> FastAPI:
 
             forward = _passthrough_params(body)
 
-            # Session tracking.
-            session_id = derive_session_id(messages, source)
+            # Session tracking: multi-signal fingerprint, turn counter.
+            signals = _extract_session_signals(
+                messages, source,
+                headers=dict(request.headers),
+                body=body,
+            )
+            session_id = signals["session_id"]
             if gw.storage is not None and session_id != "unknown":
                 try:
-                    gw.storage.touch_session(session_id, source)
+                    gw.storage.touch_session(
+                        session_id, source,
+                        client_type=signals["client_type"],
+                        user_id=signals["user_id"],
+                        api_key_suffix=signals["api_key_suffix"],
+                        system_hash=signals["system_hash"],
+                    )
                 except Exception:
                     pass
 
@@ -1206,11 +1217,21 @@ def create_app() -> FastAPI:
 
             actual_model = model_cfg.model_id if model_cfg else model
 
-            # Session tracking: stable conversation fingerprint, turn counter.
-            session_id = derive_session_id(messages, source)
+            # Session tracking: multi-signal fingerprint, turn counter.
+            inbound_hdrs = dict(request.headers)
+            signals = _extract_session_signals(
+                messages, source, headers=inbound_hdrs, body=body,
+            )
+            session_id = signals["session_id"]
             if gw.storage is not None and session_id != "unknown":
                 try:
-                    gw.storage.touch_session(session_id, source)
+                    gw.storage.touch_session(
+                        session_id, source,
+                        client_type=signals["client_type"],
+                        user_id=signals["user_id"],
+                        api_key_suffix=signals["api_key_suffix"],
+                        system_hash=signals["system_hash"],
+                    )
                 except Exception:
                     pass
 
@@ -1222,8 +1243,6 @@ def create_app() -> FastAPI:
                 )
                 gw.comp_tokens_before += comp_before
                 gw.comp_tokens_after += comp_after
-
-            inbound_hdrs = dict(request.headers)
             result = await backend.chat_completion(
                 model=actual_model,
                 messages=messages,
@@ -2034,25 +2053,113 @@ def _strip_loom_tag(text: str) -> tuple[str, Optional[str]]:
     return text, None
 
 
-def derive_session_id(messages: list[dict], source: str) -> str:
-    """Stable conversation fingerprint: source + first user message prefix.
+def _extract_session_signals(
+    messages: list[dict],
+    source: str,
+    headers: dict[str, str] | None = None,
+    body: dict | None = None,
+) -> dict:
+    """Extract all available session signals from the request.
 
-    Same derivation as the legacy proxy so session identities survive the
-    cutover within a running conversation.
+    Returns a dict with keys: session_id, client_type, user_id,
+    api_key_suffix, system_hash.  The session_id is a stable hash
+    built from multiple signals so concurrent sessions are distinguished
+    even when the first user message is similar.
     """
+    headers = headers or {}
+    body = body or {}
+
+    # --- signal extraction ---
+    # 1. metadata.user_id (most reliable when present)
+    metadata = body.get("metadata") or {}
+    user_id = metadata.get("user_id", "") or ""
+
+    # 2. API key suffix (last 8 chars, safe to store)
+    raw_key = headers.get("x-api-key", "") or ""
+    api_key_suffix = raw_key[-8:] if len(raw_key) >= 8 else ""
+
+    # 3. Client type from headers
+    user_agent = headers.get("user-agent", "")
+    stainless_runtime = headers.get("x-stainless-runtime", "")
+    stainless_os = headers.get("x-stainless-os", "")
+    stainless_arch = headers.get("x-stainless-arch", "")
+    beta_flags = headers.get("anthropic-beta", "")
+
+    if "claude-code" in user_agent.lower() or "prompt-caching" in beta_flags:
+        client_type = "claude-code"
+    elif stainless_runtime:
+        client_type = f"sdk-{stainless_runtime}"
+    elif "python" in user_agent.lower():
+        client_type = "sdk-python"
+    elif "node" in user_agent.lower() or "typescript" in user_agent.lower():
+        client_type = "sdk-node"
+    else:
+        client_type = "api"
+
+    # 4. System prompt hash (varies per session in Claude Code)
+    system_raw = body.get("system", "")
+    if isinstance(system_raw, list):
+        system_text = " ".join(
+            b.get("text", "") for b in system_raw if isinstance(b, dict)
+        )
+    else:
+        system_text = str(system_raw)
+    system_hash = hashlib.sha256(system_text.encode()).hexdigest()[:12] if system_text else ""
+
+    # 5. First user message prefix (legacy signal, still useful)
     first_user = next((m for m in messages if m.get("role") == "user"), None)
     if first_user is None:
-        return "unknown"
-    content = first_user.get("content", "")
-    if isinstance(content, list):
-        for block in content:
-            if isinstance(block, dict) and block.get("type") == "text":
-                content = block.get("text", "")
-                break
+        msg_prefix = ""
+    else:
+        msg_content = first_user.get("content", "")
+        if isinstance(msg_content, list):
+            for block in msg_content:
+                if isinstance(block, dict) and block.get("type") == "text":
+                    msg_prefix = block.get("text", "")[:256]
+                    break
+            else:
+                msg_prefix = json.dumps(msg_content)[:256]
         else:
-            content = json.dumps(content)
-    seed = f"{source}:{str(content)[:256]}"
-    return "gw-" + hashlib.sha256(seed.encode()).hexdigest()[:16]
+            msg_prefix = str(msg_content)[:256]
+
+    # 6. Client fingerprint (OS + arch for machine distinction)
+    client_fp = f"{stainless_os}:{stainless_arch}" if stainless_os else ""
+
+    # --- build composite session ID ---
+    # Priority: user_id + api_key_suffix + system_hash gives the best
+    # discrimination.  Fall back to source + msg_prefix for legacy clients.
+    parts = [source]
+    if user_id:
+        parts.append(user_id)
+    if api_key_suffix:
+        parts.append(api_key_suffix)
+    if system_hash:
+        parts.append(system_hash)
+    if client_fp:
+        parts.append(client_fp)
+    if not (user_id or system_hash):
+        # Legacy fallback: include message prefix when we lack better signals
+        parts.append(msg_prefix)
+
+    seed = ":".join(parts)
+    session_id = "gw-" + hashlib.sha256(seed.encode()).hexdigest()[:16]
+
+    return {
+        "session_id": session_id if first_user is not None else "unknown",
+        "client_type": client_type,
+        "user_id": user_id,
+        "api_key_suffix": api_key_suffix,
+        "system_hash": system_hash,
+    }
+
+
+def derive_session_id(messages: list[dict], source: str) -> str:
+    """Legacy API — returns just the session_id string.
+
+    Callers that need the full signal dict should use
+    :func:`_extract_session_signals` directly.
+    """
+    return _extract_session_signals(messages, source)["session_id"]
 
 
 def _estimate_tokens_safe(text: str) -> int:

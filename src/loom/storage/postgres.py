@@ -17,7 +17,7 @@ from typing import Any, Optional
 
 logger = logging.getLogger("loom.storage.postgres")
 
-SCHEMA_VERSION = 5
+SCHEMA_VERSION = 6
 
 
 class PostgresStorage:
@@ -236,6 +236,14 @@ class PostgresStorage:
                 "ON rate_limits (provider, timestamp)"
             )
 
+        if current < 6:
+            # Multi-signal session fingerprinting: add metadata columns to sessions.
+            for col in ['client_type', 'user_id', 'api_key_suffix', 'system_hash']:
+                try:
+                    conn.execute(f"ALTER TABLE sessions ADD COLUMN IF NOT EXISTS {col} TEXT")
+                except Exception:
+                    pass
+
         if current < SCHEMA_VERSION:
             conn.execute(
                 "INSERT INTO schema_version (version, applied_at) VALUES (%s, %s) "
@@ -451,29 +459,46 @@ class PostgresStorage:
 
     # ------------------------------------------------------------ sessions
     def touch_session(
-        self, session_id: str, source: str = "", tokens: int = 0, cost: float = 0.0
+        self,
+        session_id: str,
+        source: str = "",
+        tokens: int = 0,
+        cost: float = 0.0,
+        *,
+        client_type: str = "",
+        user_id: str = "",
+        api_key_suffix: str = "",
+        system_hash: str = "",
     ) -> int:
         """Upsert a session row and increment its turn counter.
 
         Returns the turn number after the update (1 for a new session).
         ended_at doubles as last_seen; request_count is the turn counter.
+        Optional keyword args store session metadata for dashboard display.
         """
         now = time.time()
         row = self.conn.execute(
             """
             INSERT INTO sessions
                 (session_id, source, started_at, ended_at,
-                 request_count, total_tokens, total_cost)
-            VALUES (%s, %s, %s, %s, 1, %s, %s)
+                 request_count, total_tokens, total_cost,
+                 client_type, user_id, api_key_suffix, system_hash)
+            VALUES (%s, %s, %s, %s, 1, %s, %s, %s, %s, %s, %s)
             ON CONFLICT (session_id) DO UPDATE SET
                 ended_at = EXCLUDED.ended_at,
                 source = COALESCE(EXCLUDED.source, sessions.source),
                 request_count = sessions.request_count + 1,
                 total_tokens = sessions.total_tokens + EXCLUDED.total_tokens,
-                total_cost = sessions.total_cost + EXCLUDED.total_cost
+                total_cost = sessions.total_cost + EXCLUDED.total_cost,
+                client_type = COALESCE(EXCLUDED.client_type, sessions.client_type),
+                user_id = COALESCE(EXCLUDED.user_id, sessions.user_id),
+                api_key_suffix = COALESCE(EXCLUDED.api_key_suffix, sessions.api_key_suffix),
+                system_hash = COALESCE(EXCLUDED.system_hash, sessions.system_hash)
             RETURNING request_count
             """,
-            (session_id, source, now, now, tokens, cost),
+            (session_id, source, now, now, tokens, cost,
+             client_type or None, user_id or None,
+             api_key_suffix or None, system_hash or None),
         ).fetchone()
         return int(row[0]) if row else 1
 
@@ -488,7 +513,8 @@ class PostgresStorage:
         rows = self.conn.execute(
             """
             SELECT session_id, COALESCE(source, 'unknown'),
-                   request_count, ended_at
+                   request_count, ended_at,
+                   client_type, user_id, api_key_suffix, system_hash
             FROM sessions WHERE ended_at >= %s
             ORDER BY ended_at DESC LIMIT %s
             """,
@@ -500,6 +526,10 @@ class PostgresStorage:
                 "source": r[1],
                 "turns": r[2],
                 "last_seen": float(r[3]),
+                "client_type": r[4],
+                "user_id": r[5],
+                "api_key_suffix": r[6],
+                "system_hash": r[7],
             }
             for r in rows
         ]
