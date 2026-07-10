@@ -1,6 +1,6 @@
 [project]
 name = "loom-gateway"
-version = "0.1.0-dev"
+version = "0.1.0"
 description = "LLM optimization gateway — routing, compression, and observability"
 requires-python = ">=3.11"
 license = {text = "Apache-2.0"}

@@ -10,7 +10,7 @@ application code.
 ## Quickstart (Docker)
 
 ```bash
-git clone <this repo> && cd loom-oss
+git clone https://github.com/davidmoneil/loom-oss.git && cd loom-oss
 ./setup.sh
 ```
 

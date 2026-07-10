@@ -26,9 +26,6 @@ services:
           cpus: "2.0"
         reservations:
           memory: 128M
-    networks:
-      - default
-      - n8n-network
     restart: unless-stopped
 
   # Optional bundled database — enabled with the "postgres" profile
@@ -49,12 +46,6 @@ services:
       timeout: 5s
       retries: 5
     restart: unless-stopped
-
-networks:
-  default:
-  n8n-network:
-    name: n8n_n8n-network
-    external: true
 
 volumes:
   loom-data:
