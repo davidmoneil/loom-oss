@@ -1784,6 +1784,8 @@ def create_app() -> FastAPI:
                         "supports_tools": model.supports_tools,
                         "supports_json_mode": model.supports_json_mode,
                         "max_context_tokens": model.max_context_tokens,
+                        "cost_per_1k_input": model.cost_per_1k_input,
+                        "cost_per_1k_output": model.cost_per_1k_output,
                     }
                 )
         return {"object": "list", "data": models}

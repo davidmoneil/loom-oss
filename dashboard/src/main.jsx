@@ -7,6 +7,7 @@ import Sessions from "./pages/Sessions.jsx";
 import Costs from "./pages/Costs.jsx";
 import Metrics from "./pages/Metrics.jsx";
 import Audit from "./pages/Audit.jsx";
+import Models from "./pages/Models.jsx";
 import Scanner from "./pages/Scanner.jsx";
 import Governor from "./pages/Governor.jsx";
 import RateLimits from "./pages/RateLimits.jsx";
@@ -23,6 +24,7 @@ ReactDOM.createRoot(document.getElementById("root")).render(
           <Route path="/sessions" element={<Sessions />} />
           <Route path="/costs" element={<Costs />} />
           <Route path="/metrics" element={<Metrics />} />
+          <Route path="/models" element={<Models />} />
           <Route path="/audit" element={<Audit />} />
           <Route path="/scanner" element={<Scanner />} />
           <Route path="/governor" element={<Governor />} />

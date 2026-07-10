@@ -6,6 +6,7 @@ const NAV = [
   { to: "/", label: "Overview", end: true, icon: GridIcon },
   { to: "/sessions", label: "Sessions", icon: UsersIcon },
   { to: "/costs", label: "Costs", icon: DollarIcon },
+  { to: "/models", label: "Models", icon: CubeIcon },
   { to: "/metrics", label: "Metrics", icon: ChartIcon },
   { to: "/audit", label: "Audit", icon: ListIcon },
   { to: "/scanner", label: "Data Protection", icon: ShieldIcon },
@@ -151,6 +152,16 @@ function RouteIcon() {
       <circle cx="6" cy="19" r="3" />
       <circle cx="18" cy="5" r="3" />
       <path d="M12 19h4.5a3.5 3.5 0 0 0 0-7h-9a3.5 3.5 0 0 1 0-7H12" />
+    </svg>
+  );
+}
+
+function CubeIcon() {
+  return (
+    <svg className="h-5 w-5 shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth="2">
+      <path d="M21 16V8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16z" />
+      <path d="M3.27 6.96 12 12.01l8.73-5.05" />
+      <path d="M12 22.08V12" />
     </svg>
   );
 }
