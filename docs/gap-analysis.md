@@ -242,6 +242,15 @@ Also fixed: Anthropic OAuth tokens (`sk-ant-oat...`) must use
 `Authorization: Bearer` + `anthropic-beta: oauth-2025-04-20`, not `x-api-key`
 — interactive Claude Code sessions need this for the cutover.
 
+### Compression tool_use fix — 2026-07-10
+
+`_compress_messages_inline()` was flattening list-type `content` containing
+`tool_use` or `tool_result` blocks into a JSON string via `json.dumps`. The
+Anthropic API requires these as structured lists — the string replacement caused
+upstream 400 errors when Claude Code launched parallel tool calls (agents,
+subagents) through loom. Messages with tool blocks are now skipped during
+compression and passed through untouched. PR #11.
+
 Remaining before cutover (wmhx):
 
 - Persona system (maps to source policies but needs profile port)
