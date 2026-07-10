@@ -1,0 +1,32 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Install
+        run: pip install -e ".[dev]"
+      - name: Lint (errors only)
+        run: |
+          pip install ruff
+          ruff check --select E9,F63,F7,F82 src tests
+      - name: Test
+        run: pytest -q
+
+  compose-config:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Validate docker-compose.yml resolves on a fresh clone
+        run: |
+          cp loom.example.yaml loom.yaml
+          docker compose config --quiet
