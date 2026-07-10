@@ -39,7 +39,22 @@ _RATELIMIT_HEADER_MAP = {
     "anthropic-ratelimit-output-tokens-remaining": "ratelimit_output_tokens_remaining",
     "anthropic-ratelimit-output-tokens-reset": "ratelimit_output_tokens_reset",
     "retry-after": "retry_after",
+    "anthropic-ratelimit-unified-status": "ratelimit_unified_status",
+    "anthropic-ratelimit-unified-reset": "ratelimit_unified_reset",
+    "anthropic-ratelimit-unified-5h-utilization": "ratelimit_unified_5h_utilization",
+    "anthropic-ratelimit-unified-5h-status": "ratelimit_unified_5h_status",
+    "anthropic-ratelimit-unified-7d-utilization": "ratelimit_unified_7d_utilization",
+    "anthropic-ratelimit-unified-7d-status": "ratelimit_unified_7d_status",
+    "anthropic-ratelimit-unified-7d-surpassed-threshold": "ratelimit_unified_7d_surpassed_threshold",
+    "anthropic-ratelimit-unified-overage-status": "ratelimit_unified_overage_status",
+    "anthropic-ratelimit-unified-fallback-percentage": "ratelimit_unified_fallback_percentage",
 }
+
+_STR_KEYS = frozenset(
+    k for k in _RATELIMIT_HEADER_MAP.values()
+    if k.endswith("_reset") or k.endswith("_status") or k.endswith("_reason")
+    or k == "retry_after"
+)
 
 
 def _extract_ratelimit_headers(resp: httpx.Response) -> dict:
@@ -47,23 +62,27 @@ def _extract_ratelimit_headers(resp: httpx.Response) -> dict:
     for hdr, key in _RATELIMIT_HEADER_MAP.items():
         raw = resp.headers.get(hdr)
         if raw is None:
-            out[key] = None
             continue
-        if key.endswith("_reset") or key == "retry_after":
+        if key in _STR_KEYS:
             out[key] = raw
         else:
             try:
-                out[key] = int(raw)
+                out[key] = float(raw) if "." in raw else int(raw)
             except (ValueError, TypeError):
                 out[key] = raw
 
     for bucket in ("tokens", "input_tokens", "output_tokens"):
         limit = out.get(f"ratelimit_{bucket}_limit")
         remaining = out.get(f"ratelimit_{bucket}_remaining")
-        if isinstance(limit, int) and isinstance(remaining, int) and limit > 0:
+        if isinstance(limit, (int, float)) and isinstance(remaining, (int, float)) and limit > 0:
             out[f"ratelimit_{bucket}_utilization"] = round(1.0 - remaining / limit, 4)
-        else:
-            out[f"ratelimit_{bucket}_utilization"] = None
+
+    # Map unified utilization to the standard tokens_utilization field
+    # so the rate_limits table gets populated from either source
+    if "ratelimit_tokens_utilization" not in out:
+        u5h = out.get("ratelimit_unified_5h_utilization")
+        if isinstance(u5h, (int, float)):
+            out["ratelimit_tokens_utilization"] = round(u5h / 100, 4)
 
     return out
 
