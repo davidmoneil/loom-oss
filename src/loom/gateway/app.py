@@ -2068,6 +2068,22 @@ def _compress_messages_inline(
             compressed.append(msg)
             continue
         content = msg.get("content", "")
+
+        # Skip messages whose content is a list containing tool_use or
+        # tool_result blocks — the Anthropic API requires these as structured
+        # lists, and flattening them to a string causes upstream 400 errors.
+        if isinstance(content, list):
+            if any(
+                isinstance(block, dict)
+                and block.get("type") in ("tool_use", "tool_result")
+                for block in content
+            ):
+                tb = _estimate_tokens_safe(json.dumps(content))
+                tokens_before += tb
+                tokens_after += tb
+                compressed.append(msg)
+                continue
+
         text = content if isinstance(content, str) else json.dumps(content)
 
         _, existing_tier = _strip_loom_tag(text)

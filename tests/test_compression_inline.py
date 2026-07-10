@@ -93,3 +93,31 @@ def test_block_content_messages():
     out, before, after = _compress_messages_inline(FakeProcessor(), msgs)
     assert before > after
     assert derive_session_id(msgs, "pytest").startswith("gw-")
+
+
+def test_tool_use_messages_preserved():
+    """tool_use/tool_result content blocks must stay as lists, not flattened."""
+    msgs = _messages(8)
+    # assistant message with tool_use block (old enough to be compression-eligible)
+    msgs[1] = {
+        "role": "assistant",
+        "content": [
+            {"type": "text", "text": FILLER},
+            {"type": "tool_use", "id": "toolu_01", "name": "bash", "input": {"cmd": "ls"}},
+        ],
+    }
+    # user message with tool_result block
+    msgs[2] = {
+        "role": "user",
+        "content": [
+            {"type": "tool_result", "tool_use_id": "toolu_01", "content": FILLER},
+        ],
+    }
+    out, before, after = _compress_messages_inline(FakeProcessor(), msgs)
+    # tool_use and tool_result messages must be passed through untouched
+    assert out[1]["content"] == msgs[1]["content"]
+    assert isinstance(out[1]["content"], list)
+    assert out[2]["content"] == msgs[2]["content"]
+    assert isinstance(out[2]["content"], list)
+    # Other messages still get compressed
+    assert before > after
