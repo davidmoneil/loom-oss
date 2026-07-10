@@ -263,6 +263,16 @@ def _record_request(
             )
         except Exception:
             pass
+        if ratelimit:
+            try:
+                state.storage.record_rate_limits(
+                    request_id=request_id,
+                    provider=provider,
+                    model=model,
+                    ratelimit=ratelimit,
+                )
+            except Exception:
+                pass
 
     if state.audit is not None:
         try:
@@ -1955,6 +1965,19 @@ def create_app() -> FastAPI:
         if gw.governor is None:
             return JSONResponse({"error": "governor not available"}, status_code=503)
         return gw.governor.delete_class_override(job, actor="dashboard")
+
+    # ----------------------------------------------------------- rate limits
+    @app.get("/api/rate-limits")
+    async def api_rate_limits(hours: int = 48, provider: str = "anthropic"):
+        gw = state()
+        if gw.storage is None:
+            return JSONResponse({"error": "storage not available"}, status_code=503)
+        try:
+            current = gw.storage.get_rate_limit_current(provider)
+            trend = gw.storage.get_rate_limit_trend(hours, provider)
+        except Exception as exc:
+            return JSONResponse({"error": str(exc)}, status_code=500)
+        return {"current": current, "trend": trend, "provider": provider}
 
     # ----------------------------------------------------------- dashboard (SPA)
     # Mounted LAST so API routes always take priority over the static catch-all.
