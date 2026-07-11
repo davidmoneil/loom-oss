@@ -71,6 +71,14 @@ class CompressionConfig(BaseModel):
     # Compress text inside tool_result blocks (block structure is always
     # preserved; tool_use inputs are never touched).
     tool_results: bool = True
+    # Optional LLM prose compression (OFF by default — the default pipeline
+    # is fully local/extractive with no model calls). When enabled, prose
+    # content is summarized via a local Ollama (or OpenAI-compatible)
+    # endpoint, falling back to extractive compression on any error.
+    llm_prose: bool = False
+    llm_url: str = "http://localhost:11434"
+    llm_model: str = "qwen2.5:7b"
+    llm_timeout_seconds: float = 30.0
     # Optional compressed-variant store: preserves pre-compression originals
     # for pointer resolution and enables relevance-aware compression.
     # "" (off) | "neo4j" (requires: pip install 'loom-gateway[neo4j]')

@@ -64,6 +64,12 @@ compression:
   default_tier: medium  # light | medium | heavy | extreme
   tool_results: true    # compress text inside tool_result blocks
                         # (structure always preserved; tool_use never touched)
+  # Optional LLM prose summarization (default: fully local/extractive, no
+  # model calls). Any LLM failure falls back to extractive silently.
+  # llm_prose: true
+  # llm_url: http://localhost:11434   # Ollama; append /v1 for OpenAI-compatible
+  # llm_model: qwen2.5:7b
+  # llm_timeout_seconds: 30
   # Optional compressed-variant store (pip install 'loom-gateway[neo4j]'):
   # preserves pre-compression originals for pointer resolution, and content
   # indexed in the graph by a context engine is compressed less aggressively.

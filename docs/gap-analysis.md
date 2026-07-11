@@ -55,8 +55,11 @@
 |---------|----------|-----|--------|-------|
 | ContentProcessor core | `context/content_processor.py` (1598 LOC) | `compression/processor.py` (1254 LOC) | **PORTED** | Core logic extracted |
 | Mode B compression | `context/mode_b_compression.py` (485 LOC) | `compression/segment.py` (431 LOC) | **PORTED** | Segment classifier |
-| 4-tier system (light/medium/heavy/extreme) | `proxy/compression_config.py` (199 LOC) | — | **PORT** | OSS has graduated but no named tiers |
-| Compression tags (loom:compressed) | `proxy/server.py` _strip_loom_tag/_add_loom_tag | — | **PORT** | Prevents double-compression |
+| 4-tier system (light/medium/heavy/extreme) | `proxy/compression_config.py` (199 LOC) | `compression/tiers.py` + gateway enforcement | **PORTED** | PR #24: header > source policy > default_tier > env; heavy +0.35 age, extreme force + tool_result fingerprint |
+| Compression tags (loom:compressed) | `proxy/server.py` _strip_loom_tag/_add_loom_tag | `compression/tiers.py` + gateway | **PORTED** | Tags carry tier + pointer hash; recompression guard in gateway loop |
+| Tool-block compression (tool_result in place) | `proxy/server.py` _compress_content_block | `gateway/app.py` _compress_content_blocks | **PORTED** | PR #21: structure preserved, ModeB pre-pass, by_block_type metrics |
+| LLM prose compression (Ollama) | `context/content_processor.py:1515` | `compression/processor.py` _llm_compress_prose | **PORTED** | Opt-in (compression.llm_prose), extractive fallback, <think> stripping |
+| Variant store / original preservation | `context/graph.py` (Neo4j) | `compression/variants.py` | **PORTED** | PR #22: optional [neo4j] extra, NullVariantStore fallback |
 | Postgres compression cache | `context/compression_cache.py` (124 LOC) | SQLite compression_cache table | **PORTED** | SQLite version in OSS |
 | Relevance scoring (embedding-based) | `proxy/server.py` _score_messages_by_relevance | `compression/relevance.py` (93 LOC) | **PORTED** | OSS uses SQLite content_importance |
 | T2 compressor | `context/t2_compressor.py` (258 LOC) | — | **CUT** | Research artifact |
