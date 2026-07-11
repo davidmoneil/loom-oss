@@ -11,10 +11,30 @@ Usage:
     python tests/parity_harness.py \
         --internal http://localhost:8711 \
         --oss http://localhost:4555 \
-        [--tier medium] [--json results.json]
+        [--tier medium] [--json results.json] [--salt run1]
 
 The parity criterion (AIProjects-878r): OSS aggregate tokens_saved within
 5% of internal on the sample.
+
+Measurement-validity notes:
+  - Cross-traffic contamination: the internal proxy serves live production
+    traffic, so a request landing inside our measurement window can blow up
+    a payload's delta. Each measurement also samples the gateway's /health
+    `requests` counter immediately before and after firing; if it advanced
+    by anything other than exactly 1 (our own request), the measurement is
+    discarded and retried (up to 5 attempts, short randomized backoff
+    between tries). A payload that stays contaminated after 5 attempts is
+    recorded with `"contaminated": true` and excluded from the aggregate
+    (a warning is printed). Gateways that don't expose a `requests` counter
+    in /health fall back to the old unchecked behavior.
+  - Compression-cache reuse: the OSS test gateway persists a sqlite
+    compression cache (storage.database_path), so re-running the harness
+    with identical payloads against an already-warmed gateway measures the
+    cache, not the compressor. Pass a distinct `--salt` value on each rerun
+    (e.g. `--salt run2`) to mix fresh, unique text into every generated
+    payload — content hashes change while payload sizes/structure stay
+    comparable. Leaving `--salt` unset preserves the original deterministic
+    payloads (needed for a clean first run against a cold cache).
 """
 
 from __future__ import annotations
@@ -49,37 +69,39 @@ _FILLER_SENTENCES = (
 )
 
 
-def _prose(rng: random.Random, sentences: int) -> str:
+def _prose(rng: random.Random, sentences: int, salt: str = "") -> str:
+    suffix = f" [{salt}]" if salt else ""
     return "".join(
-        rng.choice(_FILLER_SENTENCES).format(rng.choice(_WORDS))
+        rng.choice(_FILLER_SENTENCES).format(rng.choice(_WORDS)) + suffix
         for _ in range(sentences)
     )
 
 
-def _log_blob(rng: random.Random, lines: int) -> str:
+def _log_blob(rng: random.Random, lines: int, salt: str = "") -> str:
+    prefix = f"{salt} " if salt else ""
     return "\n".join(
-        f"2026-07-11 07:{i % 60:02d}:{(i * 7) % 60:02d} INFO worker-{i % 4} "
+        f"{prefix}2026-07-11 07:{i % 60:02d}:{(i * 7) % 60:02d} INFO worker-{i % 4} "
         f"processed batch {i} of {rng.choice(_WORDS)} in {rng.randint(2, 900)}ms "
         f"status={'ok' if i % 9 else 'retry'}"
         for i in range(lines)
     )
 
 
-def _conversation_payload(rng: random.Random, turns: int) -> list[dict]:
+def _conversation_payload(rng: random.Random, turns: int, salt: str = "") -> list[dict]:
     msgs = []
     for i in range(turns):
         role = "user" if i % 2 == 0 else "assistant"
-        msgs.append({"role": role, "content": f"turn {i}: " + _prose(rng, 14)})
+        msgs.append({"role": role, "content": f"turn {i}: " + _prose(rng, 14, salt)})
     return msgs
 
 
-def _tool_heavy_payload(rng: random.Random, rounds: int) -> list[dict]:
-    msgs = [{"role": "user", "content": "Investigate the failing service. " + _prose(rng, 4)}]
+def _tool_heavy_payload(rng: random.Random, rounds: int, salt: str = "") -> list[dict]:
+    msgs = [{"role": "user", "content": "Investigate the failing service. " + _prose(rng, 4, salt)}]
     for i in range(rounds):
         msgs.append({
             "role": "assistant",
             "content": [
-                {"type": "text", "text": "Checking the next log segment. " + _prose(rng, 2)},
+                {"type": "text", "text": "Checking the next log segment. " + _prose(rng, 2, salt)},
                 {"type": "tool_use", "id": f"toolu_{i}", "name": "bash",
                  "input": {"cmd": f"kubectl logs deploy/svc --since={i}h"}},
             ],
@@ -88,20 +110,20 @@ def _tool_heavy_payload(rng: random.Random, rounds: int) -> list[dict]:
             "role": "user",
             "content": [
                 {"type": "tool_result", "tool_use_id": f"toolu_{i}",
-                 "content": _log_blob(rng, 80)},
+                 "content": _log_blob(rng, 80, salt)},
             ],
         })
     msgs.append({"role": "user", "content": "What did you find?"})
     return msgs
 
 
-def _mixed_payload(rng: random.Random, rounds: int) -> list[dict]:
-    msgs = _conversation_payload(rng, 6)
+def _mixed_payload(rng: random.Random, rounds: int, salt: str = "") -> list[dict]:
+    msgs = _conversation_payload(rng, 6, salt)
     for i in range(rounds):
         msgs.append({
             "role": "assistant",
             "content": [
-                {"type": "text", "text": _prose(rng, 6)},
+                {"type": "text", "text": _prose(rng, 6, salt)},
                 {"type": "tool_use", "id": f"toolu_m{i}", "name": "read_file",
                  "input": {"path": f"/src/module_{i}.py"}},
             ],
@@ -110,23 +132,23 @@ def _mixed_payload(rng: random.Random, rounds: int) -> list[dict]:
             "role": "user",
             "content": [
                 {"type": "tool_result", "tool_use_id": f"toolu_m{i}",
-                 "content": _log_blob(rng, 40) + "\n" + _prose(rng, 8)},
+                 "content": _log_blob(rng, 40, salt) + "\n" + _prose(rng, 8, salt)},
             ],
         })
-        msgs.append({"role": "assistant", "content": _prose(rng, 10)})
+        msgs.append({"role": "assistant", "content": _prose(rng, 10, salt)})
     msgs.append({"role": "user", "content": "Summarize the findings."})
     return msgs
 
 
-def build_payloads() -> list[tuple[str, list[dict]]]:
+def build_payloads(salt: str = "") -> list[tuple[str, list[dict]]]:
     rng = random.Random(878)  # task id as seed — reproducible sample
     payloads: list[tuple[str, list[dict]]] = []
     for i in range(5):
-        payloads.append((f"conversation-{i}", _conversation_payload(rng, 24 + 4 * i)))
+        payloads.append((f"conversation-{i}", _conversation_payload(rng, 24 + 4 * i, salt)))
     for i in range(5):
-        payloads.append((f"tool-heavy-{i}", _tool_heavy_payload(rng, 6 + 2 * i)))
+        payloads.append((f"tool-heavy-{i}", _tool_heavy_payload(rng, 6 + 2 * i, salt)))
     for i in range(5):
-        payloads.append((f"mixed-{i}", _mixed_payload(rng, 4 + i)))
+        payloads.append((f"mixed-{i}", _mixed_payload(rng, 4 + i, salt)))
     return payloads
 
 
@@ -139,9 +161,19 @@ def _get_json(url: str, timeout: float = 10.0) -> dict:
         return json.load(resp)
 
 
-def health_compression(base: str) -> tuple[int, int]:
-    comp = _get_json(f"{base}/health").get("compression", {})
-    return int(comp.get("tokens_before", 0)), int(comp.get("tokens_after", 0))
+def health_snapshot(base: str) -> tuple[int, int, int | None]:
+    """Returns (tokens_before, tokens_after, requests). requests is None if
+    the gateway's /health doesn't expose a top-level `requests` counter —
+    contamination checking is skipped in that case (old unchecked behavior).
+    """
+    health = _get_json(f"{base}/health")
+    comp = health.get("compression", {})
+    requests_count = health.get("requests")
+    return (
+        int(comp.get("tokens_before", 0)),
+        int(comp.get("tokens_after", 0)),
+        int(requests_count) if requests_count is not None else None,
+    )
 
 
 def fire(base: str, messages: list[dict], model: str, tier: str) -> int:
@@ -177,20 +209,41 @@ def fire(base: str, messages: list[dict], model: str, tier: str) -> int:
         return 0
 
 
-def measure(base: str, name: str, messages: list[dict], model: str, tier: str) -> dict:
-    b0, a0 = health_compression(base)
-    status = fire(base, copy.deepcopy(messages), model, tier)
-    time.sleep(0.3)  # let async counters settle
-    b1, a1 = health_compression(base)
-    before, after = b1 - b0, a1 - a0
-    return {
-        "payload": name,
-        "status": status,
-        "tokens_before": before,
-        "tokens_after": after,
-        "tokens_saved": max(0, before - after),
-        "ratio": round(1 - after / before, 4) if before > 0 else 0.0,
-    }
+def measure(base: str, name: str, messages: list[dict], model: str, tier: str,
+            max_retries: int = 5) -> dict:
+    """Fires one payload and diffs the gateway's cumulative compression
+    counters around it. Guards against cross-traffic contamination: if the
+    gateway's /health `requests` counter advances by anything other than
+    exactly 1 (our own request) during the measurement window, the sample
+    is discarded and retried. After max_retries contaminated attempts, the
+    row is flagged `contaminated` and the caller should exclude it from the
+    aggregate.
+    """
+    for attempt in range(max_retries + 1):
+        b0, a0, r0 = health_snapshot(base)
+        status = fire(base, copy.deepcopy(messages), model, tier)
+        time.sleep(0.3)  # let async counters settle
+        b1, a1, r1 = health_snapshot(base)
+
+        contaminated = (
+            r0 is not None and r1 is not None and (r1 - r0) != 1
+        )
+        if contaminated and attempt < max_retries:
+            time.sleep(0.2 + random.random() * 0.6)
+            continue
+
+        before, after = b1 - b0, a1 - a0
+        return {
+            "payload": name,
+            "status": status,
+            "tokens_before": before,
+            "tokens_after": after,
+            "tokens_saved": max(0, before - after),
+            "ratio": round(1 - after / before, 4) if before > 0 else 0.0,
+            "contaminated": bool(contaminated),
+        }
+    # unreachable, but keeps type-checkers happy
+    raise RuntimeError("measure: exhausted retries without returning")
 
 
 # ---------------------------------------------------------------------------
@@ -205,6 +258,12 @@ def main() -> int:
     ap.add_argument("--tier", default="medium")
     ap.add_argument("--threshold", type=float, default=0.05)
     ap.add_argument("--json", dest="json_out", default="")
+    ap.add_argument("--salt", default="",
+                     help="Mix a distinct value into generated payload text "
+                          "so content hashes differ across reruns (needed "
+                          "when re-running against a gateway with a warm "
+                          "compression cache). Default: none (original "
+                          "deterministic payloads).")
     args = ap.parse_args()
 
     for label, base in (("internal", args.internal), ("oss", args.oss)):
@@ -214,13 +273,17 @@ def main() -> int:
             print(f"FATAL: {label} gateway unreachable at {base}: {exc}")
             return 2
 
-    payloads = build_payloads()
+    payloads = build_payloads(args.salt)
     rows = []
     print(f"{'payload':<18} {'internal saved':>14} {'ratio':>7} "
           f"{'oss saved':>10} {'ratio':>7} {'delta':>8}")
     for name, messages in payloads:
         internal = measure(args.internal, name, messages, args.model, args.tier)
         oss = measure(args.oss, name, messages, args.model, args.tier)
+        if internal["contaminated"] or oss["contaminated"]:
+            print(f"WARNING: {name} still contaminated after retries "
+                  f"(internal={internal['contaminated']}, "
+                  f"oss={oss['contaminated']}) — excluded from aggregate")
         delta = (
             (oss["tokens_saved"] - internal["tokens_saved"])
             / internal["tokens_saved"]
@@ -232,8 +295,9 @@ def main() -> int:
               f"{internal['ratio']:>7.1%} {oss['tokens_saved']:>10} "
               f"{oss['ratio']:>7.1%} {delta:>8.1%}")
 
-    int_total = sum(r["internal"]["tokens_saved"] for r in rows)
-    oss_total = sum(r["oss"]["tokens_saved"] for r in rows)
+    clean_rows = [r for r in rows if not (r["internal"]["contaminated"] or r["oss"]["contaminated"])]
+    int_total = sum(r["internal"]["tokens_saved"] for r in clean_rows)
+    oss_total = sum(r["oss"]["tokens_saved"] for r in clean_rows)
     agg_delta = (oss_total - int_total) / int_total if int_total else 0.0
     verdict = "PASS" if abs(agg_delta) <= args.threshold or agg_delta > 0 else "FAIL"
     print(f"\naggregate tokens_saved: internal={int_total} oss={oss_total} "
