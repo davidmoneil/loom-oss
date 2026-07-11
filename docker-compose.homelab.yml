@@ -11,10 +11,11 @@ services:
       - loom-data:/app/data
       - loom-logs:/app/logs
     env_file:
+      # Single source of truth for LOOM_POSTGRES_DSN — do not duplicate the
+      # DSN here or in loom.homelab.yaml (see docs/homelab-deploy.md).
       - .env.homelab
     environment:
       LOOM_CONFIG: /app/loom.yaml
-      LOOM_POSTGRES_DSN: "postgresql://n8n@postgres-unified:5432/loom"
     extra_hosts:
       - "host.docker.internal:host-gateway"
     networks:
