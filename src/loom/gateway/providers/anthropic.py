@@ -25,21 +25,101 @@ _KNOWN_MODELS = [
 ]
 
 
+_RATELIMIT_HEADER_MAP = {
+    "anthropic-ratelimit-requests-limit": "ratelimit_requests_limit",
+    "anthropic-ratelimit-requests-remaining": "ratelimit_requests_remaining",
+    "anthropic-ratelimit-requests-reset": "ratelimit_requests_reset",
+    "anthropic-ratelimit-tokens-limit": "ratelimit_tokens_limit",
+    "anthropic-ratelimit-tokens-remaining": "ratelimit_tokens_remaining",
+    "anthropic-ratelimit-tokens-reset": "ratelimit_tokens_reset",
+    "anthropic-ratelimit-input-tokens-limit": "ratelimit_input_tokens_limit",
+    "anthropic-ratelimit-input-tokens-remaining": "ratelimit_input_tokens_remaining",
+    "anthropic-ratelimit-input-tokens-reset": "ratelimit_input_tokens_reset",
+    "anthropic-ratelimit-output-tokens-limit": "ratelimit_output_tokens_limit",
+    "anthropic-ratelimit-output-tokens-remaining": "ratelimit_output_tokens_remaining",
+    "anthropic-ratelimit-output-tokens-reset": "ratelimit_output_tokens_reset",
+    "retry-after": "retry_after",
+    "anthropic-ratelimit-unified-status": "ratelimit_unified_status",
+    "anthropic-ratelimit-unified-reset": "ratelimit_unified_reset",
+    "anthropic-ratelimit-unified-5h-utilization": "ratelimit_unified_5h_utilization",
+    "anthropic-ratelimit-unified-5h-status": "ratelimit_unified_5h_status",
+    "anthropic-ratelimit-unified-7d-utilization": "ratelimit_unified_7d_utilization",
+    "anthropic-ratelimit-unified-7d-status": "ratelimit_unified_7d_status",
+    "anthropic-ratelimit-unified-7d-surpassed-threshold": "ratelimit_unified_7d_surpassed_threshold",
+    "anthropic-ratelimit-unified-overage-status": "ratelimit_unified_overage_status",
+    "anthropic-ratelimit-unified-fallback-percentage": "ratelimit_unified_fallback_percentage",
+}
+
+_STR_KEYS = frozenset(
+    k for k in _RATELIMIT_HEADER_MAP.values()
+    if k.endswith("_reset") or k.endswith("_status") or k.endswith("_reason")
+    or k == "retry_after"
+)
+
+
+def _extract_ratelimit_headers(resp: httpx.Response) -> dict:
+    out: dict = {}
+    for hdr, key in _RATELIMIT_HEADER_MAP.items():
+        raw = resp.headers.get(hdr)
+        if raw is None:
+            continue
+        if key in _STR_KEYS:
+            out[key] = raw
+        else:
+            try:
+                out[key] = float(raw) if "." in raw else int(raw)
+            except (ValueError, TypeError):
+                out[key] = raw
+
+    for bucket in ("tokens", "input_tokens", "output_tokens"):
+        limit = out.get(f"ratelimit_{bucket}_limit")
+        remaining = out.get(f"ratelimit_{bucket}_remaining")
+        if isinstance(limit, (int, float)) and isinstance(remaining, (int, float)) and limit > 0:
+            out[f"ratelimit_{bucket}_utilization"] = round(1.0 - remaining / limit, 4)
+
+    # Map unified utilization to the standard tokens_utilization field
+    # so the rate_limits table gets populated from either source
+    if "ratelimit_tokens_utilization" not in out:
+        u5h = out.get("ratelimit_unified_5h_utilization")
+        if isinstance(u5h, (int, float)):
+            out["ratelimit_tokens_utilization"] = round(u5h / 100, 4)
+
+    return out
+
+
 class AnthropicBackend(ProviderBackend):
     name = "anthropic"
+    _last_ratelimit: dict = {}
 
-    def _headers(self, api_key: str) -> dict[str, str]:
-        headers = {
+    _STRIP_HEADERS = frozenset({
+        "host", "connection", "keep-alive", "proxy-authenticate",
+        "proxy-authorization", "te", "trailers", "transfer-encoding",
+        "upgrade", "accept-encoding", "content-length", "content-type",
+        "authorization", "x-api-key",
+    })
+
+    def _headers(
+        self,
+        api_key: str,
+        inbound_headers: dict[str, str] | None = None,
+    ) -> dict[str, str]:
+        headers: dict[str, str] = {
             "Content-Type": "application/json",
             "anthropic-version": ANTHROPIC_VERSION,
         }
+        if inbound_headers:
+            for name, value in inbound_headers.items():
+                if name.lower() not in self._STRIP_HEADERS:
+                    headers[name] = value
+        upstream_host = self.api_base.replace("https://", "").replace("http://", "").split("/")[0]
+        headers["host"] = upstream_host
         if api_key:
-            # OAuth access tokens (sk-ant-oat...) authenticate via
-            # Authorization: Bearer, not x-api-key — interactive Claude Code
-            # sessions use these. API keys keep the x-api-key header.
             if api_key.startswith("sk-ant-oat"):
                 headers["Authorization"] = f"Bearer {api_key}"
-                headers["anthropic-beta"] = "oauth-2025-04-20"
+                beta = headers.get("anthropic-beta", "")
+                oauth_flag = "oauth-2025-04-20"
+                if oauth_flag not in beta:
+                    headers["anthropic-beta"] = f"{beta},{oauth_flag}".lstrip(",")
             else:
                 headers["x-api-key"] = api_key
         return headers
@@ -50,19 +130,27 @@ class AnthropicBackend(ProviderBackend):
         messages: list[dict],
         api_key: str,
         stream: bool = False,
+        inbound_headers: dict[str, str] | None = None,
+        query_string: str = "",
+        raw_body: dict | None = None,
         **kwargs,
     ) -> dict | AsyncIterator[bytes]:
-        body: dict = {"model": model, "messages": messages}
-        for key, value in kwargs.items():
-            if value is not None:
-                body[key] = value
-        # Anthropic requires max_tokens; supply a default if the client omitted it.
-        body.setdefault("max_tokens", 4096)
-        body["stream"] = stream
+        if raw_body is not None:
+            body = dict(raw_body)
+            body["model"] = model
+            body["messages"] = messages
+            body["stream"] = stream
+        else:
+            body = {"model": model, "messages": messages}
+            for key, value in kwargs.items():
+                if value is not None:
+                    body[key] = value
+            body.setdefault("max_tokens", 4096)
+            body["stream"] = stream
 
         if stream:
-            return self._stream(body, api_key)
-        return await self._complete(body, api_key)
+            return self._stream(body, api_key, inbound_headers, query_string)
+        return await self._complete(body, api_key, inbound_headers, query_string)
 
     async def count_tokens(
         self, body: dict, inbound_headers: dict[str, str]
@@ -91,33 +179,77 @@ class AnthropicBackend(ProviderBackend):
             raise ProviderError(f"anthropic request failed: {exc}") from exc
         return resp.status_code, _safe_json(resp)
 
-    async def _complete(self, body: dict, api_key: str) -> dict:
+    def _upstream_url(self, path: str, query_string: str) -> str:
+        return path
+
+    async def _complete(
+        self,
+        body: dict,
+        api_key: str,
+        inbound_headers: dict[str, str] | None = None,
+        query_string: str = "",
+    ) -> dict:
         client = await self.get_client()
+        url = self._upstream_url("/v1/messages", query_string)
+        hdrs = self._headers(api_key, inbound_headers)
+        import logging
+        _log = logging.getLogger("loom.anthropic")
+        req = client.build_request("POST", url, json=body, headers=hdrs)
+        _log.info("DEBUG upstream request: url=%s headers=%s",
+                  req.url, {k: v for k, v in req.headers.items()
+                            if k.lower() not in ("x-api-key", "authorization")})
         try:
-            resp = await client.post(
-                "/v1/messages", json=body, headers=self._headers(api_key)
-            )
+            resp = await client.send(req)
         except httpx.HTTPError as exc:
             raise ProviderError(f"anthropic request failed: {exc}") from exc
+        self._last_ratelimit = _extract_ratelimit_headers(resp)
         if resp.status_code >= 400:
+            payload = _safe_json(resp)
+            _log.error(
+                "upstream %s — headers sent: %s — payload: %s",
+                resp.status_code,
+                {k: v for k, v in self._headers(api_key, inbound_headers).items()
+                 if k.lower() != "x-api-key" and k.lower() != "authorization"},
+                payload,
+            )
             raise ProviderError(
                 f"anthropic returned {resp.status_code}",
                 status_code=resp.status_code,
-                payload=_safe_json(resp),
+                payload=payload,
             )
         return resp.json()
 
-    async def _stream(self, body: dict, api_key: str) -> AsyncIterator[bytes]:
+    async def _stream(
+        self,
+        body: dict,
+        api_key: str,
+        inbound_headers: dict[str, str] | None = None,
+        query_string: str = "",
+    ) -> AsyncIterator[bytes]:
         client = await self.get_client()
+        url = self._upstream_url("/v1/messages", query_string)
         async with client.stream(
-            "POST", "/v1/messages", json=body, headers=self._headers(api_key)
+            "POST",
+            url,
+            json=body,
+            headers=self._headers(api_key, inbound_headers),
         ) as resp:
+            self._last_ratelimit = _extract_ratelimit_headers(resp)
             if resp.status_code >= 400:
                 await resp.aread()
+                payload = _safe_json(resp)
+                import logging
+                logging.getLogger("loom.anthropic").error(
+                    "upstream stream %s — headers sent: %s — payload: %s",
+                    resp.status_code,
+                    {k: v for k, v in self._headers(api_key, inbound_headers).items()
+                     if k.lower() != "x-api-key" and k.lower() != "authorization"},
+                    payload,
+                )
                 raise ProviderError(
                     f"anthropic stream returned {resp.status_code}",
                     status_code=resp.status_code,
-                    payload=_safe_json(resp),
+                    payload=payload,
                 )
             async for chunk in resp.aiter_raw():
                 if chunk:

@@ -4,6 +4,14 @@
 **Internal Loom**: ~/Code/loom/ (~25K LOC, 115 Python files)
 **OSS Loom**: ~/Code/loom-oss/ (~6K LOC, 30 Python files)
 
+## Design Principles
+
+- **Dashboard-first configuration**: Every configuration value must be manageable
+  through the web dashboard, not just through code or YAML. The gateway exposes
+  CRUD API endpoints for each config domain; the dashboard consumes them. Code
+  should accept dynamic values from the API, not hardcode fixed sets. YAML files
+  provide initial defaults; the dashboard provides runtime overrides.
+
 ## Status Legend
 - **PORTED** — Already in loom-oss
 - **PORT** — Should be ported to loom-oss
@@ -128,6 +136,14 @@
 
 ---
 
+## 10. Design Considerations (Future)
+
+| Feature | Internal | OSS | Status | Notes |
+|---------|----------|-----|--------|-------|
+| Per-turn model routing | Not implemented | — | **DESIGN** | [Design doc](design/per-turn-routing.md) — route different turns within an interactive session to different models based on complexity. Infrastructure exists (per-request routing in gateway); needs data + policy before implementing. |
+
+---
+
 ## Summary
 
 | Category | PORTED | PORT | PORT-HOMELAB | BUILD | CUT | NEW-OSS |
@@ -225,6 +241,15 @@ All three cutover blockers resolved:
 Also fixed: Anthropic OAuth tokens (`sk-ant-oat...`) must use
 `Authorization: Bearer` + `anthropic-beta: oauth-2025-04-20`, not `x-api-key`
 — interactive Claude Code sessions need this for the cutover.
+
+### Compression tool_use fix — 2026-07-10
+
+`_compress_messages_inline()` was flattening list-type `content` containing
+`tool_use` or `tool_result` blocks into a JSON string via `json.dumps`. The
+Anthropic API requires these as structured lists — the string replacement caused
+upstream 400 errors when Claude Code launched parallel tool calls (agents,
+subagents) through loom. Messages with tool blocks are now skipped during
+compression and passed through untouched. PR #11.
 
 Remaining before cutover (wmhx):
 

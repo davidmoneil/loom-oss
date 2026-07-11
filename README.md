@@ -10,7 +10,7 @@ application code.
 ## Quickstart (Docker)
 
 ```bash
-git clone <this repo> && cd loom-oss
+git clone https://github.com/davidmoneil/loom-oss.git && cd loom-oss
 ./setup.sh
 ```
 
@@ -46,6 +46,11 @@ no provider keys.
 |---------|-----------|-------|
 | SQLite (default) | `storage.backend: sqlite` | zero dependencies; `data/loom.db` |
 | PostgreSQL | `storage.backend: postgres` + `postgres_dsn` (or `LOOM_POSTGRES_DSN`) | install extras: `pip install -e ".[postgres]"` |
+
+Data is stored in named Docker volumes (`loom-data`, `loom-logs`) that persist
+across image rebuilds and `docker compose down`. See
+[docs/storage.md](docs/storage.md) for the full persistence story, volume
+layout, environment variable overrides, and backup guidance.
 
 ## Key Endpoints
 

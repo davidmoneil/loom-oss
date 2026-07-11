@@ -128,6 +128,88 @@ def test_session_tracking(storage):
     assert mine["last_seen"] > 0
 
 
+def test_session_metadata_columns(storage):
+    """touch_session stores and retrieves client metadata (schema v6)."""
+    sid = f"sess-meta-{uuid.uuid4().hex[:12]}"
+    storage.touch_session(
+        sid, source="pytest",
+        client_type="claude-code",
+        user_id="test@example.com",
+        api_key_suffix="abcd1234",
+        system_hash="abc123def456",
+    )
+    entries = storage.list_sessions(hours=1)
+    mine = next(e for e in entries if e["session_id"] == sid)
+    assert mine["client_type"] == "claude-code"
+    assert mine["user_id"] == "test@example.com"
+    assert mine["api_key_suffix"] == "abcd1234"
+    assert mine["system_hash"] == "abc123def456"
+
+
+def test_session_metadata_coalesces_on_update(storage):
+    """Metadata is preserved across upserts when not re-supplied."""
+    sid = f"sess-coal-{uuid.uuid4().hex[:12]}"
+    storage.touch_session(
+        sid, source="pytest",
+        client_type="sdk-python",
+        user_id="alice@example.com",
+    )
+    # Second touch without metadata — values should persist.
+    storage.touch_session(sid, source="pytest")
+    entries = storage.list_sessions(hours=1)
+    mine = next(e for e in entries if e["session_id"] == sid)
+    assert mine["client_type"] == "sdk-python"
+    assert mine["user_id"] == "alice@example.com"
+    assert mine["turns"] == 2
+
+
+def test_rate_limits_roundtrip(storage):
+    rid = f"req-{uuid.uuid4().hex[:12]}"
+    rl = {
+        "ratelimit_requests_limit": 1000,
+        "ratelimit_requests_remaining": 950,
+        "ratelimit_tokens_limit": 400000,
+        "ratelimit_tokens_remaining": 350000,
+        "ratelimit_input_tokens_limit": 200000,
+        "ratelimit_input_tokens_remaining": 180000,
+        "ratelimit_output_tokens_limit": 200000,
+        "ratelimit_output_tokens_remaining": 190000,
+        "ratelimit_tokens_utilization": 0.125,
+        "ratelimit_input_tokens_utilization": 0.1,
+        "ratelimit_output_tokens_utilization": 0.05,
+    }
+    storage.record_rate_limits(
+        request_id=rid, provider="anthropic", model="haiku", ratelimit=rl
+    )
+
+    current = storage.get_rate_limit_current("anthropic")
+    assert current is not None
+    assert current["provider"] == "anthropic"
+    assert current["model"] == "haiku"
+    assert current["tokens_limit"] == 400000
+    assert current["tokens_remaining"] == 350000
+    assert current["tokens_utilization"] == pytest.approx(0.125)
+
+    trend = storage.get_rate_limit_trend(hours=1, provider="anthropic")
+    assert len(trend) >= 1
+    assert trend[0]["samples"] >= 1
+
+
+def test_rate_limits_empty_skipped(storage):
+    storage.record_rate_limits(
+        request_id="req-noop", provider="anthropic", ratelimit=None
+    )
+    storage.record_rate_limits(
+        request_id="req-noop2", provider="anthropic", ratelimit={}
+    )
+    assert storage.get_rate_limit_current("anthropic") is None
+
+
+def test_rate_limits_no_data(storage):
+    assert storage.get_rate_limit_current("anthropic") is None
+    assert storage.get_rate_limit_trend(hours=1) == []
+
+
 class _Cfg:
     class storage:  # noqa: N801 — mimics loaded config shape
         backend = "postgres"

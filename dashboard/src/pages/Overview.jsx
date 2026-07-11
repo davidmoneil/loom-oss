@@ -16,8 +16,14 @@ import Chart, { CHART_COLORS, axisProps, tooltipStyle } from "../components/Char
 import { api, fmtNumber, fmtCost, fmtLatency, fmtTimeShort } from "../api.js";
 
 const REFRESH_MS = 30000;
+const RANGES = [
+  { label: "24h", hours: 24, bucket: "1h" },
+  { label: "7d", hours: 168, bucket: "6h" },
+  { label: "30d", hours: 720, bucket: "1d" },
+];
 
 export default function Overview() {
+  const [range, setRange] = useState(RANGES[0]);
   const [metrics, setMetrics] = useState(null);
   const [series, setSeries] = useState(null);
   const [health, setHealth] = useState(null);
@@ -25,16 +31,20 @@ export default function Overview() {
   const [updatedAt, setUpdatedAt] = useState(null);
   const [error, setError] = useState(null);
 
+  const [sessions, setSessions] = useState(null);
+
   const load = useCallback(async () => {
     try {
-      const [m, ts, h] = await Promise.all([
-        api.metrics(),
-        api.timeseries(24, "1h"),
+      const [m, ts, h, s] = await Promise.all([
+        api.metrics(range.hours),
+        api.timeseries(range.hours, range.bucket),
         api.health().catch(() => null),
+        api.sessions(range.hours).catch(() => null),
       ]);
       setMetrics(m?.metrics ?? {});
       setSeries(ts);
       setHealth(h);
+      setSessions(s);
       setUpdatedAt(new Date());
       setError(null);
     } catch (e) {
@@ -42,7 +52,7 @@ export default function Overview() {
     } finally {
       setLoading(false);
     }
-  }, []);
+  }, [range]);
 
   useEffect(() => {
     load();
@@ -67,11 +77,27 @@ export default function Overview() {
         updatedAt={updatedAt}
         error={error}
         onRefresh={load}
-      />
+      >
+        <div className="flex overflow-hidden rounded-md border border-border">
+          {RANGES.map((r) => (
+            <button
+              key={r.label}
+              onClick={() => setRange(r)}
+              className={`px-3 py-1.5 text-sm ${
+                r.label === range.label
+                  ? "bg-accent text-white"
+                  : "bg-card text-gray-400 hover:bg-gray-700/50"
+              }`}
+            >
+              {r.label}
+            </button>
+          ))}
+        </div>
+      </Header>
 
       <div className="mt-6 grid grid-cols-2 gap-4 lg:grid-cols-4">
         <StatCard
-          label="Requests (24h)"
+          label={`Requests (${range.label})`}
           value={fmtNumber(m.request_count)}
           loading={loading}
         />
@@ -92,10 +118,25 @@ export default function Overview() {
         />
       </div>
 
+      {sessions?.supported && (
+        <div className="mt-4 grid grid-cols-2 gap-4 lg:grid-cols-4">
+          <StatCard
+            label={`Active Sessions (${range.label})`}
+            value={fmtNumber(sessions.sessions)}
+            loading={loading}
+          />
+          <StatCard
+            label={`Total Turns (${range.label})`}
+            value={fmtNumber(sessions.total_turns)}
+            loading={loading}
+          />
+        </div>
+      )}
+
       <div className="mt-6 grid grid-cols-1 gap-4 lg:grid-cols-3">
         <div className="lg:col-span-2">
           <Chart
-            title="Request volume (24h)"
+            title={`Request volume (${range.label})`}
             loading={loading}
             empty={volume.length === 0}
           >

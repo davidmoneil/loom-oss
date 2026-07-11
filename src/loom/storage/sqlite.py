@@ -18,7 +18,7 @@ import threading
 import time
 from typing import Any, Optional
 
-SCHEMA_VERSION = 4
+SCHEMA_VERSION = 6
 
 _FLUSH_INTERVAL_SECONDS = 2.0
 
@@ -154,6 +154,29 @@ class LoomStorage:
                 created_at REAL NOT NULL
             );
 
+            CREATE TABLE IF NOT EXISTS rate_limits (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                timestamp REAL NOT NULL,
+                request_id TEXT,
+                provider TEXT NOT NULL,
+                model TEXT,
+                requests_limit INTEGER,
+                requests_remaining INTEGER,
+                tokens_limit INTEGER,
+                tokens_remaining INTEGER,
+                input_tokens_limit INTEGER,
+                input_tokens_remaining INTEGER,
+                output_tokens_limit INTEGER,
+                output_tokens_remaining INTEGER,
+                tokens_utilization REAL,
+                input_tokens_utilization REAL,
+                output_tokens_utilization REAL
+            );
+            CREATE INDEX IF NOT EXISTS idx_rate_limits_timestamp
+                ON rate_limits (timestamp);
+            CREATE INDEX IF NOT EXISTS idx_rate_limits_provider
+                ON rate_limits (provider, timestamp);
+
             CREATE INDEX IF NOT EXISTS idx_metrics_timestamp
                 ON metrics (timestamp);
             CREATE INDEX IF NOT EXISTS idx_routing_timestamp
@@ -215,6 +238,48 @@ class LoomStorage:
             ]:
                 try:
                     c.execute(idx)
+                except sqlite3.OperationalError:
+                    pass
+
+        if current < 5:
+            try:
+                c.executescript("""
+                    CREATE TABLE IF NOT EXISTS rate_limits (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        timestamp REAL NOT NULL,
+                        request_id TEXT,
+                        provider TEXT NOT NULL,
+                        model TEXT,
+                        requests_limit INTEGER,
+                        requests_remaining INTEGER,
+                        tokens_limit INTEGER,
+                        tokens_remaining INTEGER,
+                        input_tokens_limit INTEGER,
+                        input_tokens_remaining INTEGER,
+                        output_tokens_limit INTEGER,
+                        output_tokens_remaining INTEGER,
+                        tokens_utilization REAL,
+                        input_tokens_utilization REAL,
+                        output_tokens_utilization REAL
+                    );
+                    CREATE INDEX IF NOT EXISTS idx_rate_limits_timestamp
+                        ON rate_limits (timestamp);
+                    CREATE INDEX IF NOT EXISTS idx_rate_limits_provider
+                        ON rate_limits (provider, timestamp);
+                """)
+            except sqlite3.OperationalError:
+                pass
+
+        if current < 6:
+            # Multi-signal session fingerprinting: add metadata columns to sessions.
+            for col, typ in [
+                ('client_type', 'TEXT'),
+                ('user_id', 'TEXT'),
+                ('api_key_suffix', 'TEXT'),
+                ('system_hash', 'TEXT'),
+            ]:
+                try:
+                    c.execute(f"ALTER TABLE sessions ADD COLUMN {col} {typ}")
                 except sqlite3.OperationalError:
                     pass
 
@@ -301,6 +366,48 @@ class LoomStorage:
                     compression_ratio,
                     message_count,
                     source,
+                ),
+            )
+            self._schedule_flush()
+
+    def record_rate_limits(
+        self,
+        request_id: str,
+        provider: str,
+        model: Optional[str] = None,
+        ratelimit: Optional[dict] = None,
+    ) -> None:
+        if not ratelimit:
+            return
+        with self._write_lock:
+            self.conn.execute(
+                """
+                INSERT INTO rate_limits (
+                    timestamp, request_id, provider, model,
+                    requests_limit, requests_remaining,
+                    tokens_limit, tokens_remaining,
+                    input_tokens_limit, input_tokens_remaining,
+                    output_tokens_limit, output_tokens_remaining,
+                    tokens_utilization, input_tokens_utilization,
+                    output_tokens_utilization
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    time.time(),
+                    request_id,
+                    provider,
+                    model,
+                    ratelimit.get("ratelimit_requests_limit"),
+                    ratelimit.get("ratelimit_requests_remaining"),
+                    ratelimit.get("ratelimit_tokens_limit"),
+                    ratelimit.get("ratelimit_tokens_remaining"),
+                    ratelimit.get("ratelimit_input_tokens_limit"),
+                    ratelimit.get("ratelimit_input_tokens_remaining"),
+                    ratelimit.get("ratelimit_output_tokens_limit"),
+                    ratelimit.get("ratelimit_output_tokens_remaining"),
+                    ratelimit.get("ratelimit_tokens_utilization"),
+                    ratelimit.get("ratelimit_input_tokens_utilization"),
+                    ratelimit.get("ratelimit_output_tokens_utilization"),
                 ),
             )
             self._schedule_flush()
@@ -401,12 +508,22 @@ class LoomStorage:
 
     # ------------------------------------------------------------ sessions
     def touch_session(
-        self, session_id: str, source: str = "", tokens: int = 0, cost: float = 0.0
+        self,
+        session_id: str,
+        source: str = "",
+        tokens: int = 0,
+        cost: float = 0.0,
+        *,
+        client_type: str = "",
+        user_id: str = "",
+        api_key_suffix: str = "",
+        system_hash: str = "",
     ) -> int:
         """Upsert a session row and increment its turn counter.
 
         Returns the turn number after the update (1 for a new session).
         ended_at doubles as last_seen; request_count is the turn counter.
+        Optional keyword args store session metadata for dashboard display.
         """
         now = time.time()
         with self._write_lock:
@@ -414,17 +531,24 @@ class LoomStorage:
                 """
                 INSERT INTO sessions
                     (session_id, source, started_at, ended_at,
-                     request_count, total_tokens, total_cost)
-                VALUES (?, ?, ?, ?, 1, ?, ?)
+                     request_count, total_tokens, total_cost,
+                     client_type, user_id, api_key_suffix, system_hash)
+                VALUES (?, ?, ?, ?, 1, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(session_id) DO UPDATE SET
                     ended_at = excluded.ended_at,
                     source = COALESCE(excluded.source, sessions.source),
                     request_count = sessions.request_count + 1,
                     total_tokens = sessions.total_tokens + excluded.total_tokens,
-                    total_cost = sessions.total_cost + excluded.total_cost
+                    total_cost = sessions.total_cost + excluded.total_cost,
+                    client_type = COALESCE(excluded.client_type, sessions.client_type),
+                    user_id = COALESCE(excluded.user_id, sessions.user_id),
+                    api_key_suffix = COALESCE(excluded.api_key_suffix, sessions.api_key_suffix),
+                    system_hash = COALESCE(excluded.system_hash, sessions.system_hash)
                 RETURNING request_count
                 """,
-                (session_id, source, now, now, tokens, cost),
+                (session_id, source, now, now, tokens, cost,
+                 client_type or None, user_id or None,
+                 api_key_suffix or None, system_hash or None),
             ).fetchone()
             self._schedule_flush()
         return int(row[0]) if row else 1
@@ -441,7 +565,8 @@ class LoomStorage:
         rows = self.conn.execute(
             """
             SELECT session_id, COALESCE(source, 'unknown') AS source,
-                   request_count AS turns, ended_at AS last_seen
+                   request_count AS turns, ended_at AS last_seen,
+                   client_type, user_id, api_key_suffix, system_hash
             FROM sessions WHERE ended_at >= ?
             ORDER BY ended_at DESC LIMIT ?
             """,
@@ -779,6 +904,50 @@ class LoomStorage:
         ]
 
         return {"total": total, "offset": offset, "limit": limit, "entries": entries}
+
+    # ------------------------------------------------------------------ rate limits
+    def get_rate_limit_current(self, provider: str = "anthropic") -> Optional[dict]:
+        row = self.conn.execute(
+            """
+            SELECT timestamp, request_id, provider, model,
+                   requests_limit, requests_remaining,
+                   tokens_limit, tokens_remaining,
+                   input_tokens_limit, input_tokens_remaining,
+                   output_tokens_limit, output_tokens_remaining,
+                   tokens_utilization, input_tokens_utilization,
+                   output_tokens_utilization
+            FROM rate_limits
+            WHERE provider = ?
+            ORDER BY timestamp DESC LIMIT 1
+            """,
+            (provider,),
+        ).fetchone()
+        if row is None:
+            return None
+        return dict(row)
+
+    def get_rate_limit_trend(
+        self, hours: int = 48, provider: str = "anthropic"
+    ) -> list[dict]:
+        since = time.time() - hours * 3600
+        rows = self.conn.execute(
+            """
+            SELECT
+                strftime('%Y-%m-%dT%H:00:00Z', timestamp, 'unixepoch') AS hour,
+                AVG(tokens_utilization) AS avg_tokens_util,
+                AVG(input_tokens_utilization) AS avg_input_util,
+                AVG(output_tokens_utilization) AS avg_output_util,
+                MAX(tokens_utilization) AS max_tokens_util,
+                MIN(tokens_remaining) AS min_tokens_remaining,
+                COUNT(*) AS samples
+            FROM rate_limits
+            WHERE timestamp >= ? AND provider = ?
+            GROUP BY hour
+            ORDER BY hour ASC
+            """,
+            (since, provider),
+        ).fetchall()
+        return [dict(r) for r in rows]
 
     # ------------------------------------------------------------------ compression cache
     def get_compression_cached(

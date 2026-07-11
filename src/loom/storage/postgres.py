@@ -17,7 +17,7 @@ from typing import Any, Optional
 
 logger = logging.getLogger("loom.storage.postgres")
 
-SCHEMA_VERSION = 4
+SCHEMA_VERSION = 6
 
 
 class PostgresStorage:
@@ -140,6 +140,32 @@ class PostgresStorage:
             "CREATE INDEX IF NOT EXISTS idx_metrics_request_id ON metrics (request_id)"
         )
         conn.execute("""
+            CREATE TABLE IF NOT EXISTS rate_limits (
+                id SERIAL PRIMARY KEY,
+                timestamp DOUBLE PRECISION NOT NULL,
+                request_id TEXT,
+                provider TEXT NOT NULL,
+                model TEXT,
+                requests_limit INTEGER,
+                requests_remaining INTEGER,
+                tokens_limit INTEGER,
+                tokens_remaining INTEGER,
+                input_tokens_limit INTEGER,
+                input_tokens_remaining INTEGER,
+                output_tokens_limit INTEGER,
+                output_tokens_remaining INTEGER,
+                tokens_utilization DOUBLE PRECISION,
+                input_tokens_utilization DOUBLE PRECISION,
+                output_tokens_utilization DOUBLE PRECISION
+            )
+        """)
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_rate_limits_timestamp ON rate_limits (timestamp)"
+        )
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_rate_limits_provider ON rate_limits (provider, timestamp)"
+        )
+        conn.execute("""
             CREATE TABLE IF NOT EXISTS schema_version (
                 version INTEGER PRIMARY KEY,
                 applied_at DOUBLE PRECISION
@@ -176,12 +202,47 @@ class PostgresStorage:
             """)
 
         if current < 4:
-            # Session tracking (contract /api/sessions): sessions gains the
-            # calling source; ended_at doubles as last_seen, request_count as
-            # the turn counter.
             conn.execute(
                 "ALTER TABLE sessions ADD COLUMN IF NOT EXISTS source TEXT"
             )
+
+        if current < 5:
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS rate_limits (
+                    id SERIAL PRIMARY KEY,
+                    timestamp DOUBLE PRECISION NOT NULL,
+                    request_id TEXT,
+                    provider TEXT NOT NULL,
+                    model TEXT,
+                    requests_limit INTEGER,
+                    requests_remaining INTEGER,
+                    tokens_limit INTEGER,
+                    tokens_remaining INTEGER,
+                    input_tokens_limit INTEGER,
+                    input_tokens_remaining INTEGER,
+                    output_tokens_limit INTEGER,
+                    output_tokens_remaining INTEGER,
+                    tokens_utilization DOUBLE PRECISION,
+                    input_tokens_utilization DOUBLE PRECISION,
+                    output_tokens_utilization DOUBLE PRECISION
+                )
+            """)
+            conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_rate_limits_timestamp "
+                "ON rate_limits (timestamp)"
+            )
+            conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_rate_limits_provider "
+                "ON rate_limits (provider, timestamp)"
+            )
+
+        if current < 6:
+            # Multi-signal session fingerprinting: add metadata columns to sessions.
+            for col in ['client_type', 'user_id', 'api_key_suffix', 'system_hash']:
+                try:
+                    conn.execute(f"ALTER TABLE sessions ADD COLUMN IF NOT EXISTS {col} TEXT")
+                except Exception:
+                    pass
 
         if current < SCHEMA_VERSION:
             conn.execute(
@@ -263,6 +324,46 @@ class PostgresStorage:
                 compression_ratio,
                 message_count,
                 source,
+            ),
+        )
+
+    def record_rate_limits(
+        self,
+        request_id: str,
+        provider: str,
+        model: Optional[str] = None,
+        ratelimit: Optional[dict] = None,
+    ) -> None:
+        if not ratelimit:
+            return
+        self.conn.execute(
+            """
+            INSERT INTO rate_limits (
+                timestamp, request_id, provider, model,
+                requests_limit, requests_remaining,
+                tokens_limit, tokens_remaining,
+                input_tokens_limit, input_tokens_remaining,
+                output_tokens_limit, output_tokens_remaining,
+                tokens_utilization, input_tokens_utilization,
+                output_tokens_utilization
+            ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+            """,
+            (
+                time.time(),
+                request_id,
+                provider,
+                model,
+                ratelimit.get("ratelimit_requests_limit"),
+                ratelimit.get("ratelimit_requests_remaining"),
+                ratelimit.get("ratelimit_tokens_limit"),
+                ratelimit.get("ratelimit_tokens_remaining"),
+                ratelimit.get("ratelimit_input_tokens_limit"),
+                ratelimit.get("ratelimit_input_tokens_remaining"),
+                ratelimit.get("ratelimit_output_tokens_limit"),
+                ratelimit.get("ratelimit_output_tokens_remaining"),
+                ratelimit.get("ratelimit_tokens_utilization"),
+                ratelimit.get("ratelimit_input_tokens_utilization"),
+                ratelimit.get("ratelimit_output_tokens_utilization"),
             ),
         )
 
@@ -358,29 +459,46 @@ class PostgresStorage:
 
     # ------------------------------------------------------------ sessions
     def touch_session(
-        self, session_id: str, source: str = "", tokens: int = 0, cost: float = 0.0
+        self,
+        session_id: str,
+        source: str = "",
+        tokens: int = 0,
+        cost: float = 0.0,
+        *,
+        client_type: str = "",
+        user_id: str = "",
+        api_key_suffix: str = "",
+        system_hash: str = "",
     ) -> int:
         """Upsert a session row and increment its turn counter.
 
         Returns the turn number after the update (1 for a new session).
         ended_at doubles as last_seen; request_count is the turn counter.
+        Optional keyword args store session metadata for dashboard display.
         """
         now = time.time()
         row = self.conn.execute(
             """
             INSERT INTO sessions
                 (session_id, source, started_at, ended_at,
-                 request_count, total_tokens, total_cost)
-            VALUES (%s, %s, %s, %s, 1, %s, %s)
+                 request_count, total_tokens, total_cost,
+                 client_type, user_id, api_key_suffix, system_hash)
+            VALUES (%s, %s, %s, %s, 1, %s, %s, %s, %s, %s, %s)
             ON CONFLICT (session_id) DO UPDATE SET
                 ended_at = EXCLUDED.ended_at,
                 source = COALESCE(EXCLUDED.source, sessions.source),
                 request_count = sessions.request_count + 1,
                 total_tokens = sessions.total_tokens + EXCLUDED.total_tokens,
-                total_cost = sessions.total_cost + EXCLUDED.total_cost
+                total_cost = sessions.total_cost + EXCLUDED.total_cost,
+                client_type = COALESCE(EXCLUDED.client_type, sessions.client_type),
+                user_id = COALESCE(EXCLUDED.user_id, sessions.user_id),
+                api_key_suffix = COALESCE(EXCLUDED.api_key_suffix, sessions.api_key_suffix),
+                system_hash = COALESCE(EXCLUDED.system_hash, sessions.system_hash)
             RETURNING request_count
             """,
-            (session_id, source, now, now, tokens, cost),
+            (session_id, source, now, now, tokens, cost,
+             client_type or None, user_id or None,
+             api_key_suffix or None, system_hash or None),
         ).fetchone()
         return int(row[0]) if row else 1
 
@@ -395,7 +513,8 @@ class PostgresStorage:
         rows = self.conn.execute(
             """
             SELECT session_id, COALESCE(source, 'unknown'),
-                   request_count, ended_at
+                   request_count, ended_at,
+                   client_type, user_id, api_key_suffix, system_hash
             FROM sessions WHERE ended_at >= %s
             ORDER BY ended_at DESC LIMIT %s
             """,
@@ -407,6 +526,10 @@ class PostgresStorage:
                 "source": r[1],
                 "turns": r[2],
                 "last_seen": float(r[3]),
+                "client_type": r[4],
+                "user_id": r[5],
+                "api_key_suffix": r[6],
+                "system_hash": r[7],
             }
             for r in rows
         ]
@@ -693,6 +816,71 @@ class PostgresStorage:
         ]
 
         return {"total": total, "offset": offset, "limit": limit, "entries": entries}
+
+    # ------------------------------------------------------------------ rate limits
+    def get_rate_limit_current(self, provider: str = "anthropic") -> Optional[dict]:
+        row = self.conn.execute(
+            """
+            SELECT timestamp, request_id, provider, model,
+                   requests_limit, requests_remaining,
+                   tokens_limit, tokens_remaining,
+                   input_tokens_limit, input_tokens_remaining,
+                   output_tokens_limit, output_tokens_remaining,
+                   tokens_utilization, input_tokens_utilization,
+                   output_tokens_utilization
+            FROM rate_limits
+            WHERE provider = %s
+            ORDER BY timestamp DESC LIMIT 1
+            """,
+            (provider,),
+        ).fetchone()
+        if row is None:
+            return None
+        cols = [
+            "timestamp", "request_id", "provider", "model",
+            "requests_limit", "requests_remaining",
+            "tokens_limit", "tokens_remaining",
+            "input_tokens_limit", "input_tokens_remaining",
+            "output_tokens_limit", "output_tokens_remaining",
+            "tokens_utilization", "input_tokens_utilization",
+            "output_tokens_utilization",
+        ]
+        return dict(zip(cols, row))
+
+    def get_rate_limit_trend(
+        self, hours: int = 48, provider: str = "anthropic"
+    ) -> list[dict]:
+        since = time.time() - hours * 3600
+        rows = self.conn.execute(
+            """
+            SELECT
+                to_char(date_trunc('hour', to_timestamp(timestamp)),
+                        'YYYY-MM-DD"T"HH24:00:00"Z"') AS hour,
+                AVG(tokens_utilization) AS avg_tokens_util,
+                AVG(input_tokens_utilization) AS avg_input_util,
+                AVG(output_tokens_utilization) AS avg_output_util,
+                MAX(tokens_utilization) AS max_tokens_util,
+                MIN(tokens_remaining) AS min_tokens_remaining,
+                COUNT(*) AS samples
+            FROM rate_limits
+            WHERE timestamp >= %s AND provider = %s
+            GROUP BY hour
+            ORDER BY hour ASC
+            """,
+            (since, provider),
+        ).fetchall()
+        return [
+            {
+                "hour": r[0],
+                "avg_tokens_util": float(r[1]) if r[1] is not None else None,
+                "avg_input_util": float(r[2]) if r[2] is not None else None,
+                "avg_output_util": float(r[3]) if r[3] is not None else None,
+                "max_tokens_util": float(r[4]) if r[4] is not None else None,
+                "min_tokens_remaining": int(r[5]) if r[5] is not None else None,
+                "samples": r[6],
+            }
+            for r in rows
+        ]
 
     # ------------------------------------------------------------------ compression cache
     def get_compression_cached(

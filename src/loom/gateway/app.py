@@ -61,9 +61,10 @@ except Exception:  # pragma: no cover - degraded mode
     RoutingEngine = None  # type: ignore
 
 try:
-    from loom.detection.engine import DetectionEngine  # type: ignore
+    from loom.detection.engine import DetectionEngine, classify_task_type as _detection_classify  # type: ignore
 except Exception:  # pragma: no cover - degraded mode
     DetectionEngine = None  # type: ignore
+    _detection_classify = None
 
 try:
     from loom.compression.processor import ContentProcessor  # type: ignore
@@ -228,6 +229,7 @@ def _record_request(
     response_text: Optional[str] = None,
     compressed: bool = False,
     compression_ratio: float = 1.0,
+    ratelimit: Optional[dict] = None,
 ) -> None:
     """Persist + audit a completed request. Never raises into the request path."""
     tokens_in, tokens_out = _extract_tokens(usage)
@@ -261,10 +263,20 @@ def _record_request(
             )
         except Exception:
             pass
+        if ratelimit:
+            try:
+                state.storage.record_rate_limits(
+                    request_id=request_id,
+                    provider=provider,
+                    model=model,
+                    ratelimit=ratelimit,
+                )
+            except Exception:
+                pass
 
     if state.audit is not None:
         try:
-            state.audit.log_request(
+            audit_kwargs: dict = dict(
                 request_id=request_id,
                 method=method,
                 path=path,
@@ -280,6 +292,9 @@ def _record_request(
                 routing_reason=routing_reason,
                 status_code=status_code,
             )
+            if ratelimit:
+                audit_kwargs["ratelimit"] = ratelimit
+            state.audit.log_request(**audit_kwargs)
         except Exception:
             pass
         try:
@@ -446,22 +461,22 @@ def _model_cost(model_cfg: Optional[ModelConfig], usage: Any) -> float:
 #  Routing helpers
 # --------------------------------------------------------------------------- #
 def _classify_task_type(body: dict, messages: list[dict]) -> str:
-    """Lightweight task-type heuristic used to seed routing decisions."""
+    """Classify the task type for routing decisions.
+
+    Delegates to the detection engine's 7-type classifier when available,
+    falling back to a lightweight heuristic for tool_use detection (which
+    the detection engine doesn't cover since it's request-structure-based).
+    """
     if body.get("tools") or body.get("functions"):
         return "tool_use"
+    if _detection_classify is not None:
+        return _detection_classify(messages)
     response_format = body.get("response_format")
     if isinstance(response_format, dict) and response_format.get("type") in (
         "json_object",
         "json_schema",
     ):
         return "json_generation"
-    blob = " ".join(
-        str(m.get("content", "")) for m in messages if isinstance(m, dict)
-    ).lower()
-    if "json" in blob:
-        return "json_generation"
-    if any(k in blob for k in ("story", "poem", "creative", "imagine")):
-        return "story_generation"
     return "general"
 
 
@@ -508,7 +523,7 @@ def _select_model(
     task_type = _classify_task_type(body, messages)
 
     explicit = requested_model not in (None, "", "auto", "loom-auto")
-    if explicit:
+    if explicit and not policy.per_turn_routing:
         return requested_model, task_type, "client_specified"  # type: ignore[return-value]
 
     if policy.pinned_model:
@@ -638,6 +653,10 @@ async def _scan_ollama_stream(
     provider: str,
     model: str,
     text_key: str,
+    *,
+    path: str = "/api/generate",
+    t0: float = 0.0,
+    model_cfg: Any = None,
 ) -> AsyncIterator[bytes]:
     """Buffer an Ollama NDJSON stream, scan assembled text, re-emit."""
     chunks: list[dict] = []
@@ -684,12 +703,50 @@ async def _scan_ollama_stream(
         for line_bytes in raw_lines:
             yield line_bytes
 
+    if t0:
+        _record_request(
+            gw, request_id=request_id, method="POST", path=path,
+            source=source, provider=provider,
+            model=model_cfg.model_id if model_cfg else model,
+            requested_model=model, task_type="general",
+            routing_reason="direct", status_code=200,
+            latency_ms=round((time.monotonic() - t0) * 1000, 2),
+        )
+
+
+async def _passthrough_ollama_stream(
+    upstream: AsyncIterator[bytes],
+    gw: GatewayState,
+    request_id: str,
+    source: str,
+    provider: str,
+    model: str,
+    *,
+    path: str = "/api/generate",
+    t0: float = 0.0,
+    model_cfg: Any = None,
+) -> AsyncIterator[bytes]:
+    """Forward an Ollama NDJSON stream and record the request afterwards."""
+    async for line_bytes in upstream:
+        yield line_bytes
+
+    if t0:
+        _record_request(
+            gw, request_id=request_id, method="POST", path=path,
+            source=source, provider=provider,
+            model=model_cfg.model_id if model_cfg else model,
+            requested_model=model, task_type="general",
+            routing_reason="direct", status_code=200,
+            latency_ms=round((time.monotonic() - t0) * 1000, 2),
+        )
+
 
 async def _wrapped_stream(
     state: GatewayState,
     upstream: AsyncIterator[bytes],
     meta: dict,
     t0: float,
+    backend: Any = None,
 ) -> AsyncIterator[bytes]:
     """Forward upstream bytes, scanning for sensitive data when buffering is enabled.
 
@@ -796,12 +853,14 @@ async def _wrapped_stream(
             body = json.dumps(exc.payload).encode("utf-8")
             yield b"data: " + body + b"\n\n"
 
+    rl = getattr(backend, "_last_ratelimit", None) if backend else None
     _record_request(
         state,
         status_code=status,
         latency_ms=round((time.monotonic() - t0) * 1000, 2),
         usage=None,
         cost=0.0,
+        ratelimit=rl,
         **meta,
     )
 
@@ -977,6 +1036,7 @@ def create_app() -> FastAPI:
         try:
             body = await request.json()
         except Exception:
+            _audit_error(gw, request_id, "/v1/chat/completions", _source(request), 400)
             return _error_response(
                 ProviderError("invalid JSON body", status_code=400), request_id, 400
             )
@@ -1006,11 +1066,22 @@ def create_app() -> FastAPI:
 
             forward = _passthrough_params(body)
 
-            # Session tracking.
-            session_id = derive_session_id(messages, source)
+            # Session tracking: multi-signal fingerprint, turn counter.
+            signals = _extract_session_signals(
+                messages, source,
+                headers=dict(request.headers),
+                body=body,
+            )
+            session_id = signals["session_id"]
             if gw.storage is not None and session_id != "unknown":
                 try:
-                    gw.storage.touch_session(session_id, source)
+                    gw.storage.touch_session(
+                        session_id, source,
+                        client_type=signals["client_type"],
+                        user_id=signals["user_id"],
+                        api_key_suffix=signals["api_key_suffix"],
+                        system_hash=signals["system_hash"],
+                    )
                 except Exception:
                     pass
 
@@ -1049,11 +1120,12 @@ def create_app() -> FastAPI:
 
             if stream:
                 return StreamingResponse(
-                    _wrapped_stream(gw, result, meta, t0),  # type: ignore[arg-type]
+                    _wrapped_stream(gw, result, meta, t0, backend=backend),  # type: ignore[arg-type]
                     media_type="text/event-stream",
                     headers={"X-Loom-Request-Id": request_id},
                 )
 
+            rl = getattr(backend, "_last_ratelimit", None)
             usage = _extract_usage(result, provider_name)
             normalized = _normalize_response(result, provider_name, model_cfg.model_id)
             resp_text = _extract_response_text(normalized)
@@ -1065,6 +1137,7 @@ def create_app() -> FastAPI:
                 cost=_model_cost(model_cfg, usage),
                 messages=messages,
                 response_text=resp_text,
+                ratelimit=rl,
                 **meta,
             )
             normalized = _scan_response(gw, normalized, provider_name, model_cfg.model_id, source)
@@ -1114,6 +1187,7 @@ def create_app() -> FastAPI:
         try:
             body = await request.json()
         except Exception:
+            _audit_error(gw, request_id, "/v1/messages", _source(request), 400)
             return _error_response(
                 ProviderError("invalid JSON body", status_code=400), request_id, 400
             )
@@ -1141,14 +1215,23 @@ def create_app() -> FastAPI:
                     "no Anthropic backend configured", status_code=500
                 )
 
-            forward = _passthrough_params(body, anthropic=True)
             actual_model = model_cfg.model_id if model_cfg else model
 
-            # Session tracking: stable conversation fingerprint, turn counter.
-            session_id = derive_session_id(messages, source)
+            # Session tracking: multi-signal fingerprint, turn counter.
+            inbound_hdrs = dict(request.headers)
+            signals = _extract_session_signals(
+                messages, source, headers=inbound_hdrs, body=body,
+            )
+            session_id = signals["session_id"]
             if gw.storage is not None and session_id != "unknown":
                 try:
-                    gw.storage.touch_session(session_id, source)
+                    gw.storage.touch_session(
+                        session_id, source,
+                        client_type=signals["client_type"],
+                        user_id=signals["user_id"],
+                        api_key_suffix=signals["api_key_suffix"],
+                        system_hash=signals["system_hash"],
+                    )
                 except Exception:
                     pass
 
@@ -1160,13 +1243,14 @@ def create_app() -> FastAPI:
                 )
                 gw.comp_tokens_before += comp_before
                 gw.comp_tokens_after += comp_after
-
             result = await backend.chat_completion(
                 model=actual_model,
                 messages=messages,
                 api_key=api_key,
                 stream=stream,
-                **forward,
+                inbound_headers=inbound_hdrs,
+                query_string=request.url.query or "",
+                raw_body=body,
             )
 
             meta = {
@@ -1187,11 +1271,12 @@ def create_app() -> FastAPI:
 
             if stream:
                 return StreamingResponse(
-                    _wrapped_stream(gw, result, meta, t0),  # type: ignore[arg-type]
+                    _wrapped_stream(gw, result, meta, t0, backend=backend),  # type: ignore[arg-type]
                     media_type="text/event-stream",
                     headers={"X-Loom-Request-Id": request_id},
                 )
 
+            rl = getattr(backend, "_last_ratelimit", None)
             usage = _extract_usage(result, provider_name)
             resp_text = _extract_response_text(result)
             _record_request(
@@ -1202,6 +1287,7 @@ def create_app() -> FastAPI:
                 cost=_model_cost(model_cfg, usage),
                 messages=messages,
                 response_text=resp_text,
+                ratelimit=rl,
                 **meta,
             )
             result = _scan_response(gw, result, provider_name, model, source)
@@ -1223,6 +1309,7 @@ def create_app() -> FastAPI:
         try:
             body = await request.json()
         except Exception:
+            _audit_error(gw, request_id, "/api/generate", source, 400)
             return _error_response(ValueError("invalid JSON"), request_id, 400)
 
         model_name = body.get("model", "")
@@ -1230,6 +1317,7 @@ def create_app() -> FastAPI:
         stream = body.get("stream", False)
 
         if not model_name or not prompt:
+            _audit_error(gw, request_id, "/api/generate", source, 400)
             return JSONResponse(
                 {"error": "model and prompt are required"},
                 status_code=400,
@@ -1264,6 +1352,7 @@ def create_app() -> FastAPI:
 
         resolved = gw.resolve_provider(model_name)
         if resolved is None:
+            _audit_error(gw, request_id, "/api/generate", source, 400)
             return JSONResponse(
                 {"error": f"unknown model: {model_name}"},
                 status_code=400,
@@ -1272,6 +1361,7 @@ def create_app() -> FastAPI:
         provider_name, model_cfg = resolved
         backend = gw.backends.get(provider_name)
         if backend is None:
+            _audit_error(gw, request_id, "/api/generate", source, 400)
             return JSONResponse(
                 {"error": f"provider {provider_name} not configured"},
                 status_code=400,
@@ -1292,12 +1382,16 @@ def create_app() -> FastAPI:
                 )
 
             if stream:
+                stream_kwargs = dict(path="/api/generate", t0=start, model_cfg=model_cfg)
                 if gw.scanner and gw.scanner.enabled and gw.scanner.has_buffer_rules():
                     return StreamingResponse(
-                        _scan_ollama_stream(result, gw, request_id, source, provider_name, model_name, "response"),
+                        _scan_ollama_stream(result, gw, request_id, source, provider_name, model_name, "response", **stream_kwargs),
                         media_type="application/x-ndjson",
                     )
-                return StreamingResponse(result, media_type="application/x-ndjson")
+                return StreamingResponse(
+                    _passthrough_ollama_stream(result, gw, request_id, source, provider_name, model_name, **stream_kwargs),
+                    media_type="application/x-ndjson",
+                )
 
             # Scan response
             response_text = result.get("response", "")
@@ -1336,6 +1430,7 @@ def create_app() -> FastAPI:
         try:
             body = await request.json()
         except Exception:
+            _audit_error(gw, request_id, "/api/chat", source, 400)
             return _error_response(ValueError("invalid JSON"), request_id, 400)
 
         model_name = body.get("model", "")
@@ -1343,6 +1438,7 @@ def create_app() -> FastAPI:
         stream = body.get("stream", False)
 
         if not model_name or not messages:
+            _audit_error(gw, request_id, "/api/chat", source, 400)
             return JSONResponse(
                 {"error": "model and messages are required"},
                 status_code=400,
@@ -1351,6 +1447,7 @@ def create_app() -> FastAPI:
 
         resolved = gw.resolve_provider(model_name)
         if resolved is None:
+            _audit_error(gw, request_id, "/api/chat", source, 400)
             return JSONResponse(
                 {"error": f"unknown model: {model_name}"},
                 status_code=400,
@@ -1359,6 +1456,7 @@ def create_app() -> FastAPI:
         provider_name, model_cfg = resolved
         backend = gw.backends.get(provider_name)
         if backend is None:
+            _audit_error(gw, request_id, "/api/chat", source, 400)
             return JSONResponse(
                 {"error": f"provider {provider_name} not configured"},
                 status_code=400,
@@ -1373,12 +1471,16 @@ def create_app() -> FastAPI:
             )
 
             if stream:
+                stream_kwargs = dict(path="/api/chat", t0=start, model_cfg=model_cfg)
                 if gw.scanner and gw.scanner.enabled and gw.scanner.has_buffer_rules():
                     return StreamingResponse(
-                        _scan_ollama_stream(result, gw, request_id, source, provider_name, model_name, "message.content"),
+                        _scan_ollama_stream(result, gw, request_id, source, provider_name, model_name, "message.content", **stream_kwargs),
                         media_type="application/x-ndjson",
                     )
-                return StreamingResponse(result, media_type="application/x-ndjson")
+                return StreamingResponse(
+                    _passthrough_ollama_stream(result, gw, request_id, source, provider_name, model_name, **stream_kwargs),
+                    media_type="application/x-ndjson",
+                )
 
             # Scan response
             msg = result.get("message", {})
@@ -1688,12 +1790,12 @@ def create_app() -> FastAPI:
 
     # ------------------------------------------------------------------ metrics
     @app.get("/api/metrics")
-    async def api_metrics():
+    async def api_metrics(hours: int = 24):
         gw = state()
         if gw.storage is None:
             return {"available": False, "metrics": {}}
         try:
-            return {"available": True, "metrics": _jsonable(gw.storage.get_routing_stats(24))}
+            return {"available": True, "metrics": _jsonable(gw.storage.get_routing_stats(hours))}
         except Exception:
             return {"available": False, "metrics": {}}
 
@@ -1755,6 +1857,67 @@ def create_app() -> FastAPI:
     @app.get("/api/config")
     async def api_config():
         gw = state()
+        return _sanitized_config(gw.config)
+
+    @app.patch("/api/config/server")
+    async def api_update_server_config(request: Request):
+        gw = state()
+        try:
+            body = await request.json()
+        except Exception:
+            return JSONResponse({"error": "invalid JSON"}, status_code=400)
+        allowed = {"display_timezone", "log_level"}
+        updates = {k: v for k, v in body.items() if k in allowed}
+        if not updates:
+            return JSONResponse({"error": "no valid fields"}, status_code=400)
+        for k, v in updates.items():
+            setattr(gw.config.server, k, v)
+        return _sanitized_config(gw.config)
+
+    @app.patch("/api/config/sources/{source_name}")
+    async def api_update_source_policy(source_name: str, request: Request):
+        gw = state()
+        try:
+            body = await request.json()
+        except Exception:
+            return JSONResponse({"error": "invalid JSON"}, status_code=400)
+        allowed = {
+            "minimum_tier", "requires_tools", "allowed_providers",
+            "budget_tier", "pinned_model", "compression_tier",
+            "per_turn_routing",
+        }
+        updates = {k: v for k, v in body.items() if k in allowed}
+        if not updates:
+            return JSONResponse({"error": "no valid fields"}, status_code=400)
+        if source_name not in gw.config.sources:
+            gw.config.sources[source_name] = SourcePolicy()
+        policy = gw.config.sources[source_name]
+        for k, v in updates.items():
+            setattr(policy, k, v)
+        return _sanitized_config(gw.config)
+
+    @app.put("/api/config/sources/{source_name}")
+    async def api_create_source_policy(source_name: str, request: Request):
+        gw = state()
+        try:
+            body = await request.json()
+        except Exception:
+            return JSONResponse({"error": "invalid JSON"}, status_code=400)
+        allowed = {
+            "minimum_tier", "requires_tools", "allowed_providers",
+            "budget_tier", "pinned_model", "compression_tier",
+            "per_turn_routing",
+        }
+        fields = {k: v for k, v in body.items() if k in allowed}
+        gw.config.sources[source_name] = SourcePolicy(**fields)
+        return _sanitized_config(gw.config)
+
+    @app.delete("/api/config/sources/{source_name}")
+    async def api_delete_source_policy(source_name: str):
+        gw = state()
+        if source_name not in gw.config.sources:
+            return JSONResponse({"error": "source not found"}, status_code=404)
+        del gw.config.sources[source_name]
         return _sanitized_config(gw.config)
 
     # -------------------------------------------------------- scanner management
@@ -1833,6 +1996,19 @@ def create_app() -> FastAPI:
             return JSONResponse({"error": "governor not available"}, status_code=503)
         return gw.governor.delete_class_override(job, actor="dashboard")
 
+    # ----------------------------------------------------------- rate limits
+    @app.get("/api/rate-limits")
+    async def api_rate_limits(hours: int = 48, provider: str = "anthropic"):
+        gw = state()
+        if gw.storage is None:
+            return JSONResponse({"error": "storage not available"}, status_code=503)
+        try:
+            current = gw.storage.get_rate_limit_current(provider)
+            trend = gw.storage.get_rate_limit_trend(hours, provider)
+        except Exception as exc:
+            return JSONResponse({"error": str(exc)}, status_code=500)
+        return {"current": current, "trend": trend, "provider": provider}
+
     # ----------------------------------------------------------- dashboard (SPA)
     # Mounted LAST so API routes always take priority over the static catch-all.
     dashboard_dir = (
@@ -1859,7 +2035,7 @@ _OPENAI_PASSTHROUGH = (
 )
 _ANTHROPIC_PASSTHROUGH = (
     "temperature", "top_p", "top_k", "max_tokens", "stop_sequences", "system",
-    "tools", "tool_choice", "metadata",
+    "tools", "tool_choice", "metadata", "thinking",
 )
 
 
@@ -1868,7 +2044,7 @@ def _passthrough_params(body: dict, anthropic: bool = False) -> dict:
     return {k: body[k] for k in keys if k in body and body[k] is not None}
 
 
-_BUCKET_SIZES = {"5m": 300, "15m": 900, "1h": 3600, "1d": 86400}
+_BUCKET_SIZES = {"5m": 300, "15m": 900, "1h": 3600, "6h": 21600, "1d": 86400}
 
 
 def _bucket_seconds(bucket: str) -> int:
@@ -1888,25 +2064,113 @@ def _strip_loom_tag(text: str) -> tuple[str, Optional[str]]:
     return text, None
 
 
-def derive_session_id(messages: list[dict], source: str) -> str:
-    """Stable conversation fingerprint: source + first user message prefix.
+def _extract_session_signals(
+    messages: list[dict],
+    source: str,
+    headers: dict[str, str] | None = None,
+    body: dict | None = None,
+) -> dict:
+    """Extract all available session signals from the request.
 
-    Same derivation as the legacy proxy so session identities survive the
-    cutover within a running conversation.
+    Returns a dict with keys: session_id, client_type, user_id,
+    api_key_suffix, system_hash.  The session_id is a stable hash
+    built from multiple signals so concurrent sessions are distinguished
+    even when the first user message is similar.
     """
+    headers = headers or {}
+    body = body or {}
+
+    # --- signal extraction ---
+    # 1. metadata.user_id (most reliable when present)
+    metadata = body.get("metadata") or {}
+    user_id = metadata.get("user_id", "") or ""
+
+    # 2. API key suffix (last 8 chars, safe to store)
+    raw_key = headers.get("x-api-key", "") or ""
+    api_key_suffix = raw_key[-8:] if len(raw_key) >= 8 else ""
+
+    # 3. Client type from headers
+    user_agent = headers.get("user-agent", "")
+    stainless_runtime = headers.get("x-stainless-runtime", "")
+    stainless_os = headers.get("x-stainless-os", "")
+    stainless_arch = headers.get("x-stainless-arch", "")
+    beta_flags = headers.get("anthropic-beta", "")
+
+    if "claude-code" in user_agent.lower() or "prompt-caching" in beta_flags:
+        client_type = "claude-code"
+    elif stainless_runtime:
+        client_type = f"sdk-{stainless_runtime}"
+    elif "python" in user_agent.lower():
+        client_type = "sdk-python"
+    elif "node" in user_agent.lower() or "typescript" in user_agent.lower():
+        client_type = "sdk-node"
+    else:
+        client_type = "api"
+
+    # 4. System prompt hash (varies per session in Claude Code)
+    system_raw = body.get("system", "")
+    if isinstance(system_raw, list):
+        system_text = " ".join(
+            b.get("text", "") for b in system_raw if isinstance(b, dict)
+        )
+    else:
+        system_text = str(system_raw)
+    system_hash = hashlib.sha256(system_text.encode()).hexdigest()[:12] if system_text else ""
+
+    # 5. First user message prefix (legacy signal, still useful)
     first_user = next((m for m in messages if m.get("role") == "user"), None)
     if first_user is None:
-        return "unknown"
-    content = first_user.get("content", "")
-    if isinstance(content, list):
-        for block in content:
-            if isinstance(block, dict) and block.get("type") == "text":
-                content = block.get("text", "")
-                break
+        msg_prefix = ""
+    else:
+        msg_content = first_user.get("content", "")
+        if isinstance(msg_content, list):
+            for block in msg_content:
+                if isinstance(block, dict) and block.get("type") == "text":
+                    msg_prefix = block.get("text", "")[:256]
+                    break
+            else:
+                msg_prefix = json.dumps(msg_content)[:256]
         else:
-            content = json.dumps(content)
-    seed = f"{source}:{str(content)[:256]}"
-    return "gw-" + hashlib.sha256(seed.encode()).hexdigest()[:16]
+            msg_prefix = str(msg_content)[:256]
+
+    # 6. Client fingerprint (OS + arch for machine distinction)
+    client_fp = f"{stainless_os}:{stainless_arch}" if stainless_os else ""
+
+    # --- build composite session ID ---
+    # Priority: user_id + api_key_suffix + system_hash gives the best
+    # discrimination.  Fall back to source + msg_prefix for legacy clients.
+    parts = [source]
+    if user_id:
+        parts.append(user_id)
+    if api_key_suffix:
+        parts.append(api_key_suffix)
+    if system_hash:
+        parts.append(system_hash)
+    if client_fp:
+        parts.append(client_fp)
+    if not (user_id or system_hash):
+        # Legacy fallback: include message prefix when we lack better signals
+        parts.append(msg_prefix)
+
+    seed = ":".join(parts)
+    session_id = "gw-" + hashlib.sha256(seed.encode()).hexdigest()[:16]
+
+    return {
+        "session_id": session_id if first_user is not None else "unknown",
+        "client_type": client_type,
+        "user_id": user_id,
+        "api_key_suffix": api_key_suffix,
+        "system_hash": system_hash,
+    }
+
+
+def derive_session_id(messages: list[dict], source: str) -> str:
+    """Legacy API — returns just the session_id string.
+
+    Callers that need the full signal dict should use
+    :func:`_extract_session_signals` directly.
+    """
+    return _extract_session_signals(messages, source)["session_id"]
 
 
 def _estimate_tokens_safe(text: str) -> int:
@@ -1945,6 +2209,22 @@ def _compress_messages_inline(
             compressed.append(msg)
             continue
         content = msg.get("content", "")
+
+        # Skip messages whose content is a list containing tool_use or
+        # tool_result blocks — the Anthropic API requires these as structured
+        # lists, and flattening them to a string causes upstream 400 errors.
+        if isinstance(content, list):
+            if any(
+                isinstance(block, dict)
+                and block.get("type") in ("tool_use", "tool_result")
+                for block in content
+            ):
+                tb = _estimate_tokens_safe(json.dumps(content))
+                tokens_before += tb
+                tokens_after += tb
+                compressed.append(msg)
+                continue
+
         text = content if isinstance(content, str) else json.dumps(content)
 
         _, existing_tier = _strip_loom_tag(text)
@@ -2073,6 +2353,8 @@ def _sanitized_config(config: LoomConfig) -> dict:
                 "allowed_providers": s.allowed_providers,
                 "budget_tier": s.budget_tier,
                 "pinned_model": s.pinned_model,
+                "compression_tier": s.compression_tier,
+                "per_turn_routing": s.per_turn_routing,
             }
             for name, s in config.sources.items()
         },

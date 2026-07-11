@@ -17,6 +17,16 @@ async function patchJSON(path, body) {
   return res.json();
 }
 
+async function putJSON(path, body) {
+  const res = await fetch(path, {
+    method: "PUT",
+    headers: { "Content-Type": "application/json", Accept: "application/json" },
+    body: JSON.stringify(body),
+  });
+  if (!res.ok) throw new Error(`${path} -> ${res.status}`);
+  return res.json();
+}
+
 async function deleteJSON(path) {
   const res = await fetch(path, { method: "DELETE", headers: { Accept: "application/json" } });
   if (!res.ok) throw new Error(`${path} -> ${res.status}`);
@@ -24,7 +34,7 @@ async function deleteJSON(path) {
 }
 
 export const api = {
-  metrics: () => getJSON("/api/metrics"),
+  metrics: (hours = 24) => getJSON(`/api/metrics?hours=${hours}`),
   timeseries: (hours = 24, bucket = "1h") =>
     getJSON(`/api/metrics/timeseries?hours=${hours}&bucket=${bucket}`),
   models: () => getJSON("/api/models"),
@@ -45,10 +55,17 @@ export const api = {
   deleteGovernorOverride: (job) =>
     deleteJSON(`/api/governor/class-overrides/${encodeURIComponent(job)}`),
   rateLimits: (hours = 48) => getJSON(`/api/rate-limits?hours=${hours}`),
-  costs: (days = 30) => getJSON(`/api/costs?days=${days}`),
-  sessions: (hours = 24) => getJSON(`/api/sessions?hours=${hours}`),
   routing: (hours = 24, limit = 200) =>
     getJSON(`/api/routing?hours=${hours}&limit=${limit}`),
+  sessions: (hours = 24) => getJSON(`/api/sessions?hours=${hours}`),
+  costs: (days = 30) => getJSON(`/api/costs?days=${days}`),
+  updateServerConfig: (updates) => patchJSON("/api/config/server", updates),
+  updateSourcePolicy: (name, updates) =>
+    patchJSON(`/api/config/sources/${encodeURIComponent(name)}`, updates),
+  createSourcePolicy: (name, fields) =>
+    putJSON(`/api/config/sources/${encodeURIComponent(name)}`, fields),
+  deleteSourcePolicy: (name) =>
+    deleteJSON(`/api/config/sources/${encodeURIComponent(name)}`),
 };
 
 // Display timezone — loaded from server config, cached in module state.
