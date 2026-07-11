@@ -582,6 +582,25 @@ def _source(request: Request) -> str:
     return request.headers.get("x-loom-source", "default")
 
 
+def _resolve_request_tier(gw: GatewayState, request: Request, source: str) -> str:
+    """Resolve the compression tier for this request.
+
+    Priority (matches loom.compression.tiers.resolve_tier): per-request
+    x-loom-compression header > per-source policy > config default_tier >
+    LOOM_COMPRESSION_TIER env > medium.
+    """
+    if resolve_tier is None:
+        return "medium"
+    try:
+        return resolve_tier(
+            source=source,
+            request_override=request.headers.get("x-loom-compression"),
+            config=gw.config,
+        )
+    except Exception:
+        return "medium"
+
+
 def _extract_response_text(result: dict) -> Optional[str]:
     """Extract the assistant's text content from any response format."""
     for choice in result.get("choices", []):
@@ -1105,6 +1124,7 @@ def create_app() -> FastAPI:
             # Inline compression: compress older messages before forwarding.
             comp_before = comp_after = 0
             if gw.compression is not None and len(messages) > 2:
+                tier_name = _resolve_request_tier(gw, request, source)
                 messages, comp_before, comp_after, comp_by_type = (
                     _compress_messages_inline(
                         gw.compression,
@@ -1112,6 +1132,7 @@ def create_app() -> FastAPI:
                         gw.storage,
                         compress_tool_results=gw.config.compression.tool_results,
                         variants=gw.variants,
+                        tier_name=tier_name,
                     )
                 )
                 gw.comp_tokens_before += comp_before
@@ -1264,6 +1285,7 @@ def create_app() -> FastAPI:
             # Inline compression: compress older messages before forwarding.
             comp_before = comp_after = 0
             if gw.compression is not None and len(messages) > 2:
+                tier_name = _resolve_request_tier(gw, request, source)
                 messages, comp_before, comp_after, comp_by_type = (
                     _compress_messages_inline(
                         gw.compression,
@@ -1271,6 +1293,7 @@ def create_app() -> FastAPI:
                         gw.storage,
                         compress_tool_results=gw.config.compression.tool_results,
                         variants=gw.variants,
+                        tier_name=tier_name,
                     )
                 )
                 gw.comp_tokens_before += comp_before
@@ -2232,6 +2255,21 @@ def _estimate_tokens_safe(text: str) -> int:
 _MIN_BLOCK_COMPRESS_CHARS = 200
 
 
+def _tier_age_ratio(age_ratio: float, tier_name: str) -> float:
+    """Map natural age to effective age for the active tier.
+
+    Matches internal proxy semantics (_apply_tier_compression): light and
+    medium keep the natural curve (light additionally restricts treatment
+    to filler removal), heavy shifts +0.35 so medium-age content gets heavy
+    treatment, extreme forces maximum age for everything eligible.
+    """
+    if tier_name == "heavy":
+        return min(1.0, age_ratio + 0.35)
+    if tier_name == "extreme":
+        return 1.0
+    return age_ratio
+
+
 def _compress_text_payload(
     processor: Any,
     text: str,
@@ -2240,6 +2278,7 @@ def _compress_text_payload(
     mode_b: Any = None,
     source_hint: str = "",
     variants: Any = None,
+    tier_name: str = "medium",
 ) -> tuple[str, int, int]:
     """Compress a single text payload (message string or block text).
 
@@ -2249,6 +2288,9 @@ def _compress_text_payload(
     compression with tier tagging. When a variant store is configured, the
     pre-compression original is preserved there keyed by the pointer hash.
 
+    ``tier_name`` applies the resolved compression tier: light restricts to
+    filler removal, heavy/extreme shift the effective age upward.
+
     Returns (new_text, tokens_before, tokens_after).
     """
     tb = _estimate_tokens_safe(text)
@@ -2257,6 +2299,20 @@ def _compress_text_payload(
     if existing_tier is not None:
         # Compressed on a previous turn — don't recompress (originals are
         # gone); counts as already-saved.
+        return text, tb, tb
+
+    age_ratio = _tier_age_ratio(age_ratio, tier_name)
+
+    if tier_name == "light":
+        # Light tier: filler/whitespace removal only, no graduated pass.
+        try:
+            light = processor.compress_light(text)
+        except Exception:
+            light = text
+        if light != text and len(light) < len(text):
+            h = hashlib.sha256(text.encode()).hexdigest()[:16]
+            light = f"{light}\n<!--loom:compressed:light:{h}-->"
+            return light, tb, _estimate_tokens_safe(light)
         return text, tb, tb
 
     content_hash = hashlib.sha256(text.encode()).hexdigest()[:16]
@@ -2336,6 +2392,7 @@ def _compress_tool_result_block(
     storage: Any,
     mode_b: Any,
     variants: Any = None,
+    tier_name: str = "medium",
 ) -> tuple[dict, int, int]:
     """Compress the text inside a tool_result block, preserving structure.
 
@@ -2343,17 +2400,53 @@ def _compress_tool_result_block(
     (string stays string, block list stays a block list; non-text sub-blocks
     like images pass through verbatim).
 
+    In the extreme tier, tool_result content is replaced with a fingerprint
+    summary regardless of age (internal T1 semantics) — the block envelope
+    (type/tool_use_id) is still preserved for API validity.
+
     Returns (block, tokens_before, tokens_after) — the original block object
     when nothing changed.
     """
     inner = block.get("content")
+
+    if tier_name == "extreme":
+        raw = inner if isinstance(inner, str) else json.dumps(inner)
+        tb = _block_tokens(block)
+        if len(raw) < _MIN_BLOCK_COMPRESS_CHARS:
+            return block, tb, tb
+        _, existing_tier = _strip_loom_tag(raw)
+        if existing_tier is not None:
+            return block, tb, tb
+        raw_tokens = _estimate_tokens_safe(raw)
+        h = hashlib.sha256(raw.encode()).hexdigest()[:16]
+        fingerprint = (
+            f"[tool_result fingerprint: {raw_tokens} tokens — hash={h[:8]}]"
+            f"\n<!--loom:compressed:extreme:{h}-->"
+        )
+        if variants is not None and getattr(variants, "enabled", False):
+            try:
+                variants.put_variant(
+                    content_hash=h,
+                    original_text=raw,
+                    compressed_text=fingerprint,
+                    tier="extreme",
+                    tokens_before=raw_tokens,
+                    tokens_after=_estimate_tokens_safe(fingerprint),
+                    source_hint="tool_result",
+                )
+            except Exception:
+                pass
+        out = dict(block)
+        out["content"] = fingerprint
+        return out, tb, _block_tokens(out)
 
     if isinstance(inner, str):
         tb = _block_tokens(block)
         if len(inner) < _MIN_BLOCK_COMPRESS_CHARS:
             return block, tb, tb
         new_text, _, _ = _compress_text_payload(
-            processor, inner, age_ratio, storage, mode_b, "tool_result", variants
+            processor, inner, age_ratio, storage, mode_b, "tool_result",
+            variants, tier_name,
         )
         if new_text == inner:
             return block, tb, tb
@@ -2374,7 +2467,7 @@ def _compress_tool_result_block(
             ):
                 new_text, _, _ = _compress_text_payload(
                     processor, sub["text"], age_ratio, storage, mode_b,
-                    "tool_result", variants,
+                    "tool_result", variants, tier_name,
                 )
                 if new_text != sub["text"]:
                     new_sub = dict(sub)
@@ -2402,6 +2495,7 @@ def _compress_content_blocks(
     compress_tool_results: bool,
     by_type: dict,
     variants: Any = None,
+    tier_name: str = "medium",
 ) -> tuple[list, int, int]:
     """Compress text within a content-block list, never changing its shape.
 
@@ -2426,7 +2520,8 @@ def _compress_content_blocks(
             tb = _block_tokens(block)
             if len(text) >= _MIN_BLOCK_COMPRESS_CHARS:
                 new_text, _, _ = _compress_text_payload(
-                    processor, text, age_ratio, storage, None, "text", variants
+                    processor, text, age_ratio, storage, None, "text",
+                    variants, tier_name,
                 )
                 if new_text != text:
                     out = dict(block)
@@ -2443,7 +2538,8 @@ def _compress_content_blocks(
             out_blocks.append(block)
         elif btype == "tool_result" and compress_tool_results:
             new_block, tb, ta = _compress_tool_result_block(
-                processor, block, age_ratio, storage, mode_b, variants
+                processor, block, age_ratio, storage, mode_b, variants,
+                tier_name,
             )
             tokens_before += tb
             tokens_after += ta
@@ -2515,6 +2611,7 @@ def _compress_messages_inline(
     storage: Any = None,
     compress_tool_results: bool = True,
     variants: Any = None,
+    tier_name: str = "medium",
 ) -> tuple[list[dict], int, int, dict]:
     """Compress older messages before forwarding to the provider.
 
@@ -2571,6 +2668,7 @@ def _compress_messages_inline(
                 compress_tool_results,
                 by_type,
                 variants,
+                tier_name,
             )
             tokens_before += tb
             tokens_after += ta
@@ -2584,7 +2682,8 @@ def _compress_messages_inline(
 
         text = content if isinstance(content, str) else json.dumps(content)
         new_text, tb, ta = _compress_text_payload(
-            processor, text, age_ratio, storage, None, "message", variants
+            processor, text, age_ratio, storage, None, "message", variants,
+            tier_name,
         )
         tokens_before += tb
         tokens_after += ta
