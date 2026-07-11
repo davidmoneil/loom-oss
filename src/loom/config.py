@@ -71,6 +71,14 @@ class CompressionConfig(BaseModel):
     # Compress text inside tool_result blocks (block structure is always
     # preserved; tool_use inputs are never touched).
     tool_results: bool = True
+    # Optional compressed-variant store: preserves pre-compression originals
+    # for pointer resolution and enables relevance-aware compression.
+    # "" (off) | "neo4j" (requires: pip install 'loom-gateway[neo4j]')
+    variant_store: str = ""
+    neo4j_uri: str = ""
+    neo4j_user: str = ""
+    neo4j_password: str = ""
+    neo4j_database: str = "neo4j"
 
 
 class StorageConfig(BaseModel):
@@ -163,6 +171,17 @@ class LoomConfig(BaseModel):
         pg_dsn = os.environ.get("LOOM_POSTGRES_DSN")
         if pg_dsn:
             self.storage.postgres_dsn = pg_dsn
+        neo4j_uri = os.environ.get("LOOM_NEO4J_URI")
+        if neo4j_uri:
+            self.compression.neo4j_uri = neo4j_uri
+            if not self.compression.variant_store:
+                self.compression.variant_store = "neo4j"
+        neo4j_user = os.environ.get("LOOM_NEO4J_USER")
+        if neo4j_user:
+            self.compression.neo4j_user = neo4j_user
+        neo4j_password = os.environ.get("LOOM_NEO4J_PASSWORD")
+        if neo4j_password:
+            self.compression.neo4j_password = neo4j_password
 
     # ------------------------------------------------------------------ accessors
     def get_provider(self, name: str) -> Optional[ProviderConfig]:

@@ -64,6 +64,13 @@ compression:
   default_tier: medium  # light | medium | heavy | extreme
   tool_results: true    # compress text inside tool_result blocks
                         # (structure always preserved; tool_use never touched)
+  # Optional compressed-variant store (pip install 'loom-gateway[neo4j]'):
+  # preserves pre-compression originals for pointer resolution, and content
+  # indexed in the graph by a context engine is compressed less aggressively.
+  # variant_store: neo4j
+  # neo4j_uri: bolt://localhost:7687   # or env LOOM_NEO4J_URI
+  # neo4j_user: neo4j                  # or env LOOM_NEO4J_USER
+  # neo4j_password: ""                 # or env LOOM_NEO4J_PASSWORD
 
 storage:
   backend: sqlite            # sqlite (default) | postgres
