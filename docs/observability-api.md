@@ -105,11 +105,14 @@ and reason fields. Fields not tracked by a backend are `null`.
 
 ## GET /api/sessions?hours=24
 
-Session rollup (optional capability).
+Session rollup (optional capability). `sessions`, `total_turns` and `entries`
+are all scoped to the `hours` window (default 24) so the dashboard header
+counters and the entries table always agree.
 
 ```json
 {
   "supported": true,
+  "hours": 24,
   "sessions": 12,
   "total_turns": 340,
   "entries": [
@@ -119,7 +122,8 @@ Session rollup (optional capability).
 ```
 
 Backends without session tracking return `supported: false` with zeroed
-counters and `entries: []`.
+counters and `entries: []`. The lifetime session totals remain available in the
+`sessions` block of `GET /health`.
 
 ## Implementations
 

@@ -1736,11 +1736,11 @@ def create_app() -> FastAPI:
         return summary
 
     # ---------------------------------------------------- sessions (contract)
-    def _session_stats_block(gw: GatewayState) -> dict:
+    def _session_stats_block(gw: GatewayState, hours: int | None = None) -> dict:
         if gw.storage is None:
             return {"supported": False, "sessions": 0, "total_turns": 0}
         try:
-            stats = gw.storage.get_session_stats()
+            stats = gw.storage.get_session_stats(hours=hours)
             return {"supported": True, **stats}
         except Exception:
             return {"supported": False, "sessions": 0, "total_turns": 0}
@@ -1748,7 +1748,7 @@ def create_app() -> FastAPI:
     @app.get("/api/sessions")
     async def api_sessions(hours: int = 24):
         gw = state()
-        block = _session_stats_block(gw)
+        block = _session_stats_block(gw, hours=hours)
         entries: list[dict] = []
         if block["supported"]:
             try:
@@ -1784,6 +1784,8 @@ def create_app() -> FastAPI:
                         "supports_tools": model.supports_tools,
                         "supports_json_mode": model.supports_json_mode,
                         "max_context_tokens": model.max_context_tokens,
+                        "cost_per_1k_input": model.cost_per_1k_input,
+                        "cost_per_1k_output": model.cost_per_1k_output,
                     }
                 )
         return {"object": "list", "data": models}

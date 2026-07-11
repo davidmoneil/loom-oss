@@ -553,11 +553,16 @@ class LoomStorage:
             self._schedule_flush()
         return int(row[0]) if row else 1
 
-    def get_session_stats(self) -> dict:
-        row = self.conn.execute(
+    def get_session_stats(self, hours: int | None = None) -> dict:
+        sql = (
             "SELECT COUNT(*) AS sessions,"
             " COALESCE(SUM(request_count), 0) AS total_turns FROM sessions"
-        ).fetchone()
+        )
+        params: tuple = ()
+        if hours is not None:
+            sql += " WHERE ended_at >= ?"
+            params = (time.time() - hours * 3600,)
+        row = self.conn.execute(sql, params).fetchone()
         return {"sessions": row["sessions"], "total_turns": row["total_turns"]}
 
     def list_sessions(self, hours: int = 24, limit: int = 200) -> list[dict]:
