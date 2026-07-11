@@ -62,6 +62,8 @@ routing:
 compression:
   enabled: true
   default_tier: medium  # light | medium | heavy | extreme
+  tool_results: true    # compress text inside tool_result blocks
+                        # (structure always preserved; tool_use never touched)
 
 storage:
   backend: sqlite            # sqlite (default) | postgres

@@ -70,6 +70,7 @@ def test_cost_summary_with_data(tmp_path):
         compressed=True,
         compression_ratio=0.5,
         source="pytest",
+        tokens_saved=1000,
     )
     summary = store.get_cost_summary(days=1)
     store.close()
@@ -77,7 +78,7 @@ def test_cost_summary_with_data(tmp_path):
     assert summary["totals"]["requests"] == 1
     assert summary["totals"]["tokens_in"] == 1000
     assert summary["totals"]["cost_usd"] == 0.005
-    # ratio 0.5 -> tokens_before ~2000 -> saved ~1000
+    # Measured savings recorded at compression time, not derived from ratio.
     assert summary["totals"]["tokens_saved"] == 1000
     assert summary["by_model"][0]["model"] == "haiku"
     assert summary["by_source"][0]["source"] == "pytest"

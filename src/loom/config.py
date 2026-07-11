@@ -68,6 +68,9 @@ class RoutingConfig(BaseModel):
 class CompressionConfig(BaseModel):
     enabled: bool = True
     default_tier: str = "medium"
+    # Compress text inside tool_result blocks (block structure is always
+    # preserved; tool_use inputs are never touched).
+    tool_results: bool = True
 
 
 class StorageConfig(BaseModel):

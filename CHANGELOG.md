@@ -1,5 +1,15 @@
 # Changelog
 
+## Unreleased
+
+### Features
+- **Tool-block compression**: text inside `tool_result` blocks is now compressed in place — block structure (`tool_use_id`, `is_error`, list shape, non-text sub-blocks) is always preserved, and `tool_use` inputs are never touched. Previously any message containing tool blocks was skipped entirely, which left agentic sessions (Claude Code, SDK agents) at ~2% compression; tool results are typically 80–90% of their token volume. Opt out with `compression.tool_results: false`.
+- **ModeB segment pre-pass**: large tool outputs get summary+pointer compression for recognized segments (logs, error stacks, JSON arrays, repeated patterns) before graduated compression.
+- **Per-block-type savings**: `/health` `compression.by_block_type` breaks tokens before/after/saved down by `tool_result` / `text` / `tool_use` / `message`.
+
+### Fixes
+- **`tokens_saved` was wildly overestimated**: `/api/costs` derived savings as `tokens_in * (1/ratio - 1)`, but `tokens_in` is the provider-reported *post-compression* count. Savings are now measured at compression time and stored per request (schema v7, `metrics.tokens_saved`).
+
 ## v0.1.0 — 2026-07-10
 
 First public release.

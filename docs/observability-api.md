@@ -30,7 +30,12 @@ Liveness plus rollup counters.
     "tokens_before": 0,
     "tokens_after": 0,
     "tokens_saved": 0,
-    "compression_ratio": 0.0
+    "compression_ratio": 0.0,
+    "by_block_type": {
+      "tool_result": { "tokens_before": 0, "tokens_after": 0, "tokens_saved": 0 },
+      "text": { "tokens_before": 0, "tokens_after": 0, "tokens_saved": 0 },
+      "message": { "tokens_before": 0, "tokens_after": 0, "tokens_saved": 0 }
+    }
   },
   "sessions": { "supported": false, "sessions": 0, "total_turns": 0 }
 }
