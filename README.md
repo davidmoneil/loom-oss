@@ -76,7 +76,10 @@ Loom is organized into a few focused layers:
 - **Routing** (`loom.routing`) — the EQRT algorithm selects a model per request based on
   source policy, required capabilities, determinism targets, and empirical performance.
 - **Compression** (`loom.compression`) — reduces prompt/context tokens before forwarding,
-  with a cache keyed by content hash and age ratio.
+  with a cache keyed by content hash and age ratio. Fully local/extractive by default
+  (four tiers, content-aware compressors, tool-result compression), with optional
+  LLM-assisted prose summarization and a Neo4j variant store for relevance-aware
+  compression. See [docs/compression.md](docs/compression.md) for the full picture.
 - **Detection** (`loom.detection`) — classifies incoming requests (task type, capability
   needs) to inform routing.
 - **Observability** (`loom.observability`) — fire-and-forget JSONL audit and metrics logs,
