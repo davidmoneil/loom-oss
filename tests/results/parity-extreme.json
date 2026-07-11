@@ -1,0 +1,311 @@
+{
+  "tier": "extreme",
+  "rows": [
+    {
+      "payload": "conversation-0",
+      "internal": {
+        "payload": "conversation-0",
+        "status": 401,
+        "tokens_before": 10983,
+        "tokens_after": 3121,
+        "tokens_saved": 7862,
+        "ratio": 0.7158
+      },
+      "oss": {
+        "payload": "conversation-0",
+        "status": 401,
+        "tokens_before": 10983,
+        "tokens_after": 4950,
+        "tokens_saved": 6033,
+        "ratio": 0.5493
+      },
+      "delta": -0.2326
+    },
+    {
+      "payload": "conversation-1",
+      "internal": {
+        "payload": "conversation-1",
+        "status": 401,
+        "tokens_before": 12969,
+        "tokens_after": 4091,
+        "tokens_saved": 8878,
+        "ratio": 0.6846
+      },
+      "oss": {
+        "payload": "conversation-1",
+        "status": 401,
+        "tokens_before": 12969,
+        "tokens_after": 5481,
+        "tokens_saved": 7488,
+        "ratio": 0.5774
+      },
+      "delta": -0.1566
+    },
+    {
+      "payload": "conversation-2",
+      "internal": {
+        "payload": "conversation-2",
+        "status": 401,
+        "tokens_before": 14991,
+        "tokens_after": 4315,
+        "tokens_saved": 10676,
+        "ratio": 0.7122
+      },
+      "oss": {
+        "payload": "conversation-2",
+        "status": 401,
+        "tokens_before": 14991,
+        "tokens_after": 6166,
+        "tokens_saved": 8825,
+        "ratio": 0.5887
+      },
+      "delta": -0.1734
+    },
+    {
+      "payload": "conversation-3",
+      "internal": {
+        "payload": "conversation-3",
+        "status": 401,
+        "tokens_before": 16980,
+        "tokens_after": 5310,
+        "tokens_saved": 11670,
+        "ratio": 0.6873
+      },
+      "oss": {
+        "payload": "conversation-3",
+        "status": 401,
+        "tokens_before": 16980,
+        "tokens_after": 7153,
+        "tokens_saved": 9827,
+        "ratio": 0.5787
+      },
+      "delta": -0.1579
+    },
+    {
+      "payload": "conversation-4",
+      "internal": {
+        "payload": "conversation-4",
+        "status": 401,
+        "tokens_before": 19001,
+        "tokens_after": 5543,
+        "tokens_saved": 13458,
+        "ratio": 0.7083
+      },
+      "oss": {
+        "payload": "conversation-4",
+        "status": 401,
+        "tokens_before": 19001,
+        "tokens_after": 7771,
+        "tokens_saved": 11230,
+        "ratio": 0.591
+      },
+      "delta": -0.1656
+    },
+    {
+      "payload": "tool-heavy-0",
+      "internal": {
+        "payload": "tool-heavy-0",
+        "status": 401,
+        "tokens_before": 8997,
+        "tokens_after": 285,
+        "tokens_saved": 8712,
+        "ratio": 0.9683
+      },
+      "oss": {
+        "payload": "tool-heavy-0",
+        "status": 401,
+        "tokens_before": 9378,
+        "tokens_after": 839,
+        "tokens_saved": 8539,
+        "ratio": 0.9105
+      },
+      "delta": -0.0199
+    },
+    {
+      "payload": "tool-heavy-1",
+      "internal": {
+        "payload": "tool-heavy-1",
+        "status": 401,
+        "tokens_before": 12478,
+        "tokens_after": 277,
+        "tokens_saved": 12201,
+        "ratio": 0.9778
+      },
+      "oss": {
+        "payload": "tool-heavy-1",
+        "status": 401,
+        "tokens_before": 12999,
+        "tokens_after": 1002,
+        "tokens_saved": 11997,
+        "ratio": 0.9229
+      },
+      "delta": -0.0167
+    },
+    {
+      "payload": "tool-heavy-2",
+      "internal": {
+        "payload": "tool-heavy-2",
+        "status": 401,
+        "tokens_before": 15998,
+        "tokens_after": 567,
+        "tokens_saved": 15431,
+        "ratio": 0.9646
+      },
+      "oss": {
+        "payload": "tool-heavy-2",
+        "status": 401,
+        "tokens_before": 16661,
+        "tokens_after": 1359,
+        "tokens_saved": 15302,
+        "ratio": 0.9184
+      },
+      "delta": -0.0084
+    },
+    {
+      "payload": "tool-heavy-3",
+      "internal": {
+        "payload": "tool-heavy-3",
+        "status": 401,
+        "tokens_before": 19496,
+        "tokens_after": 529,
+        "tokens_saved": 18967,
+        "ratio": 0.9729
+      },
+      "oss": {
+        "payload": "tool-heavy-3",
+        "status": 401,
+        "tokens_before": 20297,
+        "tokens_after": 1553,
+        "tokens_saved": 18744,
+        "ratio": 0.9235
+      },
+      "delta": -0.0118
+    },
+    {
+      "payload": "tool-heavy-4",
+      "internal": {
+        "payload": "tool-heavy-4",
+        "status": 401,
+        "tokens_before": 23023,
+        "tokens_after": 659,
+        "tokens_saved": 22364,
+        "ratio": 0.9714
+      },
+      "oss": {
+        "payload": "tool-heavy-4",
+        "status": 401,
+        "tokens_before": 23966,
+        "tokens_after": 1841,
+        "tokens_saved": 22125,
+        "ratio": 0.9232
+      },
+      "delta": -0.0107
+    },
+    {
+      "payload": "mixed-0",
+      "internal": {
+        "payload": "mixed-0",
+        "status": 401,
+        "tokens_before": 9380,
+        "tokens_after": 989,
+        "tokens_saved": 8391,
+        "ratio": 0.8946
+      },
+      "oss": {
+        "payload": "mixed-0",
+        "status": 401,
+        "tokens_before": 9610,
+        "tokens_after": 2654,
+        "tokens_saved": 6956,
+        "ratio": 0.7238
+      },
+      "delta": -0.171
+    },
+    {
+      "payload": "mixed-1",
+      "internal": {
+        "payload": "mixed-1",
+        "status": 401,
+        "tokens_before": 11067,
+        "tokens_after": 1270,
+        "tokens_saved": 9797,
+        "ratio": 0.8852
+      },
+      "oss": {
+        "payload": "mixed-1",
+        "status": 401,
+        "tokens_before": 11354,
+        "tokens_after": 3259,
+        "tokens_saved": 8095,
+        "ratio": 0.713
+      },
+      "delta": -0.1737
+    },
+    {
+      "payload": "mixed-2",
+      "internal": {
+        "payload": "mixed-2",
+        "status": 401,
+        "tokens_before": 12776,
+        "tokens_after": 1533,
+        "tokens_saved": 11243,
+        "ratio": 0.88
+      },
+      "oss": {
+        "payload": "mixed-2",
+        "status": 401,
+        "tokens_before": 13119,
+        "tokens_after": 3705,
+        "tokens_saved": 9414,
+        "ratio": 0.7176
+      },
+      "delta": -0.1627
+    },
+    {
+      "payload": "mixed-3",
+      "internal": {
+        "payload": "mixed-3",
+        "status": 401,
+        "tokens_before": 14459,
+        "tokens_after": 1639,
+        "tokens_saved": 12820,
+        "ratio": 0.8866
+      },
+      "oss": {
+        "payload": "mixed-3",
+        "status": 401,
+        "tokens_before": 14863,
+        "tokens_after": 4192,
+        "tokens_saved": 10671,
+        "ratio": 0.718
+      },
+      "delta": -0.1676
+    },
+    {
+      "payload": "mixed-4",
+      "internal": {
+        "payload": "mixed-4",
+        "status": 401,
+        "tokens_before": 16136,
+        "tokens_after": 2057,
+        "tokens_saved": 14079,
+        "ratio": 0.8725
+      },
+      "oss": {
+        "payload": "mixed-4",
+        "status": 401,
+        "tokens_before": 16594,
+        "tokens_after": 4578,
+        "tokens_saved": 12016,
+        "ratio": 0.7241
+      },
+      "delta": -0.1465
+    }
+  ],
+  "aggregate": {
+    "internal_tokens_saved": 186549,
+    "oss_tokens_saved": 167262,
+    "delta": -0.1034,
+    "verdict": "FAIL"
+  }
+}
