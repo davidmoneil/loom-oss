@@ -54,6 +54,9 @@ export const api = {
   updateGovernor: (updates) => patchJSON("/api/governor", updates),
   deleteGovernorOverride: (job) =>
     deleteJSON(`/api/governor/class-overrides/${encodeURIComponent(job)}`),
+  rateLimits: (hours = 48) => getJSON(`/api/rate-limits?hours=${hours}`),
+  routing: (hours = 24, limit = 200) =>
+    getJSON(`/api/routing?hours=${hours}&limit=${limit}`),
   sessions: (hours = 24) => getJSON(`/api/sessions?hours=${hours}`),
   costs: (days = 30) => getJSON(`/api/costs?days=${days}`),
   updateServerConfig: (updates) => patchJSON("/api/config/server", updates),

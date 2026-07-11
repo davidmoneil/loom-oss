@@ -574,6 +574,61 @@ class LoomStorage:
         ).fetchall()
         return [dict(r) for r in rows]
 
+    def get_routing_decisions(self, hours: int = 24, limit: int = 200) -> dict:
+        since = time.time() - hours * 3600
+        rows = self.conn.execute(
+            """
+            SELECT timestamp, request_id, source, task_type,
+                   model_recommended, model_used, routing_reason,
+                   determinism_score, alternatives_json
+            FROM routing_decisions
+            WHERE timestamp >= ?
+            ORDER BY timestamp DESC LIMIT ?
+            """,
+            (since, limit),
+        ).fetchall()
+        entries = []
+        for r in rows:
+            entry = dict(r)
+            if entry.get("alternatives_json"):
+                try:
+                    entry["alternatives"] = json.loads(entry["alternatives_json"])
+                except Exception:
+                    entry["alternatives"] = []
+            else:
+                entry["alternatives"] = []
+            entry.pop("alternatives_json", None)
+            entries.append(entry)
+
+        reason_rows = self.conn.execute(
+            """
+            SELECT routing_reason, COUNT(*) AS n
+            FROM routing_decisions
+            WHERE timestamp >= ?
+            GROUP BY routing_reason
+            ORDER BY n DESC
+            """,
+            (since,),
+        ).fetchall()
+        by_reason = {r["routing_reason"]: r["n"] for r in reason_rows}
+
+        override_rows = self.conn.execute(
+            """
+            SELECT COUNT(*) AS n
+            FROM routing_decisions
+            WHERE timestamp >= ? AND model_recommended != model_used
+            """,
+            (since,),
+        ).fetchone()
+
+        return {
+            "hours": hours,
+            "total": len(entries),
+            "entries": entries,
+            "by_reason": by_reason,
+            "overrides": override_rows["n"] if override_rows else 0,
+        }
+
     _TOKENS_SAVED_SQL = (
         "COALESCE(SUM(CASE WHEN compressed = 1 AND compression_ratio > 0 "
         "AND compression_ratio < 1 "
