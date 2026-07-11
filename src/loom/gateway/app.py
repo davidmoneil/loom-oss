@@ -20,6 +20,7 @@ affected feature degrades gracefully rather than crashing the process.
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import json
 import pathlib
@@ -1125,8 +1126,12 @@ def create_app() -> FastAPI:
             comp_before = comp_after = 0
             if gw.compression is not None and len(messages) > 2:
                 tier_name = _resolve_request_tier(gw, request, source)
+                # Off the event loop: compression is CPU-bound and, with
+                # llm_prose enabled, makes blocking HTTP calls to the local
+                # model — inline it would freeze every request incl. /health.
                 messages, comp_before, comp_after, comp_by_type = (
-                    _compress_messages_inline(
+                    await asyncio.to_thread(
+                        _compress_messages_inline,
                         gw.compression,
                         messages,
                         gw.storage,
@@ -1286,8 +1291,12 @@ def create_app() -> FastAPI:
             comp_before = comp_after = 0
             if gw.compression is not None and len(messages) > 2:
                 tier_name = _resolve_request_tier(gw, request, source)
+                # Off the event loop: compression is CPU-bound and, with
+                # llm_prose enabled, makes blocking HTTP calls to the local
+                # model — inline it would freeze every request incl. /health.
                 messages, comp_before, comp_after, comp_by_type = (
-                    _compress_messages_inline(
+                    await asyncio.to_thread(
+                        _compress_messages_inline,
                         gw.compression,
                         messages,
                         gw.storage,
