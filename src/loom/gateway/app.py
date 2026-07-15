@@ -989,8 +989,26 @@ class _RateLimiter:
             return True
 
 
+_OPENAPI_TAGS = [
+    {"name": "Chat & Completions", "description": "OpenAI, Anthropic, and Ollama-compatible inference endpoints. All routes here proxy to a configured provider backend with routing, compression, and scanning applied."},
+    {"name": "Compression & Detection", "description": "Standalone access to the message-compression and prompt-detection engines used inline by the chat endpoints."},
+    {"name": "Health", "description": "Liveness and summary status."},
+    {"name": "Observability", "description": "Read-only usage, cost, routing, and audit data collected from request history."},
+    {"name": "Config", "description": "Read and mutate server and per-source routing policy at runtime."},
+    {"name": "Scanner", "description": "Manage the response content scanner's rules and view its detection stats."},
+    {"name": "Governor", "description": "Throttle governor status and tier/class-override settings."},
+]
+
+
 def create_app() -> FastAPI:
-    app = FastAPI(title="Loom Gateway", version=__version__, lifespan=lifespan)
+    app = FastAPI(
+        title="Loom Gateway",
+        version=__version__,
+        description="Multi-provider LLM gateway: OpenAI/Anthropic/Ollama-compatible routing, "
+        "inline compression, prompt detection, response scanning, and cost/usage observability.",
+        openapi_tags=_OPENAPI_TAGS,
+        lifespan=lifespan,
+    )
     app.state.gateway = GatewayState()
 
     app.add_middleware(
@@ -1028,7 +1046,7 @@ def create_app() -> FastAPI:
         return app.state.gateway
 
     # ----------------------------------------------------------- chat (OpenAI)
-    @app.post("/v1/chat/completions")
+    @app.post("/v1/chat/completions", tags=["Chat & Completions"], summary="OpenAI-compatible chat completions")
     async def chat_completions(request: Request):
         gw = state()
         request_id = str(uuid.uuid4())
@@ -1150,7 +1168,7 @@ def create_app() -> FastAPI:
             return _error_response(exc, request_id)
 
     # ------------------------------------------- count_tokens (Anthropic passthrough)
-    @app.post("/v1/messages/count_tokens")
+    @app.post("/v1/messages/count_tokens", tags=["Chat & Completions"], summary="Anthropic-compatible token counting")
     async def count_tokens_endpoint(request: Request):
         gw = state()
         request_id = str(uuid.uuid4())
@@ -1179,7 +1197,7 @@ def create_app() -> FastAPI:
             return _error_response(exc, request_id)
 
     # -------------------------------------------------------- messages (Anthropic)
-    @app.post("/v1/messages")
+    @app.post("/v1/messages", tags=["Chat & Completions"], summary="Anthropic-compatible messages endpoint")
     async def messages_endpoint(request: Request):
         gw = state()
         request_id = str(uuid.uuid4())
@@ -1300,7 +1318,7 @@ def create_app() -> FastAPI:
             return _error_response(exc, request_id)
 
     # ----------------------------------------------------------------- ollama-compat
-    @app.post("/api/generate")
+    @app.post("/api/generate", tags=["Chat & Completions"], summary="Ollama-compatible text generation")
     async def ollama_generate(request: Request):
         gw = state()
         request_id = str(uuid.uuid4())
@@ -1421,7 +1439,7 @@ def create_app() -> FastAPI:
             _audit_error(gw, request_id, "/api/generate", source, 500)
             return _error_response(exc, request_id)
 
-    @app.post("/api/chat")
+    @app.post("/api/chat", tags=["Chat & Completions"], summary="Ollama-compatible chat")
     async def ollama_chat(request: Request):
         gw = state()
         request_id = str(uuid.uuid4())
@@ -1511,7 +1529,7 @@ def create_app() -> FastAPI:
             _audit_error(gw, request_id, "/api/chat", source, 500)
             return _error_response(exc, request_id)
 
-    @app.get("/api/tags")
+    @app.get("/api/tags", tags=["Chat & Completions"], summary="Ollama-compatible model list")
     async def ollama_tags(request: Request):
         gw = state()
         models = []
@@ -1540,7 +1558,7 @@ def create_app() -> FastAPI:
                 pass
         return JSONResponse({"models": models})
 
-    @app.post("/api/show")
+    @app.post("/api/show", tags=["Chat & Completions"], summary="Ollama-compatible model details")
     async def ollama_show(request: Request):
         try:
             body = await request.json()
@@ -1574,7 +1592,7 @@ def create_app() -> FastAPI:
         return JSONResponse({"error": f"model not found: {name}"}, status_code=404)
 
     # ----------------------------------------------------------------- compress
-    @app.post("/v1/compress")
+    @app.post("/v1/compress", tags=["Compression & Detection"], summary="Compress a message list")
     async def compress(request: Request):
         gw = state()
         request_id = str(uuid.uuid4())
@@ -1633,7 +1651,7 @@ def create_app() -> FastAPI:
         )
 
     # ------------------------------------------------------------------- detect
-    @app.post("/v1/detect")
+    @app.post("/v1/detect", tags=["Compression & Detection"], summary="Run prompt-shape detection")
     async def detect(request: Request):
         gw = state()
         request_id = str(uuid.uuid4())
@@ -1661,7 +1679,7 @@ def create_app() -> FastAPI:
         return JSONResponse({"request_id": request_id, **_jsonable(result)})
 
     # ------------------------------------------------------------------- health
-    @app.get("/health")
+    @app.get("/health", tags=["Health"], summary="Gateway health and status")
     async def health():
         gw = state()
         return {
@@ -1697,7 +1715,7 @@ def create_app() -> FastAPI:
         entry = gw.model_index.get(model)
         return entry[1].cost_per_1k_input if entry else 0.0
 
-    @app.get("/api/costs")
+    @app.get("/api/costs", tags=["Observability"], summary="Cost summary by model/source/day")
     async def api_costs(days: int = 30):
         gw = state()
         empty = {
@@ -1745,7 +1763,7 @@ def create_app() -> FastAPI:
         except Exception:
             return {"supported": False, "sessions": 0, "total_turns": 0}
 
-    @app.get("/api/sessions")
+    @app.get("/api/sessions", tags=["Observability"], summary="Session activity stats")
     async def api_sessions(hours: int = 24):
         gw = state()
         block = _session_stats_block(gw, hours=hours)
@@ -1758,7 +1776,7 @@ def create_app() -> FastAPI:
         return {**block, "hours": hours, "entries": entries}
 
     # -------------------------------------------------------------- routing log
-    @app.get("/api/routing")
+    @app.get("/api/routing", tags=["Observability"], summary="Routing decision log")
     async def api_routing(hours: int = 24, limit: int = 200):
         gw = state()
         if gw.storage is None:
@@ -1769,7 +1787,7 @@ def create_app() -> FastAPI:
             return {"available": False, "hours": hours, "total": 0, "entries": [], "by_reason": {}, "overrides": 0}
 
     # ------------------------------------------------------------------- models
-    @app.get("/api/models")
+    @app.get("/api/models", tags=["Observability"], summary="List configured models")
     async def api_models():
         gw = state()
         models = []
@@ -1791,7 +1809,7 @@ def create_app() -> FastAPI:
         return {"object": "list", "data": models}
 
     # ------------------------------------------------------------------ metrics
-    @app.get("/api/metrics")
+    @app.get("/api/metrics", tags=["Observability"], summary="Routing metrics summary")
     async def api_metrics(hours: int = 24):
         gw = state()
         if gw.storage is None:
@@ -1802,7 +1820,7 @@ def create_app() -> FastAPI:
             return {"available": False, "metrics": {}}
 
     # -------------------------------------------------------- metrics timeseries
-    @app.get("/api/metrics/timeseries")
+    @app.get("/api/metrics/timeseries", tags=["Observability"], summary="Routing metrics timeseries")
     async def api_metrics_timeseries(hours: int = 24, bucket: str = "1h"):
         gw = state()
         empty = {
@@ -1823,7 +1841,7 @@ def create_app() -> FastAPI:
             return empty
 
     # ------------------------------------------------------------------- audit
-    @app.get("/api/audit")
+    @app.get("/api/audit", tags=["Observability"], summary="Paginated audit log")
     async def api_audit(
         limit: int = 50,
         offset: int = 0,
@@ -1856,12 +1874,12 @@ def create_app() -> FastAPI:
             return {"total": 0, "offset": offset, "limit": limit, "entries": []}
 
     # ------------------------------------------------------------------- config
-    @app.get("/api/config")
+    @app.get("/api/config", tags=["Config"], summary="Get sanitized server config")
     async def api_config():
         gw = state()
         return _sanitized_config(gw.config)
 
-    @app.patch("/api/config/server")
+    @app.patch("/api/config/server", tags=["Config"], summary="Update server config fields")
     async def api_update_server_config(request: Request):
         gw = state()
         try:
@@ -1876,7 +1894,7 @@ def create_app() -> FastAPI:
             setattr(gw.config.server, k, v)
         return _sanitized_config(gw.config)
 
-    @app.patch("/api/config/sources/{source_name}")
+    @app.patch("/api/config/sources/{source_name}", tags=["Config"], summary="Patch a source routing policy")
     async def api_update_source_policy(source_name: str, request: Request):
         gw = state()
         try:
@@ -1898,7 +1916,7 @@ def create_app() -> FastAPI:
             setattr(policy, k, v)
         return _sanitized_config(gw.config)
 
-    @app.put("/api/config/sources/{source_name}")
+    @app.put("/api/config/sources/{source_name}", tags=["Config"], summary="Create or replace a source routing policy")
     async def api_create_source_policy(source_name: str, request: Request):
         gw = state()
         try:
@@ -1914,7 +1932,7 @@ def create_app() -> FastAPI:
         gw.config.sources[source_name] = SourcePolicy(**fields)
         return _sanitized_config(gw.config)
 
-    @app.delete("/api/config/sources/{source_name}")
+    @app.delete("/api/config/sources/{source_name}", tags=["Config"], summary="Delete a source routing policy")
     async def api_delete_source_policy(source_name: str):
         gw = state()
         if source_name not in gw.config.sources:
@@ -1923,7 +1941,7 @@ def create_app() -> FastAPI:
         return _sanitized_config(gw.config)
 
     # -------------------------------------------------------- scanner management
-    @app.get("/api/scanner/rules")
+    @app.get("/api/scanner/rules", tags=["Scanner"], summary="List scanner rules")
     async def api_scanner_rules():
         gw = state()
         if gw.scanner is None:
@@ -1934,7 +1952,7 @@ def create_app() -> FastAPI:
             "skip_config": gw.scanner.skip_config(),
         }
 
-    @app.put("/api/scanner/rules/{name}")
+    @app.put("/api/scanner/rules/{name}", tags=["Scanner"], summary="Update a scanner rule")
     async def api_scanner_update_rule(name: str, request: Request):
         gw = state()
         if gw.scanner is None:
@@ -1951,7 +1969,7 @@ def create_app() -> FastAPI:
             return {"status": "updated", "rule": name, "updates": updates}
         return JSONResponse({"error": f"rule '{name}' not found"}, status_code=404)
 
-    @app.get("/api/scanner/stats")
+    @app.get("/api/scanner/stats", tags=["Scanner"], summary="Scanner detection stats")
     async def api_scanner_stats():
         gw = state()
         if gw.scanner is None:
@@ -1959,21 +1977,21 @@ def create_app() -> FastAPI:
         return {"enabled": gw.scanner.enabled, **gw.scanner.stats()}
 
     # ----------------------------------------------------------- governor
-    @app.get("/api/governor/status")
+    @app.get("/api/governor/status", tags=["Governor"], summary="Governor live status")
     async def api_governor_status():
         gw = state()
         if gw.governor is None:
             return JSONResponse({"error": "governor not available"}, status_code=503)
         return gw.governor.status()
 
-    @app.get("/api/governor")
+    @app.get("/api/governor", tags=["Governor"], summary="Get governor settings")
     async def api_governor_get():
         gw = state()
         if gw.governor is None:
             return JSONResponse({"error": "governor not available"}, status_code=503)
         return gw.governor.get_settings()
 
-    @app.patch("/api/governor")
+    @app.patch("/api/governor", tags=["Governor"], summary="Update governor settings")
     async def api_governor_update(request: Request):
         gw = state()
         if gw.governor is None:
@@ -1991,7 +2009,7 @@ def create_app() -> FastAPI:
         except GovernorValidationError as e:
             return JSONResponse({"error": str(e)}, status_code=400)
 
-    @app.delete("/api/governor/class-overrides/{job}")
+    @app.delete("/api/governor/class-overrides/{job}", tags=["Governor"], summary="Delete a governor class override")
     async def api_governor_delete_override(job: str):
         gw = state()
         if gw.governor is None:
@@ -1999,7 +2017,7 @@ def create_app() -> FastAPI:
         return gw.governor.delete_class_override(job, actor="dashboard")
 
     # ----------------------------------------------------------- rate limits
-    @app.get("/api/rate-limits")
+    @app.get("/api/rate-limits", tags=["Observability"], summary="Provider rate-limit current value and trend")
     async def api_rate_limits(hours: int = 48, provider: str = "anthropic"):
         gw = state()
         if gw.storage is None:
