@@ -316,6 +316,20 @@ function SkeletonRows() {
   ));
 }
 
+function renderMessageContent(value) {
+  if (typeof value === "string") return value;
+  if (Array.isArray(value)) {
+    return value
+      .map((block) =>
+        block && typeof block === "object" && typeof block.text === "string"
+          ? block.text
+          : JSON.stringify(block, null, 2)
+      )
+      .join("\n");
+  }
+  return JSON.stringify(value, null, 2);
+}
+
 function ExpandedContent({ content, isLoading, error }) {
   if (isLoading) {
     return (
@@ -359,7 +373,7 @@ function ExpandedContent({ content, isLoading, error }) {
                   {msg.role}
                 </div>
                 <pre className="whitespace-pre-wrap break-words text-xs text-gray-200 font-mono overflow-x-auto">
-                  {msg.content}
+                  {renderMessageContent(msg.content)}
                 </pre>
               </div>
             ))}
@@ -376,9 +390,7 @@ function ExpandedContent({ content, isLoading, error }) {
           </div>
           <div className="rounded bg-gray-800/40 p-2 border border-border/30">
             <pre className="whitespace-pre-wrap break-words text-xs text-gray-200 font-mono overflow-x-auto">
-              {typeof content.response === "string"
-                ? content.response
-                : JSON.stringify(content.response, null, 2)}
+              {renderMessageContent(content.response)}
             </pre>
           </div>
         </div>
