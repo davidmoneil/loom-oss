@@ -27,6 +27,12 @@ export default function Audit() {
     status: "",
   });
 
+  // Expand state
+  const [expandedRows, setExpandedRows] = useState(new Set());
+  const [contentCache, setContentCache] = useState({});
+  const [contentLoading, setContentLoading] = useState({});
+  const [contentError, setContentError] = useState({});
+
   useEffect(() => {
     api
       .models()
@@ -73,6 +79,37 @@ export default function Audit() {
   }, [filters]);
 
   const setFilter = (k, v) => setFilters((f) => ({ ...f, [k]: v }));
+
+  const toggleExpanded = useCallback(
+    async (requestId) => {
+      setExpandedRows((prev) => {
+        const next = new Set(prev);
+        if (next.has(requestId)) {
+          next.delete(requestId);
+        } else {
+          next.add(requestId);
+          if (!contentCache[requestId]) {
+            setContentLoading((prev) => ({ ...prev, [requestId]: true }));
+            api
+              .auditContent(requestId)
+              .then((data) => {
+                setContentCache((prev) => ({ ...prev, [requestId]: data }));
+                setContentError((prev) => ({ ...prev, [requestId]: null }));
+              })
+              .catch((e) => {
+                setContentError((prev) => ({ ...prev, [requestId]: e.message }));
+              })
+              .finally(() => {
+                setContentLoading((prev) => ({ ...prev, [requestId]: false }));
+              });
+          }
+        }
+        return next;
+      });
+    },
+    [contentCache]
+  );
+
   const page = Math.floor(offset / PAGE_SIZE) + 1;
   const pages = Math.max(1, Math.ceil(total / PAGE_SIZE));
 
@@ -133,10 +170,24 @@ export default function Audit() {
                 </td>
               </tr>
             ) : (
-              entries.map((e) => (
+              entries.flatMap((e) => [
                 <tr key={e.request_id} className="bg-base hover:bg-gray-800/40">
                   <Td className="whitespace-nowrap text-gray-400">
-                    {fmtTime(e.timestamp)}
+                    <button
+                      onClick={() => toggleExpanded(e.request_id)}
+                      className="inline-flex items-center gap-2 hover:opacity-70"
+                    >
+                      <svg
+                        className={`h-4 w-4 transition-transform ${expandedRows.has(e.request_id) ? "rotate-180" : ""}`}
+                        fill="none"
+                        viewBox="0 0 24 24"
+                        stroke="currentColor"
+                        strokeWidth="2"
+                      >
+                        <path d="M19 9l-7 7-7-7" />
+                      </svg>
+                      {fmtTime(e.timestamp)}
+                    </button>
                   </Td>
                   <Td>{e.source}</Td>
                   <Td className="text-gray-400">{e.requested_model}</Td>
@@ -155,8 +206,19 @@ export default function Audit() {
                   <Td>
                     <StatusBadge status={e.status} />
                   </Td>
-                </tr>
-              ))
+                </tr>,
+                expandedRows.has(e.request_id) && (
+                  <tr key={`${e.request_id}-content`} className="bg-gray-900/20">
+                    <td colSpan={10} className="px-3 py-3">
+                      <ExpandedContent
+                        content={contentCache[e.request_id]}
+                        isLoading={contentLoading[e.request_id]}
+                        error={contentError[e.request_id]}
+                      />
+                    </td>
+                  </tr>
+                ),
+              ])
             )}
           </tbody>
         </table>
@@ -252,4 +314,75 @@ function SkeletonRows() {
       ))}
     </tr>
   ));
+}
+
+function ExpandedContent({ content, isLoading, error }) {
+  if (isLoading) {
+    return (
+      <div className="flex items-center gap-2 text-sm text-gray-400">
+        <div className="skeleton h-4 w-24" />
+        Loading content...
+      </div>
+    );
+  }
+
+  if (error) {
+    return (
+      <div className="text-sm text-red-400">
+        Error: {error}
+      </div>
+    );
+  }
+
+  if (!content) {
+    return (
+      <div className="text-sm text-gray-400">
+        No content logged for this request.
+      </div>
+    );
+  }
+
+  return (
+    <div className="space-y-4">
+      {content.messages && content.messages.length > 0 ? (
+        <div>
+          <div className="mb-2 text-xs font-medium uppercase tracking-wide text-gray-400">
+            Messages
+          </div>
+          <div className="space-y-2">
+            {content.messages.map((msg, idx) => (
+              <div
+                key={idx}
+                className="rounded bg-gray-800/40 p-2 border border-border/30"
+              >
+                <div className="mb-1 text-xs font-medium text-gray-300">
+                  {msg.role}
+                </div>
+                <pre className="whitespace-pre-wrap break-words text-xs text-gray-200 font-mono overflow-x-auto">
+                  {msg.content}
+                </pre>
+              </div>
+            ))}
+          </div>
+        </div>
+      ) : (
+        <div className="text-sm text-gray-400">(no messages logged)</div>
+      )}
+
+      {content.response && (
+        <div>
+          <div className="mb-2 text-xs font-medium uppercase tracking-wide text-gray-400">
+            Response
+          </div>
+          <div className="rounded bg-gray-800/40 p-2 border border-border/30">
+            <pre className="whitespace-pre-wrap break-words text-xs text-gray-200 font-mono overflow-x-auto">
+              {typeof content.response === "string"
+                ? content.response
+                : JSON.stringify(content.response, null, 2)}
+            </pre>
+          </div>
+        </div>
+      )}
+    </div>
+  );
 }

@@ -122,7 +122,7 @@ observability:
 scanner:
   enabled: true
   sanitize_logs: true
-  content_logging: "after_scan"
+  content_logging: "full"
   streaming_mode: buffer
   log_detections: true
   model_tags:

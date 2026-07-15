@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import pathlib
 import re
 import threading
@@ -1854,6 +1855,30 @@ def create_app() -> FastAPI:
             return page
         except Exception:
             return {"total": 0, "offset": offset, "limit": limit, "entries": []}
+
+    @app.get("/api/audit/{request_id}/content")
+    async def api_audit_content(request_id: str):
+        gw = state()
+        if gw.audit is None:
+            return JSONResponse({"error": "content logging not enabled"}, status_code=404)
+        content_path = gw.audit.content_path
+        if not os.path.exists(content_path):
+            return JSONResponse({"error": "no content logged"}, status_code=404)
+        match = None
+        with open(content_path, "r") as f:
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    record = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                if record.get("request_id") == request_id:
+                    match = record  # keep scanning — last match wins (most recent write for this id)
+        if match is None:
+            return JSONResponse({"error": "no content logged for this request"}, status_code=404)
+        return match
 
     # ------------------------------------------------------------------- config
     @app.get("/api/config")

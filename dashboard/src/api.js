@@ -47,6 +47,7 @@ export const api = {
     });
     return getJSON(`/api/audit?${q.toString()}`);
   },
+  auditContent: (requestId) => getJSON(`/api/audit/${requestId}/content`),
   scannerRules: () => getJSON("/api/scanner/rules"),
   scannerStats: () => getJSON("/api/scanner/stats"),
   governorSettings: () => getJSON("/api/governor"),
