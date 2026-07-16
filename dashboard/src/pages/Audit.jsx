@@ -150,6 +150,7 @@ export default function Audit() {
             <tr>
               <Th>Time</Th>
               <Th>Source</Th>
+              <Th>Session</Th>
               <Th>Requested</Th>
               <Th>Routed To</Th>
               <Th>Task</Th>
@@ -165,7 +166,7 @@ export default function Audit() {
               <SkeletonRows />
             ) : entries.length === 0 ? (
               <tr>
-                <td colSpan={10} className="p-8 text-center text-gray-500">
+                <td colSpan={11} className="p-8 text-center text-gray-500">
                   No requests match the current filters
                 </td>
               </tr>
@@ -190,6 +191,9 @@ export default function Audit() {
                     </button>
                   </Td>
                   <Td>{e.source}</Td>
+                  <Td className="text-gray-300 font-mono text-xs">
+                    {e.session_id ? e.session_id.slice(0, 12) : "—"}
+                  </Td>
                   <Td className="text-gray-400">{e.requested_model}</Td>
                   <Td className="font-medium text-gray-100">{e.model_used}</Td>
                   <Td>{e.task_type}</Td>
@@ -209,7 +213,7 @@ export default function Audit() {
                 </tr>,
                 expandedRows.has(e.request_id) && (
                   <tr key={`${e.request_id}-content`} className="bg-gray-900/20">
-                    <td colSpan={10} className="px-3 py-3">
+                    <td colSpan={11} className="px-3 py-3">
                       <ExpandedContent
                         content={contentCache[e.request_id]}
                         isLoading={contentLoading[e.request_id]}
@@ -307,7 +311,7 @@ function PageBtn({ children, disabled, onClick }) {
 function SkeletonRows() {
   return Array.from({ length: 8 }).map((_, i) => (
     <tr key={i} className="bg-base">
-      {Array.from({ length: 10 }).map((__, j) => (
+      {Array.from({ length: 11 }).map((__, j) => (
         <td key={j} className="px-3 py-3">
           <div className="skeleton h-4 w-full" />
         </td>

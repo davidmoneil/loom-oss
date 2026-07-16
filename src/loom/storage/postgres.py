@@ -17,7 +17,7 @@ from typing import Any, Optional
 
 logger = logging.getLogger("loom.storage.postgres")
 
-SCHEMA_VERSION = 6
+SCHEMA_VERSION = 7
 
 
 class PostgresStorage:
@@ -244,6 +244,10 @@ class PostgresStorage:
                 except Exception:
                     pass
 
+        if current < 7:
+            conn.execute("ALTER TABLE metrics ADD COLUMN IF NOT EXISTS session_id TEXT")
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_metrics_session_id ON metrics (session_id)")
+
         if current < SCHEMA_VERSION:
             conn.execute(
                 "INSERT INTO schema_version (version, applied_at) VALUES (%s, %s) "
@@ -299,6 +303,7 @@ class PostgresStorage:
         task_type: Optional[str] = None,
         message_count: int = 0,
         source: Optional[str] = None,
+        session_id: Optional[str] = None,
     ) -> None:
         self.conn.execute(
             """
@@ -306,8 +311,8 @@ class PostgresStorage:
                 timestamp, request_id, model, requested_model, provider,
                 task_type, tokens_in, tokens_out,
                 latency_ms, cost_estimate, compressed, compression_ratio,
-                message_count, source
-            ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                message_count, source, session_id
+            ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
             """,
             (
                 time.time(),
@@ -324,6 +329,7 @@ class PostgresStorage:
                 compression_ratio,
                 message_count,
                 source,
+                session_id,
             ),
         )
 
@@ -755,9 +761,9 @@ class PostgresStorage:
             like = f"%{search}%"
             where.append(
                 "(m.request_id LIKE %s OR m.model LIKE %s OR m.requested_model LIKE %s "
-                "OR r.routing_reason LIKE %s OR m.task_type LIKE %s)"
+                "OR r.routing_reason LIKE %s OR m.task_type LIKE %s OR m.session_id LIKE %s)"
             )
-            params.extend([like, like, like, like, like])
+            params.extend([like, like, like, like, like, like])
 
         clause = (" WHERE " + " AND ".join(where)) if where else ""
 
@@ -787,7 +793,8 @@ class PostgresStorage:
                 m.cost_estimate,
                 m.compressed,
                 m.compression_ratio,
-                r.routing_reason
+                r.routing_reason,
+                m.session_id
             FROM metrics m
             LEFT JOIN routing_decisions r ON m.request_id = r.request_id
             {clause}
@@ -814,6 +821,7 @@ class PostgresStorage:
                 "compressed": bool(r[11]),
                 "compression_ratio": r[12] if r[12] is not None else 1.0,
                 "status": "success",
+                "session_id": r[14] if r[14] else None,
             }
             for r in rows
         ]
