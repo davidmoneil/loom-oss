@@ -27,6 +27,18 @@ from typing import Any, Optional
 
 VALID_THROTTLE_CLASSES = ("critical", "high", "standard", "low")
 
+# Tier multiplier matrix: tier x class -> multiplier
+# Maps each tier to how aggressively each job class is throttled.
+# Ported from Nexus throttle-governor.sh; "high" tier interpolated
+# (Nexus has 4 tiers, Loom-OSS has 5).
+MULTIPLIER_MATRIX = {
+    "normal":   {"critical": 1.0, "standard": 1.0, "deferrable": 1.0, "aurora": 1.0},
+    "moderate": {"critical": 1.0, "standard": 0.7, "deferrable": 0.3, "aurora": 0.0},
+    "elevated": {"critical": 1.0, "standard": 0.3, "deferrable": 0.0, "aurora": 0.0},
+    "high":     {"critical": 0.7, "standard": 0.0, "deferrable": 0.0, "aurora": 0.0},
+    "critical": {"critical": 0.5, "standard": 0.0, "deferrable": 0.0, "aurora": 0.0},
+}
+
 _DEFAULT_TIER_THRESHOLDS = {
     "moderate": 50,
     "elevated": 70,
@@ -139,6 +151,7 @@ class ThrottleGovernor:
                 if s.tier_thresholds.get(name, 100) <= 0:
                     tier = name
                     break
+        effective_tier = tier if s.enabled else "normal"
         return {
             "enabled": s.enabled,
             "tier": tier if s.enabled else "disabled",
@@ -146,7 +159,7 @@ class ThrottleGovernor:
             "util_7d": 0.0,
             "jobs_throttled": 0,
             "jobs_skipped": 0,
-            "multipliers": {},
+            "multipliers": MULTIPLIER_MATRIX.get(effective_tier, MULTIPLIER_MATRIX["normal"]),
             "override_count": len(s.class_overrides),
         }
 

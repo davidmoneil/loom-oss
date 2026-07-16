@@ -143,6 +143,25 @@ export default function Governor() {
           </div>
         )}
 
+        {status?.multipliers && Object.keys(status.multipliers).length > 0 && (
+          <div className="mt-4 border-t border-border/50 pt-4">
+            <h3 className="mb-2 text-xs font-semibold uppercase text-gray-400">Current Multipliers</h3>
+            <div className="grid grid-cols-4 gap-2 text-center text-xs">
+              {["critical", "standard", "deferrable", "aurora"].map((cls) => {
+                const val = status.multipliers[cls] ?? "-";
+                return (
+                  <div key={cls} className="rounded bg-gray-700/50 p-1.5">
+                    <div className="text-gray-400 capitalize">{cls}</div>
+                    <div className={`font-mono font-semibold ${val === 1 ? "text-green-400" : val === 0 ? "text-red-400" : "text-yellow-400"}`}>
+                      {typeof val === "number" ? val.toFixed(1) : val}
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+          </div>
+        )}
+
         {/* Tier Thresholds */}
         <div className="mt-5 border-t border-border/50 pt-4">
           <h3 className="mb-2 text-xs font-semibold uppercase text-gray-400">Tier Thresholds</h3>
