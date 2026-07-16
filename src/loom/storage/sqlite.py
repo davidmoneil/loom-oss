@@ -18,7 +18,7 @@ import threading
 import time
 from typing import Any, Optional
 
-SCHEMA_VERSION = 9
+SCHEMA_VERSION = 10
 
 _FLUSH_INTERVAL_SECONDS = 2.0
 
@@ -310,6 +310,23 @@ class LoomStorage:
             except sqlite3.OperationalError:
                 pass
 
+        if current < 10:
+            # Cache-aware cost analytics: persist the prompt-cache split and the
+            # Claude Code skill/command a request belongs to.
+            for col, typ in [
+                ("cache_read_tokens", "INTEGER DEFAULT 0"),
+                ("cache_creation_tokens", "INTEGER DEFAULT 0"),
+                ("skill", "TEXT"),
+            ]:
+                try:
+                    c.execute(f"ALTER TABLE metrics ADD COLUMN {col} {typ}")
+                except sqlite3.OperationalError:
+                    pass
+            try:
+                c.execute("CREATE INDEX IF NOT EXISTS idx_metrics_skill ON metrics (skill)")
+            except sqlite3.OperationalError:
+                pass
+
         if current < SCHEMA_VERSION:
             c.execute(
                 "INSERT OR REPLACE INTO schema_version (version, applied_at) VALUES (?, ?)",
@@ -370,6 +387,9 @@ class LoomStorage:
         tokens_saved: int = 0,
         session_id: Optional[str] = None,
         status_code: int = 200,
+        cache_read_tokens: int = 0,
+        cache_creation_tokens: int = 0,
+        skill: Optional[str] = None,
     ) -> None:
         with self._write_lock:
             self.conn.execute(
@@ -379,8 +399,8 @@ class LoomStorage:
                     task_type, tokens_in, tokens_out,
                     latency_ms, cost_estimate, compressed, compression_ratio,
                     message_count, source, tokens_saved, session_id,
-                    status_code
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    status_code, cache_read_tokens, cache_creation_tokens, skill
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     time.time(),
@@ -400,6 +420,9 @@ class LoomStorage:
                     tokens_saved,
                     session_id,
                     status_code,
+                    cache_read_tokens,
+                    cache_creation_tokens,
+                    skill,
                 ),
             )
             self._schedule_flush()
@@ -857,6 +880,7 @@ class LoomStorage:
         source: Optional[str] = None,
         status: Optional[str] = None,
         search: Optional[str] = None,
+        skill: Optional[str] = None,
     ) -> dict:
         limit = max(1, min(int(limit), 500))
         offset = max(0, int(offset))
@@ -866,6 +890,9 @@ class LoomStorage:
         if model:
             where.append("m.model = ?")
             params.append(model)
+        if skill:
+            where.append("m.skill = ?")
+            params.append(skill)
         if source:
             where.append("COALESCE(m.source, 'default') = ?")
             params.append(source)
@@ -912,7 +939,10 @@ class LoomStorage:
                 m.compression_ratio AS compression_ratio,
                 r.routing_reason   AS routing_reason,
                 m.session_id       AS session_id,
-                m.status_code      AS status_code
+                m.status_code      AS status_code,
+                m.cache_read_tokens AS cache_read_tokens,
+                m.cache_creation_tokens AS cache_creation_tokens,
+                m.skill            AS skill
             FROM metrics m
             LEFT JOIN routing_decisions r ON m.request_id = r.request_id
             {clause}
@@ -942,6 +972,9 @@ class LoomStorage:
                 else 1.0,
                 "status": "error" if (r["status_code"] or 200) >= 400 else "success",
                 "session_id": r["session_id"] if r["session_id"] else None,
+                "cache_read_tokens": r["cache_read_tokens"] or 0,
+                "cache_creation_tokens": r["cache_creation_tokens"] or 0,
+                "skill": r["skill"] if r["skill"] else None,
             }
             for r in rows
         ]

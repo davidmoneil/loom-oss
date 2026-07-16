@@ -29,7 +29,7 @@ def storage(request, tmp_path):
     store.close()
 
 
-def _record_request(store, request_id, model="haiku", cost=0.01):
+def _record_request(store, request_id, model="haiku", cost=0.01, **metrics_kwargs):
     store.record_routing_decision(
         request_id=request_id,
         source="pytest",
@@ -54,6 +54,7 @@ def _record_request(store, request_id, model="haiku", cost=0.01):
         task_type="test",
         message_count=3,
         source="pytest",
+        **metrics_kwargs,
     )
 
 
@@ -247,3 +248,37 @@ def test_create_storage_factory(tmp_path):
 
     with pytest.raises(ValueError, match="postgres_dsn"):
         create_storage(_Cfg())
+
+
+def test_cache_tokens_and_skill_roundtrip(storage):
+    _record_request(
+        storage,
+        request_id="req-cache-1",
+        cache_read_tokens=1800,
+        cache_creation_tokens=250,
+        skill="end-session",
+    )
+    _record_request(storage, request_id="req-cache-2")
+
+    page = storage.get_audit_entries(limit=10)
+    by_id = {e["request_id"]: e for e in page["entries"]}
+
+    tagged = by_id["req-cache-1"]
+    assert tagged["cache_read_tokens"] == 1800
+    assert tagged["cache_creation_tokens"] == 250
+    assert tagged["skill"] == "end-session"
+
+    untagged = by_id["req-cache-2"]
+    assert untagged["cache_read_tokens"] == 0
+    assert untagged["cache_creation_tokens"] == 0
+    assert untagged["skill"] is None
+
+
+def test_audit_skill_filter(storage):
+    _record_request(storage, request_id="req-skill-1", skill="end-session")
+    _record_request(storage, request_id="req-skill-2", skill="tasks")
+    _record_request(storage, request_id="req-skill-3")
+
+    page = storage.get_audit_entries(limit=10, skill="end-session")
+    assert page["total"] == 1
+    assert page["entries"][0]["request_id"] == "req-skill-1"
