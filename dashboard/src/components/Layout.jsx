@@ -54,8 +54,17 @@ export default function Layout() {
             </NavLink>
           ))}
         </nav>
-        <div className="hidden border-t border-border p-3 text-xs text-gray-500 md:block">
-          LLM optimization gateway
+        <div className="hidden border-t border-border p-3 md:block">
+          <a
+            href="/docs"
+            target="_blank"
+            rel="noopener noreferrer"
+            className="flex items-center gap-2 rounded px-2 py-1.5 text-xs text-gray-400 transition-colors hover:bg-gray-700/50 hover:text-white"
+          >
+            <CodeIcon />
+            <span>API Docs</span>
+          </a>
+          <p className="mt-2 px-2 text-xs text-gray-500">LLM optimization gateway</p>
         </div>
       </aside>
       <main className="flex-1 overflow-x-hidden">
@@ -162,6 +171,15 @@ function CubeIcon() {
       <path d="M21 16V8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16z" />
       <path d="M3.27 6.96 12 12.01l8.73-5.05" />
       <path d="M12 22.08V12" />
+    </svg>
+  );
+}
+
+function CodeIcon() {
+  return (
+    <svg className="h-4 w-4 shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth="2">
+      <polyline points="16 18 22 12 16 6" />
+      <polyline points="8 6 2 12 8 18" />
     </svg>
   );
 }
