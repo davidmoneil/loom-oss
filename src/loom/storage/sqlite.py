@@ -18,7 +18,7 @@ import threading
 import time
 from typing import Any, Optional
 
-SCHEMA_VERSION = 8
+SCHEMA_VERSION = 9
 
 _FLUSH_INTERVAL_SECONDS = 2.0
 
@@ -120,7 +120,8 @@ class LoomStorage:
                 compressed INTEGER,
                 compression_ratio REAL,
                 message_count INTEGER DEFAULT 0,
-                source TEXT
+                source TEXT,
+                status_code INTEGER DEFAULT 200
             );
 
             CREATE TABLE IF NOT EXISTS sessions (
@@ -301,6 +302,14 @@ class LoomStorage:
             except sqlite3.OperationalError:
                 pass
 
+        if current < 9:
+            try:
+                c.execute(
+                    "ALTER TABLE metrics ADD COLUMN status_code INTEGER DEFAULT 200"
+                )
+            except sqlite3.OperationalError:
+                pass
+
         if current < SCHEMA_VERSION:
             c.execute(
                 "INSERT OR REPLACE INTO schema_version (version, applied_at) VALUES (?, ?)",
@@ -360,6 +369,7 @@ class LoomStorage:
         source: Optional[str] = None,
         tokens_saved: int = 0,
         session_id: Optional[str] = None,
+        status_code: int = 200,
     ) -> None:
         with self._write_lock:
             self.conn.execute(
@@ -368,8 +378,9 @@ class LoomStorage:
                     timestamp, request_id, model, requested_model, provider,
                     task_type, tokens_in, tokens_out,
                     latency_ms, cost_estimate, compressed, compression_ratio,
-                    message_count, source, tokens_saved, session_id
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    message_count, source, tokens_saved, session_id,
+                    status_code
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     time.time(),
@@ -388,6 +399,7 @@ class LoomStorage:
                     source,
                     tokens_saved,
                     session_id,
+                    status_code,
                 ),
             )
             self._schedule_flush()
@@ -857,8 +869,11 @@ class LoomStorage:
         if source:
             where.append("COALESCE(m.source, 'default') = ?")
             params.append(source)
-        if status and status.lower() != "success":
-            where.append("1 = 0")
+        if status:
+            if status.lower() == "error":
+                where.append("m.status_code >= 400")
+            elif status.lower() == "success":
+                where.append("(m.status_code < 400 OR m.status_code IS NULL)")
         if search:
             like = f"%{search}%"
             where.append(
@@ -896,7 +911,8 @@ class LoomStorage:
                 m.compressed       AS compressed,
                 m.compression_ratio AS compression_ratio,
                 r.routing_reason   AS routing_reason,
-                m.session_id       AS session_id
+                m.session_id       AS session_id,
+                m.status_code      AS status_code
             FROM metrics m
             LEFT JOIN routing_decisions r ON m.request_id = r.request_id
             {clause}
@@ -924,7 +940,7 @@ class LoomStorage:
                 "compression_ratio": r["compression_ratio"]
                 if r["compression_ratio"] is not None
                 else 1.0,
-                "status": "success",
+                "status": "error" if (r["status_code"] or 200) >= 400 else "success",
                 "session_id": r["session_id"] if r["session_id"] else None,
             }
             for r in rows

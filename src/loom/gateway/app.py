@@ -261,6 +261,7 @@ def _record_request(
                 compression_ratio=compression_ratio,
                 tokens_saved=tokens_saved,
                 session_id=session_id,
+                status_code=status_code,
             )
         except Exception:
             pass
@@ -772,12 +773,64 @@ async def _passthrough_ollama_stream(
         )
 
 
+def _extract_stream_usage(lines: list[str]) -> tuple[dict | None, list[str]]:
+    """Parse SSE data lines and return (usage_dict, text_parts)."""
+    usage: dict = {}
+    text_parts: list[str] = []
+    for line in lines:
+        if not line.startswith("data: "):
+            continue
+        payload = line[6:].strip()
+        if not payload or payload == "[DONE]":
+            continue
+        try:
+            event = json.loads(payload)
+        except json.JSONDecodeError:
+            continue
+
+        # --- text extraction ---
+        # OpenAI format
+        for choice in event.get("choices", []):
+            delta = choice.get("delta", {})
+            if "content" in delta and delta["content"]:
+                text_parts.append(delta["content"])
+        # Anthropic format
+        delta = event.get("delta", {})
+        if delta.get("type") == "text_delta" and delta.get("text"):
+            text_parts.append(delta["text"])
+
+        # --- usage extraction ---
+        etype = event.get("type", "")
+        if etype == "message_start":
+            msg_usage = (event.get("message") or {}).get("usage", {})
+            if msg_usage.get("input_tokens"):
+                usage["input_tokens"] = msg_usage["input_tokens"]
+            for k in ("cache_creation_input_tokens", "cache_read_input_tokens"):
+                if msg_usage.get(k):
+                    usage[k] = msg_usage[k]
+        elif etype == "message_delta":
+            evt_usage = event.get("usage", {})
+            if evt_usage.get("output_tokens"):
+                usage["output_tokens"] = evt_usage["output_tokens"]
+        # OpenAI puts usage in the final chunk
+        if "usage" in event and isinstance(event["usage"], dict):
+            oai = event["usage"]
+            if oai.get("prompt_tokens"):
+                usage.setdefault("input_tokens", oai["prompt_tokens"])
+            if oai.get("completion_tokens"):
+                usage.setdefault("output_tokens", oai["completion_tokens"])
+
+    return (usage if usage else None), text_parts
+
+
 async def _wrapped_stream(
     state: GatewayState,
     upstream: AsyncIterator[bytes],
     meta: dict,
     t0: float,
     backend: Any = None,
+    messages: list | None = None,
+    model_cfg: Any = None,
 ) -> AsyncIterator[bytes]:
     """Forward upstream bytes, scanning for sensitive data when buffering is enabled.
 
@@ -791,6 +844,7 @@ async def _wrapped_stream(
         and state.scanner.enabled
         and state.scanner.has_buffer_rules()
     )
+    collected_lines: list[str] | None = None
 
     if scan_enabled:
         chunks: list[bytes] = []
@@ -807,28 +861,10 @@ async def _wrapped_stream(
         model = meta.get("model", "")
 
         try:
-            text_parts = []
             lines = full_body.decode("utf-8", errors="replace").split("\n")
-            for line in lines:
-                if not line.startswith("data: "):
-                    continue
-                payload = line[6:].strip()
-                if not payload or payload == "[DONE]":
-                    continue
-                try:
-                    event = json.loads(payload)
-                    # OpenAI format
-                    choices = event.get("choices", [])
-                    for choice in choices:
-                        delta = choice.get("delta", {})
-                        if "content" in delta and delta["content"]:
-                            text_parts.append(delta["content"])
-                    # Anthropic format
-                    delta = event.get("delta", {})
-                    if delta.get("type") == "text_delta" and delta.get("text"):
-                        text_parts.append(delta["text"])
-                except json.JSONDecodeError:
-                    pass
+            collected_lines = lines
+
+            _, text_parts = _extract_stream_usage(lines)
 
             if text_parts:
                 full_text = "".join(text_parts)
@@ -836,9 +872,6 @@ async def _wrapped_stream(
                     full_text, source=source, provider=provider, model=model,
                 )
                 if matches:
-                    # Redactions change text length, so we can't slice by
-                    # original offsets. Instead, emit ALL scanned text in the
-                    # first content-bearing delta and empty subsequent ones.
                     rebuilt_lines = []
                     emitted = False
                     for line in lines:
@@ -875,23 +908,44 @@ async def _wrapped_stream(
 
         yield full_body
     else:
-        # Passthrough mode — zero overhead
+        # Passthrough mode — buffer a copy for post-stream usage extraction
+        raw_chunks: list[bytes] = []
         try:
             async for chunk in upstream:
+                raw_chunks.append(chunk)
                 yield chunk
         except ProviderError as exc:
             status = exc.status_code
             body = json.dumps(exc.payload).encode("utf-8")
             yield b"data: " + body + b"\n\n"
+        collected_lines = (
+            b"".join(raw_chunks).decode("utf-8", errors="replace").split("\n")
+        )
+
+    # Extract usage and text from collected SSE events
+    stream_usage = None
+    response_text = None
+    cost = 0.0
+    if collected_lines:
+        try:
+            stream_usage, text_parts = _extract_stream_usage(collected_lines)
+            if text_parts:
+                response_text = "".join(text_parts)
+            if stream_usage and model_cfg:
+                cost = _model_cost(model_cfg, stream_usage)
+        except Exception:
+            pass
 
     rl = getattr(backend, "_last_ratelimit", None) if backend else None
     _record_request(
         state,
         status_code=status,
         latency_ms=round((time.monotonic() - t0) * 1000, 2),
-        usage=None,
-        cost=0.0,
+        usage=stream_usage,
+        cost=cost,
         ratelimit=rl,
+        messages=messages,
+        response_text=response_text,
         **meta,
     )
 
@@ -1179,7 +1233,7 @@ def create_app() -> FastAPI:
 
             if stream:
                 return StreamingResponse(
-                    _wrapped_stream(gw, result, meta, t0, backend=backend),  # type: ignore[arg-type]
+                    _wrapped_stream(gw, result, meta, t0, backend=backend, messages=messages, model_cfg=model_cfg),  # type: ignore[arg-type]
                     media_type="text/event-stream",
                     headers={"X-Loom-Request-Id": request_id},
                 )
@@ -1346,7 +1400,7 @@ def create_app() -> FastAPI:
 
             if stream:
                 return StreamingResponse(
-                    _wrapped_stream(gw, result, meta, t0, backend=backend),  # type: ignore[arg-type]
+                    _wrapped_stream(gw, result, meta, t0, backend=backend, messages=messages, model_cfg=model_cfg),  # type: ignore[arg-type]
                     media_type="text/event-stream",
                     headers={"X-Loom-Request-Id": request_id},
                 )
