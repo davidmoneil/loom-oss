@@ -40,7 +40,7 @@ jobs:
           python-version: "3.11"
       - name: Install
         run: |
-          pip install --upgrade pip
+          pip install --upgrade pip setuptools
           pip install -e .
       - name: Audit Python dependencies (fail on any known vulnerability)
         run: |
