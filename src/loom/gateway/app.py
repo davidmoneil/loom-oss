@@ -1032,7 +1032,14 @@ class _RateLimiter:
 
 
 def create_app() -> FastAPI:
-    app = FastAPI(title="Loom Gateway", version=__version__, lifespan=lifespan)
+    app = FastAPI(
+        title="Loom Gateway",
+        version=__version__,
+        lifespan=lifespan,
+        docs_url="/api/docs",
+        redoc_url="/api/redoc",
+        openapi_url="/api/openapi.json",
+    )
     app.state.gateway = GatewayState()
 
     app.add_middleware(
