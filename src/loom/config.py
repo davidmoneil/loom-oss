@@ -117,6 +117,9 @@ class ServerConfig(BaseModel):
     host: str = "0.0.0.0"
     port: int = 4000
     log_level: str = "info"
+    log_format: str = "plain"
+    log_destination: str = "stderr"
+    log_file: str = "logs/loom.log"
     display_timezone: str = "UTC"
 
 

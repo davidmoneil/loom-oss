@@ -13,10 +13,10 @@ lighter storage backend.
 from __future__ import annotations
 
 import hashlib
-import logging
+from loom.logging_setup import get_logger
 from typing import Any, Optional
 
-logger = logging.getLogger("loom.compression.relevance")
+logger = get_logger("loom.compression.relevance")
 
 
 def hash_content(text: str) -> str:

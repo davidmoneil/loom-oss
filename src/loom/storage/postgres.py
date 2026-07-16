@@ -10,12 +10,12 @@ Requires ``psycopg[binary]`` (not included in core dependencies).
 from __future__ import annotations
 
 import json
-import logging
+from loom.logging_setup import get_logger
 import threading
 import time
 from typing import Any, Optional
 
-logger = logging.getLogger("loom.storage.postgres")
+logger = get_logger("loom.storage.postgres")
 
 SCHEMA_VERSION = 9
 

@@ -1,7 +1,10 @@
 server:
   host: "0.0.0.0"
   port: 4444
-  log_level: info
+  log_level: info       # debug | info | warning | error
+  log_format: plain     # plain | json
+  log_destination: stderr  # stderr | file
+  log_file: logs/loom.log  # used when log_destination is "file"
 
 providers:
   - name: anthropic

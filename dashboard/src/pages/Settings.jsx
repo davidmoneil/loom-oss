@@ -188,6 +188,100 @@ export default function Settings() {
               ))}
             </select>
           </div>
+
+          <div className="flex items-center justify-between">
+            <div>
+              <span className="text-sm text-white">Log level</span>
+              <p className="text-xs text-gray-500">
+                Controls verbosity for the gateway and uvicorn access logs. Applies immediately.
+              </p>
+            </div>
+            <select
+              value={config?.server?.log_level || "info"}
+              onChange={async (e) => {
+                const log_level = e.target.value;
+                setSaving(true);
+                setError(null);
+                try {
+                  const updated = await api.updateServerConfig({ log_level });
+                  setConfig(updated);
+                  flashSuccess(`Log level set to ${log_level}`);
+                } catch (err) {
+                  setError(err.message || "Failed to update log level");
+                } finally {
+                  setSaving(false);
+                }
+              }}
+              disabled={saving}
+              className="rounded border border-border bg-gray-800 px-2 py-1 text-sm text-white"
+            >
+              {["debug", "info", "warning", "error"].map((lvl) => (
+                <option key={lvl} value={lvl}>{lvl}</option>
+              ))}
+            </select>
+          </div>
+
+          <div className="flex items-center justify-between">
+            <div>
+              <span className="text-sm text-white">Log format</span>
+              <p className="text-xs text-gray-500">Plain text or structured JSON lines.</p>
+            </div>
+            <select
+              value={config?.server?.log_format || "plain"}
+              onChange={async (e) => {
+                const log_format = e.target.value;
+                setSaving(true);
+                setError(null);
+                try {
+                  const updated = await api.updateServerConfig({ log_format });
+                  setConfig(updated);
+                  flashSuccess(`Log format set to ${log_format}`);
+                } catch (err) {
+                  setError(err.message || "Failed to update log format");
+                } finally {
+                  setSaving(false);
+                }
+              }}
+              disabled={saving}
+              className="rounded border border-border bg-gray-800 px-2 py-1 text-sm text-white"
+            >
+              {["plain", "json"].map((fmt) => (
+                <option key={fmt} value={fmt}>{fmt}</option>
+              ))}
+            </select>
+          </div>
+
+          <div className="flex items-center justify-between">
+            <div>
+              <span className="text-sm text-white">Log destination</span>
+              <p className="text-xs text-gray-500">
+                Write logs to stderr (container logs) or to a file ({config?.server?.log_file || "logs/loom.log"}).
+              </p>
+            </div>
+            <select
+              value={config?.server?.log_destination || "stderr"}
+              onChange={async (e) => {
+                const log_destination = e.target.value;
+                setSaving(true);
+                setError(null);
+                try {
+                  const updated = await api.updateServerConfig({ log_destination });
+                  setConfig(updated);
+                  flashSuccess(`Log destination set to ${log_destination}`);
+                } catch (err) {
+                  setError(err.message || "Failed to update log destination");
+                } finally {
+                  setSaving(false);
+                }
+              }}
+              disabled={saving}
+              className="rounded border border-border bg-gray-800 px-2 py-1 text-sm text-white"
+            >
+              {["stderr", "file"].map((dest) => (
+                <option key={dest} value={dest}>{dest}</option>
+              ))}
+            </select>
+          </div>
         </div>
       </div>
 

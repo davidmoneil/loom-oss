@@ -90,6 +90,28 @@ of its functionality (e.g., editing configuration from the dashboard) is still b
 built. Each badge links to the tracked GitHub issue explaining current state and what's
 planned.
 
+## Logging
+
+Every module gets its logger via `loom.logging_setup.get_logger(__name__)`, which
+routes through a single `logging.config.dictConfig` set up at process start
+(`configure_logging` in `src/loom/logging_setup.py`). Uvicorn's own
+`uvicorn`/`uvicorn.access`/`uvicorn.error` loggers are configured the same way, so
+gateway and access logs share one level, format, and destination.
+
+Configure it under `server:` in `loom.yaml` (or `loom.homelab.yaml`):
+
+```yaml
+server:
+  log_level: info          # debug | info | warning | error
+  log_format: plain        # plain | json
+  log_destination: stderr  # stderr | file
+  log_file: logs/loom.log  # used when log_destination is "file"
+```
+
+These fields are also editable live from the dashboard (Settings → Server
+Settings) via `PATCH /api/config/server` — changes take effect immediately
+without a restart.
+
 ## Architecture
 
 Loom is organized into a few focused layers:

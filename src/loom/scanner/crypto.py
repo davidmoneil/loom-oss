@@ -7,12 +7,13 @@ Falls back to in-memory storage when Postgres is unavailable.
 
 from __future__ import annotations
 
-import logging
 import os
 import threading
 from typing import Optional
 
-logger = logging.getLogger("loom.scanner.crypto")
+from loom.logging_setup import get_logger
+
+logger = get_logger("loom.scanner.crypto")
 
 KEY_TTL_HOURS = int(os.environ.get("LOOM_DLP_KEY_TTL_HOURS", "24"))
 

@@ -22,10 +22,11 @@ falls back to :class:`NullVariantStore` and behaves exactly as before.
 
 from __future__ import annotations
 
-import logging
 from typing import Any, Optional
 
-log = logging.getLogger("loom.variants")
+from loom.logging_setup import get_logger
+
+log = get_logger("loom.variants")
 
 
 class NullVariantStore:

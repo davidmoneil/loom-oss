@@ -15,7 +15,7 @@ from __future__ import annotations
 
 import hashlib
 import json
-import logging
+from loom.logging_setup import get_logger
 import math
 import re
 from collections import Counter
@@ -23,7 +23,7 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any, Optional
 
-logger = logging.getLogger(__name__)
+logger = get_logger(__name__)
 
 # --- Compiled regex patterns ---
 

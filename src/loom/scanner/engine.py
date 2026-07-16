@@ -10,7 +10,7 @@ never raises into the request path.
 from __future__ import annotations
 
 import json
-import logging
+from loom.logging_setup import get_logger
 import os
 import re
 import threading
@@ -25,7 +25,7 @@ import yaml
 from .actions import ActionContext, apply_action, luhn_check
 from .rules import DEFAULT_RULES
 
-logger = logging.getLogger("loom.scanner")
+logger = get_logger("loom.scanner")
 
 _CACHE_TTL_SECONDS = 60
 _DETECTIONS_DIR = Path(os.environ.get("LOOM_SCANNER_LOG_DIR", "logs"))

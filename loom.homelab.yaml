@@ -2,6 +2,9 @@ server:
   host: "0.0.0.0"
   port: 4444
   log_level: info
+  log_format: plain
+  log_destination: stderr
+  log_file: logs/loom.log
   display_timezone: "America/Denver"
 
 providers:

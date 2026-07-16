@@ -40,6 +40,7 @@ from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from loom import __version__
 from loom.config import LoomConfig, ModelConfig, SourcePolicy
+from loom.logging_setup import configure_logging, get_logger
 from loom.storage import LoomStorage, create_storage
 
 from .providers import (
@@ -693,8 +694,7 @@ def _error_response(exc: Exception, request_id: str, status: int = 500) -> JSONR
         if isinstance(payload.get("error"), dict):
             payload["error"].setdefault("request_id", request_id)
         return JSONResponse(payload, status_code=exc.status_code)
-    import logging as _log
-    _log.getLogger("loom.gateway").exception("Unhandled error (request_id=%s)", request_id)
+    get_logger("loom.gateway").exception("Unhandled error (request_id=%s)", request_id)
     return JSONResponse(
         {
             "error": {
@@ -1117,6 +1117,13 @@ class _RateLimiter:
 
 
 def create_app() -> FastAPI:
+    _bootstrap_config = LoomConfig.load()
+    configure_logging(
+        level=_bootstrap_config.server.log_level,
+        fmt=_bootstrap_config.server.log_format,
+        destination=_bootstrap_config.server.log_destination,
+        file_path=_bootstrap_config.server.log_file,
+    )
     app = FastAPI(title="Loom Gateway", version=__version__, lifespan=lifespan)
     app.state.gateway = GatewayState()
 
@@ -2114,12 +2121,19 @@ def create_app() -> FastAPI:
             body = await request.json()
         except Exception:
             return JSONResponse({"error": "invalid JSON"}, status_code=400)
-        allowed = {"display_timezone", "log_level"}
+        allowed = {"display_timezone", "log_level", "log_format", "log_destination", "log_file"}
         updates = {k: v for k, v in body.items() if k in allowed}
         if not updates:
             return JSONResponse({"error": "no valid fields"}, status_code=400)
         for k, v in updates.items():
             setattr(gw.config.server, k, v)
+        if allowed & updates.keys() - {"display_timezone"}:
+            configure_logging(
+                level=gw.config.server.log_level,
+                fmt=gw.config.server.log_format,
+                destination=gw.config.server.log_destination,
+                file_path=gw.config.server.log_file,
+            )
         return _sanitized_config(gw.config)
 
     @app.patch(
@@ -3003,6 +3017,9 @@ def _sanitized_config(config: LoomConfig) -> dict:
             "host": config.server.host,
             "port": config.server.port,
             "log_level": config.server.log_level,
+            "log_format": config.server.log_format,
+            "log_destination": config.server.log_destination,
+            "log_file": config.server.log_file,
             "display_timezone": config.server.display_timezone,
         },
         "providers": [
