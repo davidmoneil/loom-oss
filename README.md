@@ -7,6 +7,15 @@ EQRT — Empirically Qualified Routing Table — algorithm), **context compressi
 get cost-aware model selection, token reduction, and an audit trail without changing your
 application code.
 
+## 100% Local — Private by Design
+
+Loom runs entirely on your machine. There is **no telemetry, no analytics, and no
+phone-home** — the codebase contains no tracking of any kind. The only outbound network
+traffic Loom ever produces is the LLM API calls **you** configure (Anthropic, OpenAI,
+etc.). Point it at a local provider like Ollama and Loom is fully offline. All request
+audit data, metrics, and configuration live in your own Postgres database and config
+files — nothing leaves your network.
+
 ## Quickstart (Docker)
 
 ```bash
@@ -69,6 +78,18 @@ The observability endpoints follow a stable v1 contract
 (`docs/observability-api.md`) so external dashboards and reporting tools are
 independent of the gateway implementation.
 
+## Web Dashboard
+
+The gateway serves a built-in React dashboard at its root URL (`http://localhost:4444/`)
+— no separate service to run. Pages: Overview, Audit (per-request trail with full
+prompt/response detail), Sessions, Costs, Metrics, Models, Routing, Rate Limits,
+Governor, Data Protection (Scanner), and Settings.
+
+Some sections are marked **In Planning** in the UI — the page shows live data but part
+of its functionality (e.g., editing configuration from the dashboard) is still being
+built. Each badge links to the tracked GitHub issue explaining current state and what's
+planned.
+
 ## Architecture
 
 Loom is organized into a few focused layers:
@@ -85,6 +106,12 @@ Loom is organized into a few focused layers:
 - **Observability** (`loom.observability`) — fire-and-forget JSONL audit and metrics logs,
   backed by a pluggable store (`loom.storage`, SQLite or PostgreSQL) for routing decisions,
   metrics, and the compression cache.
+- **Data protection** (`loom.scanner`) — detection/redaction rules, pseudonymization, and
+  encryption helpers applied to logged content.
+- **Governor** (`loom.governor`) — budget/limit configuration and spend tracking
+  (enforcement is in planning, see the dashboard badge).
+- **Gateway + Dashboard** (`loom.gateway`, `dashboard/`) — the FastAPI app that ties the
+  layers together and serves the React dashboard.
 
 Configuration is loaded from `loom.yaml` (see `loom.example.yaml`) with `LOOM_*` environment
 variable overrides.
