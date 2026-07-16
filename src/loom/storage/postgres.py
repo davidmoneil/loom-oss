@@ -17,7 +17,7 @@ from typing import Any, Optional
 
 logger = get_logger("loom.storage.postgres")
 
-SCHEMA_VERSION = 9
+SCHEMA_VERSION = 10
 
 
 class PostgresStorage:
@@ -261,6 +261,19 @@ class PostgresStorage:
                 "status_code INTEGER DEFAULT 200"
             )
 
+        if current < 10:
+            # Cache-aware cost analytics: prompt-cache split + Claude Code skill tag.
+            conn.execute(
+                "ALTER TABLE metrics ADD COLUMN IF NOT EXISTS "
+                "cache_read_tokens BIGINT DEFAULT 0"
+            )
+            conn.execute(
+                "ALTER TABLE metrics ADD COLUMN IF NOT EXISTS "
+                "cache_creation_tokens BIGINT DEFAULT 0"
+            )
+            conn.execute("ALTER TABLE metrics ADD COLUMN IF NOT EXISTS skill TEXT")
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_metrics_skill ON metrics (skill)")
+
         if current < SCHEMA_VERSION:
             conn.execute(
                 "INSERT INTO schema_version (version, applied_at) VALUES (%s, %s) "
@@ -319,6 +332,9 @@ class PostgresStorage:
         tokens_saved: int = 0,
         session_id: Optional[str] = None,
         status_code: int = 200,
+        cache_read_tokens: int = 0,
+        cache_creation_tokens: int = 0,
+        skill: Optional[str] = None,
     ) -> None:
         self.conn.execute(
             """
@@ -327,8 +343,8 @@ class PostgresStorage:
                 task_type, tokens_in, tokens_out,
                 latency_ms, cost_estimate, compressed, compression_ratio,
                 message_count, source, tokens_saved, session_id,
-                status_code
-            ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                status_code, cache_read_tokens, cache_creation_tokens, skill
+            ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
             """,
             (
                 time.time(),
@@ -348,6 +364,9 @@ class PostgresStorage:
                 tokens_saved,
                 session_id,
                 status_code,
+                cache_read_tokens,
+                cache_creation_tokens,
+                skill,
             ),
         )
 
@@ -759,6 +778,7 @@ class PostgresStorage:
         source: Optional[str] = None,
         status: Optional[str] = None,
         search: Optional[str] = None,
+        skill: Optional[str] = None,
     ) -> dict:
         limit = max(1, min(int(limit), 500))
         offset = max(0, int(offset))
@@ -768,6 +788,9 @@ class PostgresStorage:
         if model:
             where.append("m.model = %s")
             params.append(model)
+        if skill:
+            where.append("m.skill = %s")
+            params.append(skill)
         if source:
             where.append("COALESCE(m.source, 'default') = %s")
             params.append(source)
@@ -814,7 +837,10 @@ class PostgresStorage:
                 m.compression_ratio,
                 r.routing_reason,
                 m.session_id,
-                m.status_code
+                m.status_code,
+                m.cache_read_tokens,
+                m.cache_creation_tokens,
+                m.skill
             FROM metrics m
             LEFT JOIN routing_decisions r ON m.request_id = r.request_id
             {clause}
@@ -842,6 +868,9 @@ class PostgresStorage:
                 "compression_ratio": r[12] if r[12] is not None else 1.0,
                 "status": "error" if (r[15] or 200) >= 400 else "success",
                 "session_id": r[14] if r[14] else None,
+                "cache_read_tokens": r[16] or 0,
+                "cache_creation_tokens": r[17] or 0,
+                "skill": r[18] if r[18] else None,
             }
             for r in rows
         ]

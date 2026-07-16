@@ -21,6 +21,7 @@ affected feature degrades gracefully rather than crashing the process.
 from __future__ import annotations
 
 import asyncio
+import gzip
 import hashlib
 import json
 import os
@@ -206,14 +207,16 @@ class GatewayState:
         return None
 
 
-def _extract_tokens(usage_or_response: Any) -> tuple[int, int]:
-    """Pull (tokens_in, tokens_out) from any provider's response shape.
+def _extract_tokens(usage_or_response: Any) -> tuple[int, int, int, int]:
+    """Pull (tokens_in, tokens_out, cache_read, cache_creation) from any provider's response shape.
 
     Handles: OpenAI (usage.prompt_tokens), Anthropic (usage.input_tokens),
     Ollama (top-level prompt_eval_count), Gemini (usageMetadata.promptTokenCount).
+    tokens_in includes cache tokens; cache_read/cache_creation carry the split
+    (Anthropic only — 0 for providers without prompt caching).
     """
     if not isinstance(usage_or_response, dict):
-        return 0, 0
+        return 0, 0, 0, 0
     d = usage_or_response
     tokens_in = (
         d.get("prompt_tokens")
@@ -222,8 +225,10 @@ def _extract_tokens(usage_or_response: Any) -> tuple[int, int]:
         or (d.get("usageMetadata") or {}).get("promptTokenCount")  # Gemini
         or 0
     )
-    tokens_in += d.get("cache_creation_input_tokens", 0) or 0
-    tokens_in += d.get("cache_read_input_tokens", 0) or 0
+    cache_creation = d.get("cache_creation_input_tokens", 0) or 0
+    cache_read = d.get("cache_read_input_tokens", 0) or 0
+    tokens_in += cache_creation
+    tokens_in += cache_read
     tokens_out = (
         d.get("completion_tokens")
         or d.get("output_tokens")
@@ -232,9 +237,47 @@ def _extract_tokens(usage_or_response: Any) -> tuple[int, int]:
         or 0
     )
     try:
-        return int(tokens_in or 0), int(tokens_out or 0)
+        return (
+            int(tokens_in or 0),
+            int(tokens_out or 0),
+            int(cache_read or 0),
+            int(cache_creation or 0),
+        )
     except (TypeError, ValueError):
-        return 0, 0
+        return 0, 0, 0, 0
+
+
+_COMMAND_NAME_RE = re.compile(r"<command-name>\s*/?([\w:.-]+)\s*</command-name>")
+
+
+def _extract_skill(messages: Optional[list[dict]]) -> Optional[str]:
+    """Most recently invoked Claude Code skill/command in the conversation.
+
+    Claude Code injects a <command-name> block into the user message that
+    triggered a slash command; every request after that point is attributed
+    to that command until a newer one appears.
+    """
+    if not messages:
+        return None
+    for msg in reversed(messages):
+        if not isinstance(msg, dict) or msg.get("role") != "user":
+            continue
+        content = msg.get("content")
+        if isinstance(content, str):
+            texts = [content]
+        elif isinstance(content, list):
+            texts = [
+                b.get("text", "")
+                for b in content
+                if isinstance(b, dict) and b.get("type") == "text"
+            ]
+        else:
+            continue
+        for text in texts:
+            matches = _COMMAND_NAME_RE.findall(text)
+            if matches:
+                return matches[-1]
+    return None
 
 
 def _record_request(
@@ -263,7 +306,8 @@ def _record_request(
     session_id: Optional[str] = None,
 ) -> None:
     """Persist + audit a completed request. Never raises into the request path."""
-    tokens_in, tokens_out = _extract_tokens(usage)
+    tokens_in, tokens_out, cache_read, cache_creation = _extract_tokens(usage)
+    skill = _extract_skill(messages)
 
     if state.storage is not None:
         try:
@@ -283,6 +327,9 @@ def _record_request(
                 tokens_saved=tokens_saved,
                 session_id=session_id,
                 status_code=status_code,
+                cache_read_tokens=cache_read,
+                cache_creation_tokens=cache_creation,
+                skill=skill,
             )
         except Exception:
             pass
@@ -496,7 +543,7 @@ def _normalize_response(result: dict, provider: str, model: str) -> dict:
 def _model_cost(model_cfg: Optional[ModelConfig], usage: Any) -> float:
     if model_cfg is None:
         return 0.0
-    tokens_in, tokens_out = _extract_tokens(usage)
+    tokens_in, tokens_out, _, _ = _extract_tokens(usage)
     return (tokens_in / 1000.0) * model_cfg.cost_per_1k_input + (
         tokens_out / 1000.0
     ) * model_cfg.cost_per_1k_output
@@ -887,12 +934,19 @@ async def _wrapped_stream(
             chunks.append(b"data: " + json.dumps(exc.payload).encode("utf-8") + b"\n\n")
 
         full_body = b"".join(chunks)
+        was_gzip = full_body[:2] == b"\x1f\x8b"
+        parse_body = full_body
+        if was_gzip:
+            try:
+                parse_body = gzip.decompress(full_body)
+            except Exception:
+                pass
         source = meta.get("source", "unknown")
         provider = meta.get("provider", "unknown")
         model = meta.get("model", "")
 
         try:
-            lines = full_body.decode("utf-8", errors="replace").split("\n")
+            lines = parse_body.decode("utf-8", errors="replace").split("\n")
             collected_lines = lines
 
             _, text_parts = _extract_stream_usage(lines)
@@ -934,6 +988,8 @@ async def _wrapped_stream(
                         except json.JSONDecodeError:
                             rebuilt_lines.append(line)
                     full_body = "\n".join(rebuilt_lines).encode("utf-8")
+                    if was_gzip:
+                        full_body = gzip.compress(full_body)
         except Exception:
             pass  # scanning failure = pass through original
 
@@ -949,9 +1005,13 @@ async def _wrapped_stream(
             status = exc.status_code
             body = json.dumps(exc.payload).encode("utf-8")
             yield b"data: " + body + b"\n\n"
-        collected_lines = (
-            b"".join(raw_chunks).decode("utf-8", errors="replace").split("\n")
-        )
+        raw_body = b"".join(raw_chunks)
+        if raw_body[:2] == b"\x1f\x8b":
+            try:
+                raw_body = gzip.decompress(raw_body)
+            except Exception:
+                pass
+        collected_lines = raw_body.decode("utf-8", errors="replace").split("\n")
 
     # Extract usage and text from collected SSE events
     stream_usage = None
@@ -1128,16 +1188,24 @@ def create_app() -> FastAPI:
     app = FastAPI(title="Loom Gateway", version=__version__, lifespan=lifespan)
     app.state.gateway = GatewayState()
 
-    app.add_middleware(
-        CORSMiddleware,
-        allow_origins=["*"],
-        allow_credentials=True,
-        allow_methods=["*"],
-        allow_headers=["*"],
-        expose_headers=["X-Loom-Request-Id"],
-    )
+    config = LoomConfig.load()
+    cors_origins = config.server.cors_origins
+    if cors_origins:
+        # Credentials are only ever enabled alongside explicit origins —
+        # never combined with a wildcard, which browsers reject anyway.
+        app.add_middleware(
+            CORSMiddleware,
+            allow_origins=cors_origins,
+            allow_credentials=True,
+            allow_methods=["*"],
+            allow_headers=["*"],
+            expose_headers=["X-Loom-Request-Id"],
+        )
 
-    rate_limiter = _RateLimiter(max_requests=200, window_seconds=60)
+    rate_limiter = _RateLimiter(
+        max_requests=config.server.rate_limit_requests,
+        window_seconds=config.server.rate_limit_window_seconds,
+    )
 
     @app.middleware("http")
     async def rate_limit_middleware(request: Request, call_next):
@@ -2046,6 +2114,7 @@ def create_app() -> FastAPI:
         source: Optional[str] = None,
         status: Optional[str] = None,
         search: Optional[str] = None,
+        skill: Optional[str] = None,
     ):
         gw = state()
         if gw.storage is None:
@@ -2059,6 +2128,7 @@ def create_app() -> FastAPI:
                     source=source,
                     status=status,
                     search=search,
+                    skill=skill,
                 )
             )
             # Contract aliases (docs/observability-api.md) alongside the

@@ -20,11 +20,13 @@ export default function Audit() {
 
   // Filter inputs (search is debounced into `filters`).
   const [searchInput, setSearchInput] = useState("");
+  const [skillInput, setSkillInput] = useState("");
   const [filters, setFilters] = useState({
     search: "",
     model: "",
     source: "",
     status: "",
+    skill: "",
   });
 
   // Expand state
@@ -48,6 +50,14 @@ export default function Audit() {
     return () => clearTimeout(id);
   }, [searchInput]);
 
+  useEffect(() => {
+    const id = setTimeout(
+      () => setFilters((f) => ({ ...f, skill: skillInput })),
+      300
+    );
+    return () => clearTimeout(id);
+  }, [skillInput]);
+
   const load = useCallback(async () => {
     setLoading(true);
     try {
@@ -58,6 +68,7 @@ export default function Audit() {
         source: filters.source,
         status: filters.status,
         search: filters.search,
+        skill: filters.skill,
       });
       setEntries(data.entries || []);
       setTotal(data.total || 0);
@@ -142,6 +153,12 @@ export default function Audit() {
           placeholder="All statuses"
           options={["success", "error"]}
         />
+        <input
+          value={skillInput}
+          onChange={(e) => setSkillInput(e.target.value)}
+          placeholder="Skill (e.g. end-session)"
+          className="w-[180px] rounded-md border border-border bg-card px-3 py-2 text-sm text-gray-200 placeholder-gray-500 focus:border-accent focus:outline-none"
+        />
       </div>
 
       <div className="mt-4 overflow-x-auto rounded-lg border border-border">
@@ -154,6 +171,7 @@ export default function Audit() {
               <Th>Requested</Th>
               <Th>Routed To</Th>
               <Th>Task</Th>
+              <Th>Skill</Th>
               <Th className="text-right">Tokens (in/out)</Th>
               <Th className="text-right">Request Time</Th>
               <Th className="text-right">Cost</Th>
@@ -166,7 +184,7 @@ export default function Audit() {
               <SkeletonRows />
             ) : entries.length === 0 ? (
               <tr>
-                <td colSpan={11} className="p-8 text-center text-gray-500">
+                <td colSpan={12} className="p-8 text-center text-gray-500">
                   No requests match the current filters
                 </td>
               </tr>
@@ -197,8 +215,15 @@ export default function Audit() {
                   <Td className="text-gray-400">{e.requested_model}</Td>
                   <Td className="font-medium text-gray-100">{e.model_used}</Td>
                   <Td>{e.task_type}</Td>
+                  <Td className="text-gray-300">{e.skill || "—"}</Td>
                   <Td className="text-right tabular-nums text-gray-300">
                     {fmtNumber(e.tokens_in)} / {fmtNumber(e.tokens_out)}
+                    {(e.cache_read_tokens > 0 || e.cache_creation_tokens > 0) && (
+                      <div className="text-xs text-gray-500">
+                        cache {fmtNumber(e.cache_read_tokens)}r /{" "}
+                        {fmtNumber(e.cache_creation_tokens)}w
+                      </div>
+                    )}
                   </Td>
                   <Td className="text-right tabular-nums">
                     {fmtLatency(e.latency_ms)}
@@ -213,7 +238,7 @@ export default function Audit() {
                 </tr>,
                 expandedRows.has(e.request_id) && (
                   <tr key={`${e.request_id}-content`} className="bg-gray-900/20">
-                    <td colSpan={11} className="px-3 py-3">
+                    <td colSpan={12} className="px-3 py-3">
                       <ExpandedContent
                         content={contentCache[e.request_id]}
                         isLoading={contentLoading[e.request_id]}
@@ -311,7 +336,7 @@ function PageBtn({ children, disabled, onClick }) {
 function SkeletonRows() {
   return Array.from({ length: 8 }).map((_, i) => (
     <tr key={i} className="bg-base">
-      {Array.from({ length: 11 }).map((__, j) => (
+      {Array.from({ length: 12 }).map((__, j) => (
         <td key={j} className="px-3 py-3">
           <div className="skeleton h-4 w-full" />
         </td>

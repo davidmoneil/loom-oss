@@ -5,6 +5,12 @@ server:
   log_format: plain     # plain | json
   log_destination: stderr  # stderr | file
   log_file: logs/loom.log  # used when log_destination is "file"
+  # Cross-origin browser access, e.g. a dashboard on a different host/port.
+  # Default (empty) is same-origin only. Never combine with credentials
+  # unless origins are explicitly listed here.
+  cors_origins: []
+  rate_limit_requests: 200
+  rate_limit_window_seconds: 60
 
 providers:
   - name: anthropic
