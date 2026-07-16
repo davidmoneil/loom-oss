@@ -17,7 +17,7 @@ from typing import Any, Optional
 
 logger = logging.getLogger("loom.storage.postgres")
 
-SCHEMA_VERSION = 8
+SCHEMA_VERSION = 9
 
 
 class PostgresStorage:
@@ -90,7 +90,8 @@ class PostgresStorage:
                 compressed INTEGER,
                 compression_ratio DOUBLE PRECISION,
                 message_count INTEGER DEFAULT 0,
-                source TEXT
+                source TEXT,
+                status_code INTEGER DEFAULT 200
             )
         """)
         conn.execute("""
@@ -254,6 +255,12 @@ class PostgresStorage:
             conn.execute("ALTER TABLE metrics ADD COLUMN IF NOT EXISTS session_id TEXT")
             conn.execute("CREATE INDEX IF NOT EXISTS idx_metrics_session_id ON metrics (session_id)")
 
+        if current < 9:
+            conn.execute(
+                "ALTER TABLE metrics ADD COLUMN IF NOT EXISTS "
+                "status_code INTEGER DEFAULT 200"
+            )
+
         if current < SCHEMA_VERSION:
             conn.execute(
                 "INSERT INTO schema_version (version, applied_at) VALUES (%s, %s) "
@@ -311,6 +318,7 @@ class PostgresStorage:
         source: Optional[str] = None,
         tokens_saved: int = 0,
         session_id: Optional[str] = None,
+        status_code: int = 200,
     ) -> None:
         self.conn.execute(
             """
@@ -318,8 +326,9 @@ class PostgresStorage:
                 timestamp, request_id, model, requested_model, provider,
                 task_type, tokens_in, tokens_out,
                 latency_ms, cost_estimate, compressed, compression_ratio,
-                message_count, source, tokens_saved, session_id
-            ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                message_count, source, tokens_saved, session_id,
+                status_code
+            ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
             """,
             (
                 time.time(),
@@ -338,6 +347,7 @@ class PostgresStorage:
                 source,
                 tokens_saved,
                 session_id,
+                status_code,
             ),
         )
 
@@ -761,8 +771,11 @@ class PostgresStorage:
         if source:
             where.append("COALESCE(m.source, 'default') = %s")
             params.append(source)
-        if status and status.lower() != "success":
-            where.append("1 = 0")
+        if status:
+            if status.lower() == "error":
+                where.append("m.status_code >= 400")
+            elif status.lower() == "success":
+                where.append("(m.status_code < 400 OR m.status_code IS NULL)")
         if search:
             like = f"%{search}%"
             where.append(
@@ -800,7 +813,8 @@ class PostgresStorage:
                 m.compressed,
                 m.compression_ratio,
                 r.routing_reason,
-                m.session_id
+                m.session_id,
+                m.status_code
             FROM metrics m
             LEFT JOIN routing_decisions r ON m.request_id = r.request_id
             {clause}
@@ -826,7 +840,7 @@ class PostgresStorage:
                 "routing_reason": r[13] or "",
                 "compressed": bool(r[11]),
                 "compression_ratio": r[12] if r[12] is not None else 1.0,
-                "status": "success",
+                "status": "error" if (r[15] or 200) >= 400 else "success",
                 "session_id": r[14] if r[14] else None,
             }
             for r in rows
