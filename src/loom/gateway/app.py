@@ -354,6 +354,13 @@ def _record_request(
 
     if state.audit is not None and messages and state.scanner is not None:
         try:
+            response_content = None
+            stop_reason_val = None
+            response_model_val = None
+            if result and isinstance(result, dict):
+                response_content = result.get("content")
+                stop_reason_val = result.get("stop_reason")
+                response_model_val = result.get("model")
             state.audit.log_content(
                 request_id=request_id,
                 model=model,
@@ -362,6 +369,10 @@ def _record_request(
                 messages=messages,
                 response_text=response_text,
                 content_logging=state.scanner.content_logging,
+                response_content=response_content,
+                usage=usage,
+                stop_reason=stop_reason_val,
+                response_model=response_model_val,
             )
         except Exception:
             pass
