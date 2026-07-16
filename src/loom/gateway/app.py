@@ -254,6 +254,7 @@ def _record_request(
     cost: float = 0.0,
     messages: Optional[list[dict]] = None,
     response_text: Optional[str] = None,
+    result: Optional[dict] = None,
     compressed: bool = False,
     compression_ratio: float = 1.0,
     tokens_saved: int = 0,
