@@ -21,6 +21,7 @@ affected feature degrades gracefully rather than crashing the process.
 from __future__ import annotations
 
 import asyncio
+import gzip
 import hashlib
 import json
 import os
@@ -887,12 +888,19 @@ async def _wrapped_stream(
             chunks.append(b"data: " + json.dumps(exc.payload).encode("utf-8") + b"\n\n")
 
         full_body = b"".join(chunks)
+        was_gzip = full_body[:2] == b"\x1f\x8b"
+        parse_body = full_body
+        if was_gzip:
+            try:
+                parse_body = gzip.decompress(full_body)
+            except Exception:
+                pass
         source = meta.get("source", "unknown")
         provider = meta.get("provider", "unknown")
         model = meta.get("model", "")
 
         try:
-            lines = full_body.decode("utf-8", errors="replace").split("\n")
+            lines = parse_body.decode("utf-8", errors="replace").split("\n")
             collected_lines = lines
 
             _, text_parts = _extract_stream_usage(lines)
@@ -934,6 +942,8 @@ async def _wrapped_stream(
                         except json.JSONDecodeError:
                             rebuilt_lines.append(line)
                     full_body = "\n".join(rebuilt_lines).encode("utf-8")
+                    if was_gzip:
+                        full_body = gzip.compress(full_body)
         except Exception:
             pass  # scanning failure = pass through original
 
@@ -949,9 +959,13 @@ async def _wrapped_stream(
             status = exc.status_code
             body = json.dumps(exc.payload).encode("utf-8")
             yield b"data: " + body + b"\n\n"
-        collected_lines = (
-            b"".join(raw_chunks).decode("utf-8", errors="replace").split("\n")
-        )
+        raw_body = b"".join(raw_chunks)
+        if raw_body[:2] == b"\x1f\x8b":
+            try:
+                raw_body = gzip.decompress(raw_body)
+            except Exception:
+                pass
+        collected_lines = raw_body.decode("utf-8", errors="replace").split("\n")
 
     # Extract usage and text from collected SSE events
     stream_usage = None
