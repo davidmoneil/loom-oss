@@ -33,7 +33,7 @@ def main() -> None:
             "loom.gateway.app:app",
             host=host,
             port=port,
-            log_level=config.server.log_level,
+            log_config=None,
         )
     else:
         parser.print_help()

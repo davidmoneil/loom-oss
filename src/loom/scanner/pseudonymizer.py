@@ -11,11 +11,11 @@ when available. Falls back to in-memory dict otherwise.
 from __future__ import annotations
 
 import hashlib
-import logging
+from loom.logging_setup import get_logger
 import threading
 from typing import Optional
 
-logger = logging.getLogger("loom.scanner.pseudonymizer")
+logger = get_logger("loom.scanner.pseudonymizer")
 
 _conn_lock = threading.Lock()
 _conn = None

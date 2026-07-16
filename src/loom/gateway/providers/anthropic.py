@@ -192,8 +192,8 @@ class AnthropicBackend(ProviderBackend):
         client = await self.get_client()
         url = self._upstream_url("/v1/messages", query_string)
         hdrs = self._headers(api_key, inbound_headers)
-        import logging
-        _log = logging.getLogger("loom.anthropic")
+        from loom.logging_setup import get_logger
+        _log = get_logger("loom.anthropic")
         req = client.build_request("POST", url, json=body, headers=hdrs)
         _log.info("DEBUG upstream request: url=%s headers=%s",
                   req.url, {k: v for k, v in req.headers.items()
@@ -238,8 +238,8 @@ class AnthropicBackend(ProviderBackend):
             if resp.status_code >= 400:
                 await resp.aread()
                 payload = _safe_json(resp)
-                import logging
-                logging.getLogger("loom.anthropic").error(
+                from loom.logging_setup import get_logger
+                get_logger("loom.anthropic").error(
                     "upstream stream %s — headers sent: %s — payload: %s",
                     resp.status_code,
                     {k: v for k, v in self._headers(api_key, inbound_headers).items()
