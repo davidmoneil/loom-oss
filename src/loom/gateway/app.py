@@ -34,8 +34,9 @@ from typing import Any, AsyncIterator, Optional
 
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse, StreamingResponse
+from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
+from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from loom import __version__
 from loom.config import LoomConfig, ModelConfig, SourcePolicy
@@ -1032,14 +1033,7 @@ class _RateLimiter:
 
 
 def create_app() -> FastAPI:
-    app = FastAPI(
-        title="Loom Gateway",
-        version=__version__,
-        lifespan=lifespan,
-        docs_url="/api/docs",
-        redoc_url="/api/redoc",
-        openapi_url="/api/openapi.json",
-    )
+    app = FastAPI(title="Loom Gateway", version=__version__, lifespan=lifespan)
     app.state.gateway = GatewayState()
 
     app.add_middleware(
@@ -2131,10 +2125,26 @@ def create_app() -> FastAPI:
     )
     if dashboard_dir.exists():
         app.mount(
-            "/",
-            StaticFiles(directory=str(dashboard_dir), html=True),
-            name="dashboard",
+            "/assets",
+            StaticFiles(directory=str(dashboard_dir / "assets")),
+            name="dashboard-assets",
         )
+
+        spa_index = dashboard_dir / "index.html"
+
+        @app.get("/", include_in_schema=False)
+        async def dashboard_root():
+            return FileResponse(spa_index)
+
+        @app.exception_handler(StarletteHTTPException)
+        async def spa_fallback(request: Request, exc: StarletteHTTPException):
+            if exc.status_code == 404 and not request.url.path.startswith(
+                ("/api/", "/v1/", "/docs", "/redoc", "/openapi.json")
+            ):
+                return FileResponse(spa_index)
+            return JSONResponse(
+                {"detail": exc.detail}, status_code=exc.status_code
+            )
 
     return app
 
