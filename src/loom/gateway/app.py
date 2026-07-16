@@ -201,6 +201,8 @@ def _extract_tokens(usage_or_response: Any) -> tuple[int, int]:
         or (d.get("usageMetadata") or {}).get("promptTokenCount")  # Gemini
         or 0
     )
+    tokens_in += d.get("cache_creation_input_tokens", 0) or 0
+    tokens_in += d.get("cache_read_input_tokens", 0) or 0
     tokens_out = (
         d.get("completion_tokens")
         or d.get("output_tokens")

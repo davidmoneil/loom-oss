@@ -155,7 +155,7 @@ export default function Audit() {
               <Th>Routed To</Th>
               <Th>Task</Th>
               <Th className="text-right">Tokens (in/out)</Th>
-              <Th className="text-right">Latency</Th>
+              <Th className="text-right">Request Time</Th>
               <Th className="text-right">Cost</Th>
               <Th>Reason</Th>
               <Th>Status</Th>
