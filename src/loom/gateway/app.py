@@ -375,6 +375,12 @@ def _record_request(
             )
             if ratelimit:
                 audit_kwargs["ratelimit"] = ratelimit
+            if usage and isinstance(usage, dict):
+                cache_read = usage.get("cache_read_input_tokens", 0) or 0
+                cache_creation = usage.get("cache_creation_input_tokens", 0) or 0
+                if cache_read or cache_creation:
+                    audit_kwargs["cache_read_tokens"] = cache_read
+                    audit_kwargs["cache_creation_tokens"] = cache_creation
             state.audit.log_request(**audit_kwargs)
         except Exception:
             pass
