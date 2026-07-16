@@ -1,4 +1,4 @@
-FROM python:3.12-slim AS base
+FROM python:3.14-slim AS base
 
 # Security: run as non-root user
 RUN groupadd -r loom && useradd -r -g loom -d /app -s /sbin/nologin loom
