@@ -130,6 +130,33 @@ Backends without session tracking return `supported: false` with zeroed
 counters and `entries: []`. The lifetime session totals remain available in the
 `sessions` block of `GET /health`.
 
+## Other dashboard endpoints
+
+The endpoints below back internal dashboard/admin views rather than the
+external Nexus contract above. Their JSON shapes come straight from internal
+engines (router, scanner, governor, storage) and are typed + tagged
+`observability` in the FastAPI app (`src/loom/gateway/app.py`), so the
+authoritative field-by-field schema is always `GET /openapi.json` /
+Swagger `/docs` — this section is a map of what exists, not a full spec.
+
+| Method & path | Purpose |
+|---|---|
+| `GET /api/routing` | Routing-decision counters and tier breakdown (`RoutingEngine.get_stats()`) |
+| `GET /api/models` | Models known to the router with tier/cost metadata |
+| `GET /api/metrics` | Point-in-time gateway metrics snapshot |
+| `GET /api/metrics/timeseries?hours=&interval_minutes=` | Metrics as a time-bucketed series |
+| `GET /api/audit/{request_id}/content` | Full logged prompt/response for one audit entry (shape is whatever was captured at request time) |
+| `GET /api/config` | Secret-scrubbed view of the active `GatewayConfig` |
+| `PATCH /api/config/server` | Update server-level config fields — returns the full sanitized config |
+| `PUT /PATCH/DELETE /api/config/sources/{source_name}` | Create/update/delete a source policy — returns the full sanitized config |
+| `GET /api/scanner/rules` | Prompt-scanner rule list + skip config |
+| `PUT /api/scanner/rules/{name}` | Update a single scanner rule |
+| `GET /api/scanner/stats` | Scanner hit/detection counters (`{"enabled": false}` when the scanner is off) |
+| `GET /api/governor/status` | Throttle governor tier/state snapshot |
+| `GET/PATCH /api/governor` | Read/update governor settings (tier thresholds, per-job overrides) |
+| `DELETE /api/governor/class-overrides/{job}` | Remove a per-job-class governor override |
+| `GET /api/rate-limits` | Unified provider rate-limit headers — current values + trend |
+
 ## Implementations
 
 | Backend | Basis |
