@@ -118,6 +118,12 @@ class ServerConfig(BaseModel):
     port: int = 4000
     log_level: str = "info"
     display_timezone: str = "UTC"
+    # CORS is same-origin only by default (empty list) since the dashboard is
+    # served by the gateway itself. Credentials are only ever sent when
+    # explicit origins are configured — never combined with a wildcard.
+    cors_origins: list[str] = Field(default_factory=list)
+    rate_limit_requests: int = 200
+    rate_limit_window_seconds: int = 60
 
 
 class LoomConfig(BaseModel):

@@ -1181,16 +1181,24 @@ def create_app() -> FastAPI:
     app = FastAPI(title="Loom Gateway", version=__version__, lifespan=lifespan)
     app.state.gateway = GatewayState()
 
-    app.add_middleware(
-        CORSMiddleware,
-        allow_origins=["*"],
-        allow_credentials=True,
-        allow_methods=["*"],
-        allow_headers=["*"],
-        expose_headers=["X-Loom-Request-Id"],
-    )
+    config = LoomConfig.load()
+    cors_origins = config.server.cors_origins
+    if cors_origins:
+        # Credentials are only ever enabled alongside explicit origins —
+        # never combined with a wildcard, which browsers reject anyway.
+        app.add_middleware(
+            CORSMiddleware,
+            allow_origins=cors_origins,
+            allow_credentials=True,
+            allow_methods=["*"],
+            allow_headers=["*"],
+            expose_headers=["X-Loom-Request-Id"],
+        )
 
-    rate_limiter = _RateLimiter(max_requests=200, window_seconds=60)
+    rate_limiter = _RateLimiter(
+        max_requests=config.server.rate_limit_requests,
+        window_seconds=config.server.rate_limit_window_seconds,
+    )
 
     @app.middleware("http")
     async def rate_limit_middleware(request: Request, call_next):
