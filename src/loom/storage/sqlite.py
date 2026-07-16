@@ -18,7 +18,7 @@ import threading
 import time
 from typing import Any, Optional
 
-SCHEMA_VERSION = 7
+SCHEMA_VERSION = 8
 
 _FLUSH_INTERVAL_SECONDS = 2.0
 
@@ -284,14 +284,20 @@ class LoomStorage:
                     pass
 
         if current < 7:
-            # Measured per-request savings (estimated tokens removed by
-            # compression) — replaces the tokens_in-based derivation, which
-            # was wrong: tokens_in is the provider-reported POST-compression
-            # count, so tokens_in * (1/ratio - 1) wildly misestimated.
             try:
                 c.execute(
                     "ALTER TABLE metrics ADD COLUMN tokens_saved INTEGER DEFAULT 0"
                 )
+            except sqlite3.OperationalError:
+                pass
+
+        if current < 8:
+            try:
+                c.execute("ALTER TABLE metrics ADD COLUMN session_id TEXT")
+            except sqlite3.OperationalError:
+                pass
+            try:
+                c.execute("CREATE INDEX IF NOT EXISTS idx_metrics_session_id ON metrics (session_id)")
             except sqlite3.OperationalError:
                 pass
 
@@ -353,6 +359,7 @@ class LoomStorage:
         message_count: int = 0,
         source: Optional[str] = None,
         tokens_saved: int = 0,
+        session_id: Optional[str] = None,
     ) -> None:
         with self._write_lock:
             self.conn.execute(
@@ -361,8 +368,8 @@ class LoomStorage:
                     timestamp, request_id, model, requested_model, provider,
                     task_type, tokens_in, tokens_out,
                     latency_ms, cost_estimate, compressed, compression_ratio,
-                    message_count, source, tokens_saved
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    message_count, source, tokens_saved, session_id
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     time.time(),
@@ -380,6 +387,7 @@ class LoomStorage:
                     message_count,
                     source,
                     tokens_saved,
+                    session_id,
                 ),
             )
             self._schedule_flush()
@@ -855,9 +863,9 @@ class LoomStorage:
             like = f"%{search}%"
             where.append(
                 "(m.request_id LIKE ? OR m.model LIKE ? OR m.requested_model LIKE ? "
-                "OR r.routing_reason LIKE ? OR m.task_type LIKE ?)"
+                "OR r.routing_reason LIKE ? OR m.task_type LIKE ? OR m.session_id LIKE ?)"
             )
-            params.extend([like, like, like, like, like])
+            params.extend([like, like, like, like, like, like])
 
         clause = (" WHERE " + " AND ".join(where)) if where else ""
 
@@ -887,7 +895,8 @@ class LoomStorage:
                 m.cost_estimate    AS cost_estimate,
                 m.compressed       AS compressed,
                 m.compression_ratio AS compression_ratio,
-                r.routing_reason   AS routing_reason
+                r.routing_reason   AS routing_reason,
+                m.session_id       AS session_id
             FROM metrics m
             LEFT JOIN routing_decisions r ON m.request_id = r.request_id
             {clause}
@@ -916,6 +925,7 @@ class LoomStorage:
                 if r["compression_ratio"] is not None
                 else 1.0,
                 "status": "success",
+                "session_id": r["session_id"] if r["session_id"] else None,
             }
             for r in rows
         ]

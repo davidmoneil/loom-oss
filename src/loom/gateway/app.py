@@ -236,6 +236,7 @@ def _record_request(
     compression_ratio: float = 1.0,
     tokens_saved: int = 0,
     ratelimit: Optional[dict] = None,
+    session_id: Optional[str] = None,
 ) -> None:
     """Persist + audit a completed request. Never raises into the request path."""
     tokens_in, tokens_out = _extract_tokens(usage)
@@ -256,6 +257,7 @@ def _record_request(
                 compressed=compressed,
                 compression_ratio=compression_ratio,
                 tokens_saved=tokens_saved,
+                session_id=session_id,
             )
         except Exception:
             pass
@@ -1169,6 +1171,7 @@ def create_app() -> FastAPI:
                     round(comp_after / comp_before, 4) if comp_before > 0 else 1.0
                 ),
                 "tokens_saved": max(comp_before - comp_after, 0),
+                "session_id": session_id if session_id != "unknown" else None,
             }
 
             if stream:
@@ -1335,6 +1338,7 @@ def create_app() -> FastAPI:
                     round(comp_after / comp_before, 4) if comp_before > 0 else 1.0
                 ),
                 "tokens_saved": max(comp_before - comp_after, 0),
+                "session_id": session_id if session_id != "unknown" else None,
             }
 
             if stream:
