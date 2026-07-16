@@ -84,3 +84,37 @@ def test_cost_summary_with_data(tmp_path):
     assert summary["by_source"][0]["source"] == "pytest"
     assert len(summary["by_day"]) == 1
     assert len(summary["by_hour"]) == 1
+
+
+def test_observability_routes_are_tagged_and_typed():
+    """Guard against regression: every dashboard/observability endpoint must
+    declare a response_model and an "observability" tag so /docs stays an
+    accurate API contract. LLM-proxy endpoints (chat/completions, generate,
+    etc.) are intentionally excluded - they aren't part of the dashboard API.
+    """
+    proxy_paths = {
+        "/v1/chat/completions",
+        "/v1/messages/count_tokens",
+        "/v1/messages",
+        "/api/generate",
+        "/api/chat",
+        "/api/tags",
+        "/api/show",
+        "/v1/compress",
+        "/v1/detect",
+    }
+    app = _client().app
+    untagged = []
+    for route in app.routes:
+        path = getattr(route, "path", None)
+        if path is None or path in proxy_paths:
+            continue
+        if not (path == "/health" or path.startswith("/api/")):
+            continue
+        if not getattr(route, "include_in_schema", True):
+            continue
+        if "observability" not in (route.tags or []):
+            untagged.append((path, "missing observability tag"))
+        if route.response_model is None:
+            untagged.append((path, "missing response_model"))
+    assert not untagged, f"Observability routes missing tags/response_model: {untagged}"

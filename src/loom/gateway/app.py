@@ -50,6 +50,25 @@ from .providers import (
     ProviderBackend,
     ProviderError,
 )
+from loom.gateway.schemas import (
+    AuditContentResponse,
+    AuditPageResponse,
+    ConfigResponse,
+    CostSummaryResponse,
+    GovernorOverrideDeleteResponse,
+    GovernorSettingsResponse,
+    GovernorStatusResponse,
+    HealthResponse,
+    MetricsResponse,
+    MetricsTimeseriesResponse,
+    ModelListResponse,
+    RateLimitResponse,
+    RoutingStatsResponse,
+    ScannerRuleUpdateResponse,
+    ScannerRulesResponse,
+    ScannerStatsResponse,
+    SessionListResponse,
+)
 
 # --- Optional engines (owned by sibling agents) -----------------------------
 # Imported defensively so a missing/in-progress module cannot stop the gateway.
@@ -1790,7 +1809,12 @@ def create_app() -> FastAPI:
         return JSONResponse({"request_id": request_id, **_jsonable(result)})
 
     # ------------------------------------------------------------------- health
-    @app.get("/health")
+    @app.get(
+        "/health",
+        response_model=HealthResponse,
+        tags=["observability"],
+        summary="Gateway health check",
+    )
     async def health():
         gw = state()
         return {
@@ -1834,7 +1858,12 @@ def create_app() -> FastAPI:
         entry = gw.model_index.get(model)
         return entry[1].cost_per_1k_input if entry else 0.0
 
-    @app.get("/api/costs")
+    @app.get(
+        "/api/costs",
+        response_model=CostSummaryResponse,
+        tags=["observability"],
+        summary="Cost summary (window totals + breakdowns by model/source/day)",
+    )
     async def api_costs(days: int = 30):
         gw = state()
         empty = {
@@ -1882,7 +1911,12 @@ def create_app() -> FastAPI:
         except Exception:
             return {"supported": False, "sessions": 0, "total_turns": 0}
 
-    @app.get("/api/sessions")
+    @app.get(
+        "/api/sessions",
+        response_model=SessionListResponse,
+        tags=["observability"],
+        summary="List recent sessions (paginated)",
+    )
     async def api_sessions(hours: int = 24):
         gw = state()
         block = _session_stats_block(gw, hours=hours)
@@ -1895,7 +1929,12 @@ def create_app() -> FastAPI:
         return {**block, "hours": hours, "entries": entries}
 
     # -------------------------------------------------------------- routing log
-    @app.get("/api/routing")
+    @app.get(
+        "/api/routing",
+        response_model=RoutingStatsResponse,
+        tags=["observability"],
+        summary="Routing decision stats and tier breakdown",
+    )
     async def api_routing(hours: int = 24, limit: int = 200):
         gw = state()
         if gw.storage is None:
@@ -1906,7 +1945,12 @@ def create_app() -> FastAPI:
             return {"available": False, "hours": hours, "total": 0, "entries": [], "by_reason": {}, "overrides": 0}
 
     # ------------------------------------------------------------------- models
-    @app.get("/api/models")
+    @app.get(
+        "/api/models",
+        response_model=ModelListResponse,
+        tags=["observability"],
+        summary="List models known to the router with tier/cost metadata",
+    )
     async def api_models():
         gw = state()
         models = []
@@ -1928,7 +1972,12 @@ def create_app() -> FastAPI:
         return {"object": "list", "data": models}
 
     # ------------------------------------------------------------------ metrics
-    @app.get("/api/metrics")
+    @app.get(
+        "/api/metrics",
+        response_model=MetricsResponse,
+        tags=["observability"],
+        summary="Point-in-time gateway metrics snapshot",
+    )
     async def api_metrics(hours: int = 24):
         gw = state()
         if gw.storage is None:
@@ -1939,7 +1988,12 @@ def create_app() -> FastAPI:
             return {"available": False, "metrics": {}}
 
     # -------------------------------------------------------- metrics timeseries
-    @app.get("/api/metrics/timeseries")
+    @app.get(
+        "/api/metrics/timeseries",
+        response_model=MetricsTimeseriesResponse,
+        tags=["observability"],
+        summary="Gateway metrics as a time-bucketed series",
+    )
     async def api_metrics_timeseries(hours: int = 24, bucket: str = "1h"):
         gw = state()
         empty = {
@@ -1960,7 +2014,12 @@ def create_app() -> FastAPI:
             return empty
 
     # ------------------------------------------------------------------- audit
-    @app.get("/api/audit")
+    @app.get(
+        "/api/audit",
+        response_model=AuditPageResponse,
+        tags=["observability"],
+        summary="List audit log entries (paginated)",
+    )
     async def api_audit(
         limit: int = 50,
         offset: int = 0,
@@ -1992,7 +2051,12 @@ def create_app() -> FastAPI:
         except Exception:
             return {"total": 0, "offset": offset, "limit": limit, "entries": []}
 
-    @app.get("/api/audit/{request_id}/content")
+    @app.get(
+        "/api/audit/{request_id}/content",
+        response_model=AuditContentResponse,
+        tags=["observability"],
+        summary="Fetch the full logged prompt/response content for one audit entry",
+    )
     async def api_audit_content(request_id: str):
         gw = state()
         if gw.audit is None:
@@ -2017,12 +2081,22 @@ def create_app() -> FastAPI:
         return match
 
     # ------------------------------------------------------------------- config
-    @app.get("/api/config")
+    @app.get(
+        "/api/config",
+        response_model=ConfigResponse,
+        tags=["observability"],
+        summary="Secret-scrubbed view of the active gateway config",
+    )
     async def api_config():
         gw = state()
         return _sanitized_config(gw.config)
 
-    @app.patch("/api/config/server")
+    @app.patch(
+        "/api/config/server",
+        response_model=ConfigResponse,
+        tags=["observability"],
+        summary="Update server-level config fields (returns full sanitized config)",
+    )
     async def api_update_server_config(request: Request):
         gw = state()
         try:
@@ -2037,7 +2111,12 @@ def create_app() -> FastAPI:
             setattr(gw.config.server, k, v)
         return _sanitized_config(gw.config)
 
-    @app.patch("/api/config/sources/{source_name}")
+    @app.patch(
+        "/api/config/sources/{source_name}",
+        response_model=ConfigResponse,
+        tags=["observability"],
+        summary="Update a source policy (returns full sanitized config)",
+    )
     async def api_update_source_policy(source_name: str, request: Request):
         gw = state()
         try:
@@ -2059,7 +2138,12 @@ def create_app() -> FastAPI:
             setattr(policy, k, v)
         return _sanitized_config(gw.config)
 
-    @app.put("/api/config/sources/{source_name}")
+    @app.put(
+        "/api/config/sources/{source_name}",
+        response_model=ConfigResponse,
+        tags=["observability"],
+        summary="Create a source policy (returns full sanitized config)",
+    )
     async def api_create_source_policy(source_name: str, request: Request):
         gw = state()
         try:
@@ -2075,7 +2159,12 @@ def create_app() -> FastAPI:
         gw.config.sources[source_name] = SourcePolicy(**fields)
         return _sanitized_config(gw.config)
 
-    @app.delete("/api/config/sources/{source_name}")
+    @app.delete(
+        "/api/config/sources/{source_name}",
+        response_model=ConfigResponse,
+        tags=["observability"],
+        summary="Delete a source policy (returns full sanitized config)",
+    )
     async def api_delete_source_policy(source_name: str):
         gw = state()
         if source_name not in gw.config.sources:
@@ -2084,7 +2173,12 @@ def create_app() -> FastAPI:
         return _sanitized_config(gw.config)
 
     # -------------------------------------------------------- scanner management
-    @app.get("/api/scanner/rules")
+    @app.get(
+        "/api/scanner/rules",
+        response_model=ScannerRulesResponse,
+        tags=["observability"],
+        summary="List prompt-scanner rules and skip config",
+    )
     async def api_scanner_rules():
         gw = state()
         if gw.scanner is None:
@@ -2095,7 +2189,12 @@ def create_app() -> FastAPI:
             "skip_config": gw.scanner.skip_config(),
         }
 
-    @app.put("/api/scanner/rules/{name}")
+    @app.put(
+        "/api/scanner/rules/{name}",
+        response_model=ScannerRuleUpdateResponse,
+        tags=["observability"],
+        summary="Update a single prompt-scanner rule",
+    )
     async def api_scanner_update_rule(name: str, request: Request):
         gw = state()
         if gw.scanner is None:
@@ -2112,7 +2211,12 @@ def create_app() -> FastAPI:
             return {"status": "updated", "rule": name, "updates": updates}
         return JSONResponse({"error": f"rule '{name}' not found"}, status_code=404)
 
-    @app.get("/api/scanner/stats")
+    @app.get(
+        "/api/scanner/stats",
+        response_model=ScannerStatsResponse,
+        tags=["observability"],
+        summary="Prompt-scanner hit/detection counters",
+    )
     async def api_scanner_stats():
         gw = state()
         if gw.scanner is None:
@@ -2120,21 +2224,36 @@ def create_app() -> FastAPI:
         return {"enabled": gw.scanner.enabled, **gw.scanner.stats()}
 
     # ----------------------------------------------------------- governor
-    @app.get("/api/governor/status")
+    @app.get(
+        "/api/governor/status",
+        response_model=GovernorStatusResponse,
+        tags=["observability"],
+        summary="Throttle governor tier/state snapshot",
+    )
     async def api_governor_status():
         gw = state()
         if gw.governor is None:
             return JSONResponse({"error": "governor not available"}, status_code=503)
         return gw.governor.status()
 
-    @app.get("/api/governor")
+    @app.get(
+        "/api/governor",
+        response_model=GovernorSettingsResponse,
+        tags=["observability"],
+        summary="Get throttle governor settings",
+    )
     async def api_governor_get():
         gw = state()
         if gw.governor is None:
             return JSONResponse({"error": "governor not available"}, status_code=503)
         return gw.governor.get_settings()
 
-    @app.patch("/api/governor")
+    @app.patch(
+        "/api/governor",
+        response_model=GovernorSettingsResponse,
+        tags=["observability"],
+        summary="Update throttle governor settings",
+    )
     async def api_governor_update(request: Request):
         gw = state()
         if gw.governor is None:
@@ -2152,7 +2271,12 @@ def create_app() -> FastAPI:
         except GovernorValidationError as e:
             return JSONResponse({"error": str(e)}, status_code=400)
 
-    @app.delete("/api/governor/class-overrides/{job}")
+    @app.delete(
+        "/api/governor/class-overrides/{job}",
+        response_model=GovernorOverrideDeleteResponse,
+        tags=["observability"],
+        summary="Remove a per-job-class governor override",
+    )
     async def api_governor_delete_override(job: str):
         gw = state()
         if gw.governor is None:
@@ -2160,7 +2284,12 @@ def create_app() -> FastAPI:
         return gw.governor.delete_class_override(job, actor="dashboard")
 
     # ----------------------------------------------------------- rate limits
-    @app.get("/api/rate-limits")
+    @app.get(
+        "/api/rate-limits",
+        response_model=RateLimitResponse,
+        tags=["observability"],
+        summary="Unified provider rate-limit headers (current + trend)",
+    )
     async def api_rate_limits(hours: int = 48, provider: str = "anthropic"):
         gw = state()
         if gw.storage is None:
