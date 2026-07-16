@@ -1,6 +1,8 @@
 import { useEffect } from "react";
 import { NavLink, Outlet } from "react-router-dom";
 import { api, setDisplayTimezone } from "../api.js";
+import { FEATURE_STATUS } from "../featureStatus.js";
+import FeatureStatusBanner from "./FeatureStatusBanner.jsx";
 
 const NAV = [
   { to: "/", label: "Overview", end: true, icon: GridIcon },
@@ -51,6 +53,14 @@ export default function Layout() {
             >
               <Icon />
               <span className="hidden md:inline">{label}</span>
+              {FEATURE_STATUS[to] && (
+                <span
+                  className="ml-auto hidden rounded bg-amber-500/15 px-1.5 py-0.5 text-[10px] font-semibold text-amber-400 md:inline"
+                  title={FEATURE_STATUS[to].summary}
+                >
+                  {FEATURE_STATUS[to].badge}
+                </span>
+              )}
             </NavLink>
           ))}
         </nav>
@@ -68,6 +78,7 @@ export default function Layout() {
         </div>
       </aside>
       <main className="flex-1 overflow-x-hidden">
+        <FeatureStatusBanner />
         <Outlet />
       </main>
     </div>

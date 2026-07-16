@@ -30,3 +30,32 @@ jobs:
         run: |
           cp loom.example.yaml loom.yaml
           docker compose config --quiet
+
+  security-python:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Install
+        run: |
+          pip install --upgrade pip setuptools
+          pip install -e .
+      - name: Audit Python dependencies (fail on any known vulnerability)
+        run: |
+          pip install pip-audit
+          pip-audit
+
+  security-dashboard:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+      - name: Audit dashboard dependencies (fail on high/critical)
+        working-directory: dashboard
+        run: |
+          npm ci
+          npm audit --audit-level=high
