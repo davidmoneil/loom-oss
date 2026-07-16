@@ -1,0 +1,341 @@
+{
+  "tier": "medium",
+  "rows": [
+    {
+      "payload": "conversation-0",
+      "internal": {
+        "payload": "conversation-0",
+        "status": 401,
+        "tokens_before": 8911,
+        "tokens_after": 2499,
+        "tokens_saved": 6412,
+        "ratio": 0.7196,
+        "contaminated": false
+      },
+      "oss": {
+        "payload": "conversation-0",
+        "status": 401,
+        "tokens_before": 11524,
+        "tokens_after": 6585,
+        "tokens_saved": 4939,
+        "ratio": 0.4286,
+        "contaminated": false
+      },
+      "delta": -0.2297
+    },
+    {
+      "payload": "conversation-1",
+      "internal": {
+        "payload": "conversation-1",
+        "status": 401,
+        "tokens_before": 10458,
+        "tokens_after": 3023,
+        "tokens_saved": 7435,
+        "ratio": 0.7109,
+        "contaminated": false
+      },
+      "oss": {
+        "payload": "conversation-1",
+        "status": 401,
+        "tokens_before": 13607,
+        "tokens_after": 7663,
+        "tokens_saved": 5944,
+        "ratio": 0.4368,
+        "contaminated": false
+      },
+      "delta": -0.2005
+    },
+    {
+      "payload": "conversation-2",
+      "internal": {
+        "payload": "conversation-2",
+        "status": 401,
+        "tokens_before": 12058,
+        "tokens_after": 3652,
+        "tokens_saved": 8406,
+        "ratio": 0.6971,
+        "contaminated": false
+      },
+      "oss": {
+        "payload": "conversation-2",
+        "status": 401,
+        "tokens_before": 15727,
+        "tokens_after": 8803,
+        "tokens_saved": 6924,
+        "ratio": 0.4403,
+        "contaminated": false
+      },
+      "delta": -0.1763
+    },
+    {
+      "payload": "conversation-3",
+      "internal": {
+        "payload": "conversation-3",
+        "status": 401,
+        "tokens_before": 13619,
+        "tokens_after": 4192,
+        "tokens_saved": 9427,
+        "ratio": 0.6922,
+        "contaminated": false
+      },
+      "oss": {
+        "payload": "conversation-3",
+        "status": 401,
+        "tokens_before": 17808,
+        "tokens_after": 9870,
+        "tokens_saved": 7938,
+        "ratio": 0.4458,
+        "contaminated": false
+      },
+      "delta": -0.158
+    },
+    {
+      "payload": "conversation-4",
+      "internal": {
+        "payload": "conversation-4",
+        "status": 401,
+        "tokens_before": 15214,
+        "tokens_after": 4840,
+        "tokens_saved": 10374,
+        "ratio": 0.6819,
+        "contaminated": false
+      },
+      "oss": {
+        "payload": "conversation-4",
+        "status": 401,
+        "tokens_before": 19931,
+        "tokens_after": 10986,
+        "tokens_saved": 8945,
+        "ratio": 0.4488,
+        "contaminated": false
+      },
+      "delta": -0.1377
+    },
+    {
+      "payload": "tool-heavy-0",
+      "internal": {
+        "payload": "tool-heavy-0",
+        "status": 401,
+        "tokens_before": 7670,
+        "tokens_after": 2023,
+        "tokens_saved": 5647,
+        "ratio": 0.7362,
+        "contaminated": false
+      },
+      "oss": {
+        "payload": "tool-heavy-0",
+        "status": 401,
+        "tokens_before": 9905,
+        "tokens_after": 2661,
+        "tokens_saved": 7244,
+        "ratio": 0.7313,
+        "contaminated": false
+      },
+      "delta": 0.2828
+    },
+    {
+      "payload": "tool-heavy-1",
+      "internal": {
+        "payload": "tool-heavy-1",
+        "status": 401,
+        "tokens_before": 11271,
+        "tokens_after": 3844,
+        "tokens_saved": 7427,
+        "ratio": 0.6589,
+        "contaminated": false
+      },
+      "oss": {
+        "payload": "tool-heavy-1",
+        "status": 401,
+        "tokens_before": 13734,
+        "tokens_after": 4641,
+        "tokens_saved": 9093,
+        "ratio": 0.6621,
+        "contaminated": false
+      },
+      "delta": 0.2243
+    },
+    {
+      "payload": "tool-heavy-2",
+      "internal": {
+        "payload": "tool-heavy-2",
+        "status": 401,
+        "tokens_before": 13233,
+        "tokens_after": 3978,
+        "tokens_saved": 9255,
+        "ratio": 0.6994,
+        "contaminated": false
+      },
+      "oss": {
+        "payload": "tool-heavy-2",
+        "status": 401,
+        "tokens_before": 17605,
+        "tokens_after": 6695,
+        "tokens_saved": 10910,
+        "ratio": 0.6197,
+        "contaminated": false
+      },
+      "delta": 0.1788
+    },
+    {
+      "payload": "tool-heavy-3",
+      "internal": {
+        "payload": "tool-heavy-3",
+        "status": 401,
+        "tokens_before": 16854,
+        "tokens_after": 5771,
+        "tokens_saved": 11083,
+        "ratio": 0.6576,
+        "contaminated": false
+      },
+      "oss": {
+        "payload": "tool-heavy-3",
+        "status": 401,
+        "tokens_before": 21443,
+        "tokens_after": 6933,
+        "tokens_saved": 14510,
+        "ratio": 0.6767,
+        "contaminated": false
+      },
+      "delta": 0.3092
+    },
+    {
+      "payload": "tool-heavy-4",
+      "internal": {
+        "payload": "tool-heavy-4",
+        "status": 401,
+        "tokens_before": 18802,
+        "tokens_after": 5890,
+        "tokens_saved": 12912,
+        "ratio": 0.6867,
+        "contaminated": false
+      },
+      "oss": {
+        "payload": "tool-heavy-4",
+        "status": 401,
+        "tokens_before": 25323,
+        "tokens_after": 8975,
+        "tokens_saved": 16348,
+        "ratio": 0.6456,
+        "contaminated": false
+      },
+      "delta": 0.2661
+    },
+    {
+      "payload": "mixed-0",
+      "internal": {
+        "payload": "mixed-0",
+        "status": 401,
+        "tokens_before": 8090,
+        "tokens_after": 3241,
+        "tokens_saved": 4849,
+        "ratio": 0.5994,
+        "contaminated": false
+      },
+      "oss": {
+        "payload": "mixed-0",
+        "status": 401,
+        "tokens_before": 10108,
+        "tokens_after": 4186,
+        "tokens_saved": 5922,
+        "ratio": 0.5859,
+        "contaminated": false
+      },
+      "delta": 0.2213
+    },
+    {
+      "payload": "mixed-1",
+      "internal": {
+        "payload": "mixed-1",
+        "status": 502,
+        "tokens_before": 8697,
+        "tokens_after": 2352,
+        "tokens_saved": 6345,
+        "ratio": 0.7296,
+        "contaminated": false
+      },
+      "oss": {
+        "payload": "mixed-1",
+        "status": 401,
+        "tokens_before": 11942,
+        "tokens_after": 4532,
+        "tokens_saved": 7410,
+        "ratio": 0.6205,
+        "contaminated": false
+      },
+      "delta": 0.1678
+    },
+    {
+      "payload": "mixed-2",
+      "internal": {
+        "payload": "mixed-2",
+        "status": 401,
+        "tokens_before": 10277,
+        "tokens_after": 3742,
+        "tokens_saved": 6535,
+        "ratio": 0.6359,
+        "contaminated": false
+      },
+      "oss": {
+        "payload": "mixed-2",
+        "status": 401,
+        "tokens_before": 13796,
+        "tokens_after": 6154,
+        "tokens_saved": 7642,
+        "ratio": 0.5539,
+        "contaminated": false
+      },
+      "delta": 0.1694
+    },
+    {
+      "payload": "mixed-3",
+      "internal": {
+        "payload": "mixed-3",
+        "status": 401,
+        "tokens_before": 11670,
+        "tokens_after": 3616,
+        "tokens_saved": 8054,
+        "ratio": 0.6901,
+        "contaminated": false
+      },
+      "oss": {
+        "payload": "mixed-3",
+        "status": 401,
+        "tokens_before": 15635,
+        "tokens_after": 6502,
+        "tokens_saved": 9133,
+        "ratio": 0.5841,
+        "contaminated": false
+      },
+      "delta": 0.134
+    },
+    {
+      "payload": "mixed-4",
+      "internal": {
+        "payload": "mixed-4",
+        "status": 401,
+        "tokens_before": 12259,
+        "tokens_after": 4036,
+        "tokens_saved": 8223,
+        "ratio": 0.6708,
+        "contaminated": false
+      },
+      "oss": {
+        "payload": "mixed-4",
+        "status": 401,
+        "tokens_before": 17462,
+        "tokens_after": 6941,
+        "tokens_saved": 10521,
+        "ratio": 0.6025,
+        "contaminated": false
+      },
+      "delta": 0.2795
+    }
+  ],
+  "aggregate": {
+    "internal_tokens_saved": 122384,
+    "oss_tokens_saved": 133423,
+    "delta": 0.0902,
+    "verdict": "PASS"
+  }
+}
