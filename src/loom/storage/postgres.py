@@ -17,7 +17,7 @@ from typing import Any, Optional
 
 logger = logging.getLogger("loom.storage.postgres")
 
-SCHEMA_VERSION = 6
+SCHEMA_VERSION = 7
 
 
 class PostgresStorage:
@@ -244,6 +244,13 @@ class PostgresStorage:
                 except Exception:
                     pass
 
+        if current < 7:
+            # Measured per-request compression savings (see sqlite.py note).
+            conn.execute(
+                "ALTER TABLE metrics ADD COLUMN IF NOT EXISTS "
+                "tokens_saved INTEGER DEFAULT 0"
+            )
+
         if current < SCHEMA_VERSION:
             conn.execute(
                 "INSERT INTO schema_version (version, applied_at) VALUES (%s, %s) "
@@ -299,6 +306,7 @@ class PostgresStorage:
         task_type: Optional[str] = None,
         message_count: int = 0,
         source: Optional[str] = None,
+        tokens_saved: int = 0,
     ) -> None:
         self.conn.execute(
             """
@@ -306,8 +314,8 @@ class PostgresStorage:
                 timestamp, request_id, model, requested_model, provider,
                 task_type, tokens_in, tokens_out,
                 latency_ms, cost_estimate, compressed, compression_ratio,
-                message_count, source
-            ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                message_count, source, tokens_saved
+            ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
             """,
             (
                 time.time(),
@@ -324,6 +332,7 @@ class PostgresStorage:
                 compression_ratio,
                 message_count,
                 source,
+                tokens_saved,
             ),
         )
 
@@ -537,18 +546,16 @@ class PostgresStorage:
             for r in rows
         ]
 
-    _TOKENS_SAVED_SQL = (
-        "COALESCE(SUM(CASE WHEN compressed = 1 AND compression_ratio > 0 "
-        "AND compression_ratio < 1 "
-        "THEN CAST(tokens_in * (1.0 / compression_ratio - 1.0) AS INTEGER) "
-        "ELSE 0 END), 0)"
-    )
+    # Measured savings recorded at compression time. (The old derivation
+    # tokens_in * (1/ratio - 1) was wrong — tokens_in is the provider-reported
+    # POST-compression count.)
+    _TOKENS_SAVED_SQL = "COALESCE(SUM(COALESCE(tokens_saved, 0)), 0)"
 
     def get_cost_summary(self, days: int = 30) -> dict:
         """Aggregates for the observability /api/costs contract.
 
-        compression_ratio is tokens_after / tokens_before, so the saved-token
-        estimate per row is tokens_in * (1/ratio - 1) for compressed rows.
+        tokens_saved sums the per-request measured savings recorded by the
+        gateway at compression time.
         """
         since = time.time() - days * 86400
         hour_since = time.time() - 24 * 3600

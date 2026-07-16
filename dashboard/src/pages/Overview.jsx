@@ -189,6 +189,104 @@ export default function Overview() {
       </div>
 
       <ProviderHealth health={health} loading={loading} />
+      <CompressionPanel compression={health?.compression} loading={loading} />
+    </div>
+  );
+}
+
+const COMPRESSION_TIER_COLORS = {
+  light: "bg-green-500/20 text-green-400 border-green-500/30",
+  medium: "bg-blue-500/20 text-blue-400 border-blue-500/30",
+  heavy: "bg-orange-500/20 text-orange-400 border-orange-500/30",
+  extreme: "bg-red-500/20 text-red-400 border-red-500/30",
+};
+
+const BLOCK_TYPE_LABELS = {
+  tool_result: "Tool Result",
+  tool_use: "Tool Use",
+  text: "Text",
+  message: "Message",
+};
+
+function fmtPct(ratio) {
+  if (ratio === null || ratio === undefined) return "—";
+  return `${(ratio * 100).toFixed(1)}%`;
+}
+
+function CompressionPanel({ compression, loading }) {
+  if (loading) {
+    return (
+      <div className="mt-6 rounded-lg border border-border bg-card p-4">
+        <h3 className="mb-3 text-sm font-semibold text-gray-200">Compression</h3>
+        <div className="skeleton h-24 w-full" />
+      </div>
+    );
+  }
+
+  if (!compression) {
+    return null;
+  }
+
+  const byBlockType = Object.entries(compression.by_block_type || {});
+
+  return (
+    <div className="mt-6 rounded-lg border border-border bg-card p-4">
+      <div className="mb-3 flex flex-wrap items-center justify-between gap-2">
+        <h3 className="text-sm font-semibold text-gray-200">Compression</h3>
+        <div className="flex items-center gap-2">
+          <span
+            className={`inline-flex items-center gap-1.5 rounded border px-2 py-0.5 text-xs font-medium ${
+              COMPRESSION_TIER_COLORS[compression.default_tier] ||
+              "bg-gray-700/50 text-gray-400 border-border"
+            }`}
+          >
+            <span
+              className={`h-2 w-2 rounded-full ${compression.enabled ? "bg-green-400" : "bg-gray-500"}`}
+            />
+            {compression.default_tier || "unknown"}
+          </span>
+        </div>
+      </div>
+
+      <div className="grid grid-cols-2 gap-4 lg:grid-cols-4">
+        <StatCard label="Tokens Before" value={fmtNumber(compression.tokens_before)} />
+        <StatCard label="Tokens After" value={fmtNumber(compression.tokens_after)} />
+        <StatCard label="Tokens Saved" value={fmtNumber(compression.tokens_saved)} />
+        <StatCard label="Compression Ratio" value={fmtPct(compression.compression_ratio)} />
+      </div>
+
+      {byBlockType.length > 0 && (
+        <div className="mt-4 overflow-x-auto rounded-lg border border-border">
+          <table className="w-full text-left text-sm">
+            <thead className="bg-card text-xs uppercase tracking-wide text-gray-400">
+              <tr>
+                <th className="px-3 py-2 font-medium">Block Type</th>
+                <th className="px-3 py-2 text-right font-medium">Before</th>
+                <th className="px-3 py-2 text-right font-medium">After</th>
+                <th className="px-3 py-2 text-right font-medium">Saved</th>
+              </tr>
+            </thead>
+            <tbody className="divide-y divide-border">
+              {byBlockType.map(([type, v]) => (
+                <tr key={type} className="bg-base hover:bg-gray-800/40">
+                  <td className="px-3 py-2 text-gray-300">
+                    {BLOCK_TYPE_LABELS[type] || type}
+                  </td>
+                  <td className="px-3 py-2 text-right tabular-nums text-gray-400">
+                    {fmtNumber(v.tokens_before)}
+                  </td>
+                  <td className="px-3 py-2 text-right tabular-nums text-gray-400">
+                    {fmtNumber(v.tokens_after)}
+                  </td>
+                  <td className="px-3 py-2 text-right tabular-nums text-gray-200">
+                    {fmtNumber(v.tokens_saved)}
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
     </div>
   );
 }

@@ -1236,6 +1236,85 @@ class ContentProcessor:
         return "\n".join(result)
 
     def _compress_prose(self, content: str) -> str:
+        """Prose compression: LLM summarization when enabled, else extractive.
+
+        The LLM path is opt-in (compression.llm_prose) and any failure —
+        endpoint down, timeout, empty response — falls back to the
+        extractive path so the request never depends on the local model.
+        """
+        comp_cfg = getattr(self._config, "compression", None)
+        if comp_cfg is not None and getattr(comp_cfg, "llm_prose", False):
+            try:
+                return self._llm_compress_prose(content, comp_cfg)
+            except Exception as exc:
+                logger.warning(
+                    "LLM prose compression failed (%s), using extractive", exc
+                )
+        return self._extractive_prose(content)
+
+    def _llm_compress_prose(self, content: str, comp_cfg: Any) -> str:
+        """Summarize prose via an Ollama or OpenAI-compatible endpoint.
+
+        Mirrors the internal content_processor: facts, decisions, and status
+        signals must survive; the model is instructed accordingly and the
+        result is rejected (raising, so the caller falls back) when empty
+        or longer than the input.
+        """
+        import urllib.request
+
+        truncated = content[:4000]
+        prompt = (
+            "Compress the following text to its key facts, decisions, and "
+            "specific values. CRITICAL: Preserve these exactly — exit codes, "
+            "success/failure status, task counts (e.g. '0 tasks found'), "
+            "file paths written to, and completion indicators (done, closed, "
+            "skipped, failed). Preserve code blocks and numbers exactly. "
+            "Output only the compressed text, nothing else.\n\n"
+            f"{truncated}"
+        )
+
+        base = getattr(comp_cfg, "llm_url", "http://localhost:11434").rstrip("/")
+        model = getattr(comp_cfg, "llm_model", "qwen2.5:7b")
+        timeout = float(getattr(comp_cfg, "llm_timeout_seconds", 30.0))
+
+        if base.endswith("/v1") or "/v1/" in base:
+            # OpenAI-compatible endpoint
+            url = f"{base.rstrip('/v1').rstrip('/')}/v1/chat/completions"
+            payload = json.dumps({
+                "model": model,
+                "messages": [{"role": "user", "content": prompt}],
+                "temperature": 0.0,
+            }).encode()
+        else:
+            # Ollama native endpoint
+            url = f"{base}/api/generate"
+            payload = json.dumps({
+                "model": model,
+                "prompt": prompt,
+                "temperature": 0.0,
+                "stream": False,
+            }).encode()
+
+        req = urllib.request.Request(
+            url, data=payload, headers={"Content-Type": "application/json"}
+        )
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            data = json.loads(resp.read())
+
+        if "choices" in data:
+            result = data["choices"][0]["message"]["content"].strip()
+        else:
+            result = data.get("response", "").strip()
+        # Reasoning models (qwen3 family) may wrap deliberation in <think>
+        # tags — keep only the answer.
+        result = re.sub(r"<think>.*?</think>", "", result, flags=re.DOTALL).strip()
+        if not result:
+            raise ValueError("empty LLM response")
+        if len(result) >= len(content):
+            raise ValueError("LLM output not smaller than input")
+        return result
+
+    def _extractive_prose(self, content: str) -> str:
         """Extractive prose compression: first sentence of each paragraph.
 
         Code blocks and indented blocks are preserved verbatim.
