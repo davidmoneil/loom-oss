@@ -15,7 +15,7 @@ echo
 # ---------------------------------------------------------------- loom.yaml
 if [[ -f loom.yaml ]]; then
     read -r -p "loom.yaml already exists — overwrite with the example config? [y/N] " ans
-    if [[ "${ans,,}" == "y" ]]; then
+    if [[ "$ans" == [Yy] ]]; then
         cp loom.example.yaml loom.yaml
         info "loom.yaml reset from loom.example.yaml"
     else
@@ -66,7 +66,7 @@ esac
 echo
 if [[ -f .env ]]; then
     read -r -p ".env already exists — overwrite? [y/N] " ans
-    if [[ "${ans,,}" != "y" ]]; then
+    if [[ "$ans" != [Yy] ]]; then
         bold ".env left untouched — add these lines yourself:"
         printf '  %s\n' "${ENV_LINES[@]}"
         exit 0
@@ -79,7 +79,7 @@ info "wrote .env"
 # ------------------------------------------------------------------- launch
 echo
 read -r -p "Build and start the gateway now with docker compose? [Y/n] " ans
-if [[ "${ans,,}" == "n" ]]; then
+if [[ "$ans" == [Nn] ]]; then
     bold "Done. Start it later with: docker compose up -d --build"
     exit 0
 fi
