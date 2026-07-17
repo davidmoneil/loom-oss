@@ -193,7 +193,9 @@ export default function Settings() {
             <div>
               <span className="text-sm text-white">Log level</span>
               <p className="text-xs text-gray-500">
-                Controls verbosity for the gateway and uvicorn access logs. Applies immediately.
+                Controls verbosity of server operational logs (startup, routing decisions, errors).
+                Visible in <span className="font-mono">docker logs</span> or the log file.
+                Does not affect audit logs, request tracking, or dashboard data.
               </p>
             </div>
             <select
@@ -224,7 +226,11 @@ export default function Settings() {
           <div className="flex items-center justify-between">
             <div>
               <span className="text-sm text-white">Log format</span>
-              <p className="text-xs text-gray-500">Plain text or structured JSON lines.</p>
+              <p className="text-xs text-gray-500">
+                Format for server operational logs only. Plain is human-readable
+                (<span className="font-mono">docker logs</span>); JSON is for log aggregation tools (ELK, Loki).
+                Audit and request logs are always JSONL regardless of this setting.
+              </p>
             </div>
             <select
               value={config?.server?.log_format || "plain"}
@@ -255,7 +261,10 @@ export default function Settings() {
             <div>
               <span className="text-sm text-white">Log destination</span>
               <p className="text-xs text-gray-500">
-                Write logs to stderr (container logs) or to a file ({config?.server?.log_file || "logs/loom.log"}).
+                Where server operational logs are written. Use stderr for Docker
+                (<span className="font-mono">docker logs</span>) or file for bare-metal deployments
+                ({config?.server?.log_file || "logs/loom.log"}).
+                Audit and request logs always write to their own JSONL files regardless of this setting.
               </p>
             </div>
             <select
