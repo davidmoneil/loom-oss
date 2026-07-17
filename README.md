@@ -28,6 +28,10 @@ want — SQLite (default), an existing PostgreSQL (you provide the DSN), or a
 bundled PostgreSQL started alongside the gateway — writes `.env`, and brings the
 stack up with `docker compose`. The gateway listens on port `4444`.
 
+Works on Linux and macOS (including the stock bash 3.2 on macOS). On Windows,
+run it from **WSL2 or Git Bash** — Docker Desktop for Windows already requires
+WSL2, so no extra setup is needed.
+
 Manual equivalent:
 
 ```bash
