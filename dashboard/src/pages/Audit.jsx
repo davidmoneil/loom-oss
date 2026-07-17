@@ -217,11 +217,12 @@ export default function Audit() {
                   <Td>{e.task_type}</Td>
                   <Td className="text-gray-300">{e.skill || "—"}</Td>
                   <Td className="text-right tabular-nums text-gray-300">
-                    {fmtNumber(e.tokens_in)} / {fmtNumber(e.tokens_out)}
+                    <div>{fmtNumber(e.tokens_in)} / {fmtNumber(e.tokens_out)}</div>
                     {(e.cache_read_tokens > 0 || e.cache_creation_tokens > 0) && (
-                      <div className="text-xs text-gray-500">
-                        cache {fmtNumber(e.cache_read_tokens)}r /{" "}
-                        {fmtNumber(e.cache_creation_tokens)}w
+                      <div className="text-[10px] text-teal-400">
+                        {e.cache_read_tokens > 0 && <>{fmtNumber(e.cache_read_tokens)} cached</>}
+                        {e.cache_read_tokens > 0 && e.cache_creation_tokens > 0 && " / "}
+                        {e.cache_creation_tokens > 0 && <span className="text-amber-400">{fmtNumber(e.cache_creation_tokens)} written</span>}
                       </div>
                     )}
                   </Td>
@@ -345,18 +346,136 @@ function SkeletonRows() {
   ));
 }
 
-function renderMessageContent(value) {
-  if (typeof value === "string") return value;
-  if (Array.isArray(value)) {
-    return value
-      .map((block) =>
-        block && typeof block === "object" && typeof block.text === "string"
-          ? block.text
-          : JSON.stringify(block, null, 2)
-      )
-      .join("\n");
+const ROLE_STYLES = {
+  user: "bg-blue-500/25 text-blue-300 border-blue-500/40",
+  assistant: "bg-emerald-500/25 text-emerald-300 border-emerald-500/40",
+  system: "bg-amber-500/25 text-amber-300 border-amber-500/40",
+};
+
+const BLOCK_STYLES = {
+  text: { border: "border-emerald-500/30", bg: "bg-emerald-900/15", label: "text", color: "text-emerald-400" },
+  thinking: { border: "border-purple-500/30", bg: "bg-purple-900/15", label: "thinking", color: "text-purple-400" },
+  tool_use: { border: "border-cyan-500/30", bg: "bg-cyan-900/15", label: "tool_use", color: "text-cyan-400" },
+  tool_result: { border: "border-orange-500/30", bg: "bg-orange-900/15", label: "tool_result", color: "text-orange-400" },
+};
+
+function ContentBlockTag({ type }) {
+  const style = BLOCK_STYLES[type] || { color: "text-gray-400", label: type };
+  return (
+    <span className={`rounded px-1.5 py-0.5 text-[10px] font-semibold uppercase tracking-wider ${style.color} bg-gray-700/40`}>
+      {style.label}
+    </span>
+  );
+}
+
+function MetadataTag({ label, value, color = "text-gray-400" }) {
+  if (!value) return null;
+  return (
+    <span className={`inline-flex items-center gap-1 rounded px-1.5 py-0.5 text-[10px] font-medium bg-gray-700/50 ${color}`}>
+      <span className="opacity-60">{label}:</span> {value}
+    </span>
+  );
+}
+
+function UsageBar({ usage }) {
+  if (!usage) return null;
+  const input = usage.input_tokens || 0;
+  const output = usage.output_tokens || 0;
+  const cacheRead = usage.cache_read_input_tokens || 0;
+  const cacheCreation = usage.cache_creation_input_tokens || 0;
+  const total = input + output + cacheRead + cacheCreation;
+  if (!total) return null;
+
+  const segments = [];
+  if (cacheRead > 0) segments.push({ tokens: cacheRead, label: "cache read", cls: "bg-teal-500" });
+  if (cacheCreation > 0) segments.push({ tokens: cacheCreation, label: "cache write", cls: "bg-amber-500" });
+  if (input > 0) segments.push({ tokens: input, label: "input", cls: "bg-blue-500" });
+  if (output > 0) segments.push({ tokens: output, label: "output", cls: "bg-emerald-500" });
+
+  return (
+    <div className="rounded-md bg-gray-800/60 border border-border/40 p-2.5">
+      <div className="mb-1.5 flex items-center gap-2 text-[10px] font-medium uppercase tracking-wider text-gray-400">
+        Token Usage
+        <span className="font-mono text-gray-300">{total.toLocaleString()}</span>
+      </div>
+      <div className="flex h-2 w-full overflow-hidden rounded-full bg-gray-700/50">
+        {segments.map((s, i) => (
+          <div
+            key={i}
+            className={`${s.cls} transition-all`}
+            style={{ width: `${(s.tokens / total) * 100}%` }}
+            title={`${s.label}: ${s.tokens.toLocaleString()}`}
+          />
+        ))}
+      </div>
+      <div className="mt-1.5 flex flex-wrap gap-x-3 gap-y-0.5 text-[10px]">
+        {segments.map((s, i) => (
+          <span key={i} className="flex items-center gap-1 text-gray-300">
+            <span className={`inline-block h-2 w-2 rounded-full ${s.cls}`} />
+            {s.label}: <span className="font-mono">{s.tokens.toLocaleString()}</span>
+          </span>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+function renderContentBlocks(content) {
+  if (typeof content === "string") {
+    return (
+      <pre className="whitespace-pre-wrap break-words text-xs text-gray-100 font-mono overflow-x-auto">
+        {content}
+      </pre>
+    );
   }
-  return JSON.stringify(value, null, 2);
+  if (!Array.isArray(content)) {
+    return (
+      <pre className="whitespace-pre-wrap break-words text-xs text-gray-100 font-mono overflow-x-auto">
+        {JSON.stringify(content, null, 2)}
+      </pre>
+    );
+  }
+  return (
+    <div className="space-y-1.5">
+      {content.map((block, i) => {
+        if (!block || typeof block !== "object") {
+          return (
+            <pre key={i} className="whitespace-pre-wrap break-words text-xs text-gray-100 font-mono overflow-x-auto">
+              {JSON.stringify(block, null, 2)}
+            </pre>
+          );
+        }
+        const blockType = block.type || "text";
+        const style = BLOCK_STYLES[blockType] || BLOCK_STYLES.text;
+        let blockContent;
+        if (blockType === "text") {
+          blockContent = block.text || "";
+        } else if (blockType === "thinking") {
+          blockContent = block.thinking || "";
+        } else if (blockType === "tool_use") {
+          blockContent = `${block.name || "unknown"}(${JSON.stringify(block.input || {}, null, 2)})`;
+        } else if (blockType === "tool_result") {
+          blockContent = typeof block.content === "string" ? block.content : JSON.stringify(block.content, null, 2);
+        } else {
+          blockContent = JSON.stringify(block, null, 2);
+        }
+
+        return (
+          <div key={i} className={`rounded border ${style.border} ${style.bg} p-2`}>
+            <div className="mb-1">
+              <ContentBlockTag type={blockType} />
+              {blockType === "tool_use" && block.name && (
+                <span className="ml-1.5 text-[10px] font-mono text-cyan-300">{block.name}</span>
+              )}
+            </div>
+            <pre className="whitespace-pre-wrap break-words text-xs text-gray-100 font-mono overflow-x-auto max-h-64 overflow-y-auto">
+              {blockContent}
+            </pre>
+          </div>
+        );
+      })}
+    </div>
+  );
 }
 
 function ExpandedContent({ content, isLoading, error }) {
@@ -387,41 +506,68 @@ function ExpandedContent({ content, isLoading, error }) {
 
   return (
     <div className="space-y-4">
+      {/* Header metadata */}
+      {(content.response_model || content.stop_reason || content.model || content.provider) && (
+        <div className="flex flex-wrap gap-1.5">
+          <MetadataTag label="model" value={content.response_model || content.model} color="text-indigo-400" />
+          <MetadataTag label="provider" value={content.provider} color="text-gray-400" />
+          <MetadataTag label="stop" value={content.stop_reason} color="text-amber-400" />
+          <MetadataTag label="source" value={content.source} color="text-gray-400" />
+        </div>
+      )}
+
+      {/* Usage bar */}
+      <UsageBar usage={content.usage} />
+
+      {/* Messages */}
       {content.messages && content.messages.length > 0 ? (
         <div>
           <div className="mb-2 text-xs font-medium uppercase tracking-wide text-gray-400">
-            Messages
+            Messages ({content.messages.length})
           </div>
           <div className="space-y-2">
-            {content.messages.map((msg, idx) => (
-              <div
-                key={idx}
-                className="rounded bg-gray-800/40 p-2 border border-border/30"
-              >
-                <div className="mb-1 text-xs font-medium text-gray-300">
-                  {msg.role}
+            {content.messages.map((msg, idx) => {
+              const roleStyle = ROLE_STYLES[msg.role] || "bg-gray-500/25 text-gray-300 border-gray-500/40";
+              return (
+                <div
+                  key={idx}
+                  className={`rounded-md border p-2.5 ${roleStyle}`}
+                >
+                  <div className="mb-1.5 flex items-center gap-2">
+                    <span className="rounded px-1.5 py-0.5 text-[10px] font-bold uppercase tracking-wider bg-black/20">
+                      {msg.role}
+                    </span>
+                    {msg.role === "user" && typeof msg.content === "string" && msg.content.length > 200 && (
+                      <span className="text-[10px] font-mono text-gray-400">
+                        {msg.content.length.toLocaleString()} chars
+                      </span>
+                    )}
+                  </div>
+                  {renderContentBlocks(msg.content)}
                 </div>
-                <pre className="whitespace-pre-wrap break-words text-xs text-gray-200 font-mono overflow-x-auto">
-                  {renderMessageContent(msg.content)}
-                </pre>
-              </div>
-            ))}
+              );
+            })}
           </div>
         </div>
       ) : (
         <div className="text-sm text-gray-400">(no messages logged)</div>
       )}
 
-      {content.response && (
+      {/* Response — structured blocks if available, fall back to text */}
+      {(content.response_content || content.response) && (
         <div>
           <div className="mb-2 text-xs font-medium uppercase tracking-wide text-gray-400">
             Response
           </div>
-          <div className="rounded bg-gray-800/40 p-2 border border-border/30">
-            <pre className="whitespace-pre-wrap break-words text-xs text-gray-200 font-mono overflow-x-auto">
-              {renderMessageContent(content.response)}
-            </pre>
-          </div>
+          {content.response_content ? (
+            renderContentBlocks(content.response_content)
+          ) : (
+            <div className="rounded-md bg-emerald-900/15 border border-emerald-500/30 p-2.5">
+              <pre className="whitespace-pre-wrap break-words text-xs text-gray-100 font-mono overflow-x-auto">
+                {typeof content.response === "string" ? content.response : JSON.stringify(content.response, null, 2)}
+              </pre>
+            </div>
+          )}
         </div>
       )}
     </div>

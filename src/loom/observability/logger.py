@@ -123,6 +123,10 @@ class AuditLogger:
         messages: Optional[list] = None,
         response_text: Optional[str] = None,
         content_logging: str = "off",
+        response_content: Optional[list] = None,
+        usage: Optional[dict] = None,
+        stop_reason: Optional[str] = None,
+        response_model: Optional[str] = None,
     ) -> None:
         """Log prompt/response content according to the content_logging level.
 
@@ -170,4 +174,12 @@ class AuditLogger:
             return
 
         record["message_count"] = len(messages)
+        if response_content:
+            record["response_content"] = response_content
+        if usage:
+            record["usage"] = usage
+        if stop_reason:
+            record["stop_reason"] = stop_reason
+        if response_model:
+            record["response_model"] = response_model
         self._write(self.content_path, record)
