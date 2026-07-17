@@ -108,7 +108,14 @@ export default function Audit() {
                 setContentError((prev) => ({ ...prev, [requestId]: null }));
               })
               .catch((e) => {
-                setContentError((prev) => ({ ...prev, [requestId]: e.message }));
+                // 404 = no content row for this request (content_logging off,
+                // or the request predates content capture) — render the
+                // "No content logged" empty state, not a fetch error.
+                const notFound = e.message.endsWith("-> 404");
+                setContentError((prev) => ({
+                  ...prev,
+                  [requestId]: notFound ? null : e.message,
+                }));
               })
               .finally(() => {
                 setContentLoading((prev) => ({ ...prev, [requestId]: false }));
