@@ -140,4 +140,16 @@ variable overrides.
 
 ## License
 
-Apache-2.0 — see [LICENSE](LICENSE).
+Loom is **source-available** under the [PolyForm Internal Use License 1.0.0](LICENSE) —
+not an OSI-approved open source license.
+
+In plain English:
+
+- **You can** use, run, and modify Loom for your own personal use, or for your
+  organization's internal use (including internal business use).
+- **You cannot** redistribute Loom, sell it, embed it in a product, or offer it to
+  third parties as a hosted or managed service.
+
+If you want to use Loom in a way the license doesn't permit (redistribution,
+commercial products, hosting for others), open an issue or contact the author for
+a separate license.
