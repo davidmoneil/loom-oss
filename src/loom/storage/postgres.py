@@ -762,8 +762,8 @@ class PostgresStorage:
         by_task_type = {r[0]: r[1] for r in task_rows}
 
         return {
-            "hours": hours,
-            "bucket_seconds": bucket_seconds,
+            "window_hours": hours,
+            "interval_minutes": bucket_seconds // 60,
             "buckets": buckets,
             "by_model": by_model,
             "by_source": by_source,
