@@ -81,8 +81,11 @@ class CompressionConfig(BaseModel):
     llm_timeout_seconds: float = 30.0
     # Optional compressed-variant store: preserves pre-compression originals
     # for pointer resolution and enables relevance-aware compression.
-    # "" (off) | "neo4j" (requires: pip install 'loom-gateway[neo4j]')
+    # "" (off) | "age" (Postgres AGE extension) | "neo4j" (standalone Neo4j)
     variant_store: str = ""
+    # AGE backend: reuses the Postgres instance from storage.postgres_dsn.
+    # Override with age_dsn or env LOOM_AGE_DSN if different.
+    age_dsn: str = ""
     neo4j_uri: str = ""
     neo4j_user: str = ""
     neo4j_password: str = ""
@@ -190,6 +193,16 @@ class LoomConfig(BaseModel):
         pg_dsn = os.environ.get("LOOM_POSTGRES_DSN")
         if pg_dsn:
             self.storage.postgres_dsn = pg_dsn
+        age_dsn = os.environ.get("LOOM_AGE_DSN")
+        if age_dsn:
+            self.compression.age_dsn = age_dsn
+            if not self.compression.variant_store:
+                self.compression.variant_store = "age"
+        elif (
+            not self.compression.age_dsn
+            and self.compression.variant_store == "age"
+        ):
+            self.compression.age_dsn = self.storage.postgres_dsn
         neo4j_uri = os.environ.get("LOOM_NEO4J_URI")
         if neo4j_uri:
             self.compression.neo4j_uri = neo4j_uri
