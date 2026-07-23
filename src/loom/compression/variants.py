@@ -161,13 +161,14 @@ class AgeVariantStore:
         conn = self._conn()
         source_hint = source_hint or "text"
         variant_id = f"{content_hash}:{tier}"
+        # AGE doesn't support ON CREATE SET — MERGE + SET unconditionally.
         self._cypher(
             conn,
             """
             MERGE (c:LoomContent {content_hash: $content_hash})
-            ON CREATE SET c.content_id = $content_hash,
-                          c.source = 'gateway'
-            SET c.original_text = $original_text,
+            SET c.content_id = $content_hash,
+                c.source = 'gateway',
+                c.original_text = $original_text,
                 c.content_type = $source_hint
             RETURN c
             """,

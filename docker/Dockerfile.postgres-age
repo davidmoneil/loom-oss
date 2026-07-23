@@ -11,7 +11,7 @@ RUN apt-get update \
         bison \
         git \
         postgresql-server-dev-15 \
-    && git clone --branch release/${AGE_VERSION}/PG15 --depth 1 \
+    && git clone --branch release/PG15/${AGE_VERSION} --depth 1 \
         https://github.com/apache/age.git /tmp/age \
     && cd /tmp/age \
     && make install \
