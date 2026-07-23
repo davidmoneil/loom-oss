@@ -4,6 +4,12 @@ import { api, setDisplayTimezone } from "../api.js";
 const TIER_OPTIONS = ["economy", "standard", "premium"];
 const PROVIDER_OPTIONS = ["anthropic", "openai", "google", "ollama"];
 const COMPRESSION_OPTIONS = ["", "low", "medium", "high"];
+const COMPRESSION_TIER_OPTIONS = ["light", "medium", "heavy", "extreme"];
+const VARIANT_STORE_OPTIONS = [
+  { value: "", label: "Off" },
+  { value: "age", label: "AGE (Postgres)" },
+  { value: "neo4j", label: "Neo4j" },
+];
 
 const TIMEZONE_OPTIONS = [
   "UTC",
@@ -285,6 +291,16 @@ export default function Settings() {
         </div>
       </div>
 
+      {/* Compression */}
+      <CompressionSettings
+        config={config}
+        setConfig={setConfig}
+        saving={saving}
+        setSaving={setSaving}
+        setError={setError}
+        flashSuccess={flashSuccess}
+      />
+
       {/* Source Policies */}
       <div className="rounded-lg border border-border bg-card p-5">
         <div className="mb-4 flex items-center justify-between">
@@ -353,6 +369,207 @@ export default function Settings() {
           </div>
         </div>
       )}
+    </div>
+  );
+}
+
+function CompressionSettings({ config, setConfig, saving, setSaving, setError, flashSuccess }) {
+  const comp = config?.compression || {};
+
+  async function update(updates) {
+    setSaving(true);
+    setError(null);
+    try {
+      const updated = await api.updateCompression(updates);
+      setConfig(updated);
+      flashSuccess("Compression settings updated");
+    } catch (e) {
+      setError(e.message || "Failed to update compression settings");
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  return (
+    <div className="mb-6 rounded-lg border border-border bg-card p-5">
+      <h2 className="mb-4 text-sm font-semibold uppercase text-gray-400">Compression</h2>
+      <p className="mb-4 text-xs text-gray-500">
+        Conversation history compression reduces token usage for long-running sessions.
+        Content is compressed proportionally to age — older messages are compressed harder.
+      </p>
+      <div className="space-y-3">
+        {/* Enabled toggle */}
+        <div className="flex items-center justify-between">
+          <div>
+            <span className="text-sm text-white">Enabled</span>
+            <p className="text-xs text-gray-500">Master on/off switch for all compression</p>
+          </div>
+          <button
+            onClick={() => update({ enabled: !comp.enabled })}
+            disabled={saving}
+            className={`h-5 w-9 rounded-full transition-colors ${comp.enabled ? "bg-green-500" : "bg-gray-600"} relative`}
+          >
+            <span className={`absolute top-0.5 h-4 w-4 rounded-full bg-white transition-transform ${comp.enabled ? "left-[18px]" : "left-0.5"}`} />
+          </button>
+        </div>
+
+        {/* Default tier */}
+        <div className="flex items-center justify-between">
+          <div>
+            <span className="text-sm text-white">Default tier</span>
+            <p className="text-xs text-gray-500">
+              light (filler only) → medium (graduated) → heavy (aggressive) → extreme (fingerprints)
+            </p>
+          </div>
+          <select
+            value={comp.default_tier || "medium"}
+            onChange={(e) => update({ default_tier: e.target.value })}
+            disabled={saving}
+            className="rounded border border-border bg-gray-800 px-2 py-1 text-sm text-white"
+          >
+            {COMPRESSION_TIER_OPTIONS.map((t) => (
+              <option key={t} value={t}>{t}</option>
+            ))}
+          </select>
+        </div>
+
+        {/* Tool results */}
+        <div className="flex items-center justify-between">
+          <div>
+            <span className="text-sm text-white">Compress tool results</span>
+            <p className="text-xs text-gray-500">
+              Compress text inside tool_result blocks (typically 80-90% of agentic session tokens)
+            </p>
+          </div>
+          <button
+            onClick={() => update({ tool_results: !comp.tool_results })}
+            disabled={saving}
+            className={`h-5 w-9 rounded-full transition-colors ${comp.tool_results !== false ? "bg-green-500" : "bg-gray-600"} relative`}
+          >
+            <span className={`absolute top-0.5 h-4 w-4 rounded-full bg-white transition-transform ${comp.tool_results !== false ? "left-[18px]" : "left-0.5"}`} />
+          </button>
+        </div>
+
+        {/* Protect window */}
+        <div className="flex items-center justify-between">
+          <div>
+            <span className="text-sm text-white">Protect window</span>
+            <p className="text-xs text-gray-500">
+              Last N messages are shielded from compression (prevents read loops)
+            </p>
+          </div>
+          <input
+            type="number"
+            min="0"
+            max="50"
+            value={comp.tool_result_protect_window ?? 6}
+            onChange={(e) => update({ tool_result_protect_window: parseInt(e.target.value) || 0 })}
+            disabled={saving}
+            className="w-20 rounded border border-border bg-gray-800 px-2 py-1 text-right text-sm text-white"
+          />
+        </div>
+
+        {/* Loop multiplier */}
+        <div className="flex items-center justify-between">
+          <div>
+            <span className="text-sm text-white">Loop multiplier</span>
+            <p className="text-xs text-gray-500">
+              When a compression loop is detected, protect window is widened by this factor
+            </p>
+          </div>
+          <input
+            type="number"
+            min="1"
+            max="10"
+            value={comp.loop_detected_protect_multiplier ?? 3}
+            onChange={(e) => update({ loop_detected_protect_multiplier: parseInt(e.target.value) || 1 })}
+            disabled={saving}
+            className="w-20 rounded border border-border bg-gray-800 px-2 py-1 text-right text-sm text-white"
+          />
+        </div>
+
+        {/* Variant store */}
+        <div className="flex items-center justify-between">
+          <div>
+            <span className="text-sm text-white">Variant store</span>
+            <p className="text-xs text-gray-500">
+              Preserves originals for pointer resolution and enables relevance-aware compression
+            </p>
+          </div>
+          <select
+            value={comp.variant_store || ""}
+            onChange={(e) => update({ variant_store: e.target.value })}
+            disabled={saving}
+            className="rounded border border-border bg-gray-800 px-2 py-1 text-sm text-white"
+          >
+            {VARIANT_STORE_OPTIONS.map((o) => (
+              <option key={o.value} value={o.value}>{o.label}</option>
+            ))}
+          </select>
+        </div>
+
+        {/* LLM Prose section */}
+        <div className="border-t border-border/50 pt-3 mt-3">
+          <h3 className="mb-3 text-xs font-semibold uppercase text-gray-500">LLM Prose Compression</h3>
+
+          <div className="space-y-3">
+            <div className="flex items-center justify-between">
+              <div>
+                <span className="text-sm text-white">LLM prose</span>
+                <p className="text-xs text-gray-500">
+                  Use a local model for prose summarization instead of extractive compression
+                </p>
+              </div>
+              <button
+                onClick={() => update({ llm_prose: !comp.llm_prose })}
+                disabled={saving}
+                className={`h-5 w-9 rounded-full transition-colors ${comp.llm_prose ? "bg-green-500" : "bg-gray-600"} relative`}
+              >
+                <span className={`absolute top-0.5 h-4 w-4 rounded-full bg-white transition-transform ${comp.llm_prose ? "left-[18px]" : "left-0.5"}`} />
+              </button>
+            </div>
+
+            {comp.llm_prose && (
+              <>
+                <div className="flex items-center justify-between">
+                  <span className="text-sm text-white">LLM URL</span>
+                  <input
+                    type="text"
+                    value={comp.llm_url || ""}
+                    onChange={(e) => update({ llm_url: e.target.value })}
+                    disabled={saving}
+                    placeholder="http://localhost:11434"
+                    className="w-64 rounded border border-border bg-gray-800 px-2 py-1 font-mono text-sm text-white placeholder-gray-600"
+                  />
+                </div>
+                <div className="flex items-center justify-between">
+                  <span className="text-sm text-white">LLM model</span>
+                  <input
+                    type="text"
+                    value={comp.llm_model || ""}
+                    onChange={(e) => update({ llm_model: e.target.value })}
+                    disabled={saving}
+                    placeholder="qwen2.5:7b"
+                    className="w-48 rounded border border-border bg-gray-800 px-2 py-1 font-mono text-sm text-white placeholder-gray-600"
+                  />
+                </div>
+                <div className="flex items-center justify-between">
+                  <span className="text-sm text-white">Timeout (seconds)</span>
+                  <input
+                    type="number"
+                    min="1"
+                    max="120"
+                    value={comp.llm_timeout_seconds ?? 30}
+                    onChange={(e) => update({ llm_timeout_seconds: parseFloat(e.target.value) || 30 })}
+                    disabled={saving}
+                    className="w-20 rounded border border-border bg-gray-800 px-2 py-1 text-right text-sm text-white"
+                  />
+                </div>
+              </>
+            )}
+          </div>
+        </div>
+      </div>
     </div>
   );
 }
