@@ -1300,13 +1300,12 @@ def create_app() -> FastAPI:
 
             # Inline compression: compress older messages before forwarding.
             comp_before = comp_after = 0
-            comp_loop = False
             if gw.compression is not None and len(messages) > 2:
                 tier_name = _resolve_request_tier(gw, request, source)
                 # Off the event loop: compression is CPU-bound and, with
                 # llm_prose enabled, makes blocking HTTP calls to the local
                 # model — inline it would freeze every request incl. /health.
-                messages, comp_before, comp_after, comp_by_type, comp_loop = (
+                messages, comp_before, comp_after, comp_by_type, _comp_loop = (
                     await asyncio.to_thread(
                         _compress_messages_inline,
                         gw.compression,
@@ -1346,7 +1345,6 @@ def create_app() -> FastAPI:
                     round(comp_after / comp_before, 4) if comp_before > 0 else 1.0
                 ),
                 "tokens_saved": max(comp_before - comp_after, 0),
-                "compression_loop_detected": comp_loop,
                 "session_id": session_id if session_id != "unknown" else None,
             }
 
@@ -1469,13 +1467,12 @@ def create_app() -> FastAPI:
 
             # Inline compression: compress older messages before forwarding.
             comp_before = comp_after = 0
-            comp_loop = False
             if gw.compression is not None and len(messages) > 2:
                 tier_name = _resolve_request_tier(gw, request, source)
                 # Off the event loop: compression is CPU-bound and, with
                 # llm_prose enabled, makes blocking HTTP calls to the local
                 # model — inline it would freeze every request incl. /health.
-                messages, comp_before, comp_after, comp_by_type, comp_loop = (
+                messages, comp_before, comp_after, comp_by_type, _comp_loop = (
                     await asyncio.to_thread(
                         _compress_messages_inline,
                         gw.compression,
@@ -1516,7 +1513,6 @@ def create_app() -> FastAPI:
                     round(comp_after / comp_before, 4) if comp_before > 0 else 1.0
                 ),
                 "tokens_saved": max(comp_before - comp_after, 0),
-                "compression_loop_detected": comp_loop,
                 "session_id": session_id if session_id != "unknown" else None,
             }
 
