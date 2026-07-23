@@ -2220,6 +2220,58 @@ def create_app() -> FastAPI:
         return _sanitized_config(gw.config)
 
     @app.patch(
+        "/api/config/compression",
+        response_model=ConfigResponse,
+        tags=["observability"],
+    )
+    async def update_compression_config(request: Request):
+        gw = state()
+        try:
+            body = await request.json()
+        except Exception:
+            return JSONResponse({"error": "invalid JSON"}, status_code=400)
+        ALLOWED = {
+            "enabled": bool,
+            "default_tier": str,
+            "tool_results": bool,
+            "tool_result_protect_window": int,
+            "loop_detected_protect_multiplier": int,
+            "llm_prose": bool,
+            "llm_url": str,
+            "llm_model": str,
+            "llm_timeout_seconds": float,
+            "variant_store": str,
+        }
+        VALID_TIERS = {"light", "medium", "heavy", "extreme"}
+        VALID_STORES = {"", "age", "neo4j"}
+        updates = {}
+        for key, val in body.items():
+            if key not in ALLOWED:
+                continue
+            expected = ALLOWED[key]
+            if not isinstance(val, expected):
+                if expected is float and isinstance(val, int):
+                    val = float(val)
+                else:
+                    continue
+            if key == "default_tier" and val not in VALID_TIERS:
+                continue
+            if key == "variant_store" and val not in VALID_STORES:
+                continue
+            if key == "tool_result_protect_window":
+                val = max(0, min(val, 50))
+            if key == "loop_detected_protect_multiplier":
+                val = max(1, min(val, 10))
+            if key == "llm_timeout_seconds":
+                val = max(1.0, min(val, 120.0))
+            updates[key] = val
+        if not updates:
+            return JSONResponse({"error": "no valid fields"}, status_code=400)
+        for key, val in updates.items():
+            setattr(gw.config.compression, key, val)
+        return _sanitized_config(gw.config)
+
+    @app.patch(
         "/api/config/sources/{source_name}",
         response_model=ConfigResponse,
         tags=["observability"],
@@ -3166,7 +3218,18 @@ def _sanitized_config(config: LoomConfig) -> dict:
             "default_determinism_target": config.routing.default_determinism_target,
             "min_empirical_runs": config.routing.min_empirical_runs,
         },
-        "compression": {"enabled": config.compression.enabled},
+        "compression": {
+            "enabled": config.compression.enabled,
+            "default_tier": config.compression.default_tier,
+            "tool_results": config.compression.tool_results,
+            "tool_result_protect_window": config.compression.tool_result_protect_window,
+            "loop_detected_protect_multiplier": config.compression.loop_detected_protect_multiplier,
+            "llm_prose": config.compression.llm_prose,
+            "llm_url": config.compression.llm_url,
+            "llm_model": config.compression.llm_model,
+            "llm_timeout_seconds": config.compression.llm_timeout_seconds,
+            "variant_store": config.compression.variant_store,
+        },
     }
 
 

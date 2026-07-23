@@ -61,6 +61,7 @@ export const api = {
   sessions: (hours = 24) => getJSON(`/api/sessions?hours=${hours}`),
   costs: (days = 30) => getJSON(`/api/costs?days=${days}`),
   updateServerConfig: (updates) => patchJSON("/api/config/server", updates),
+  updateCompression: (updates) => patchJSON("/api/config/compression", updates),
   updateSourcePolicy: (name, updates) =>
     patchJSON(`/api/config/sources/${encodeURIComponent(name)}`, updates),
   createSourcePolicy: (name, fields) =>

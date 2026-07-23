@@ -112,6 +112,8 @@ routing:
 
 compression:
   enabled: true
+  variant_store: age
+  age_dsn: "postgresql://n8n@postgres-unified:5432/loom"
 
 storage:
   backend: postgres

@@ -8,14 +8,14 @@ an opt-in LLM-assisted path for prose.
 
 ## How it works
 
-On every `/v1/chat/completions` and `/v1/messages` request, all but the last 2
-messages (the active turn) are eligible for compression. Each eligible message
-is assigned an **age ratio** — 0.0 for the oldest message, approaching 1.0 for
-the most recent eligible one — and compressed proportionally to its age:
-older content is compressed harder. Content already carrying a
-`<!--loom:compressed:TIER:HASH-->` tag is skipped (double-compression
-prevention across turns), and a storage-backed compression cache (keyed by
-content hash + age ratio) avoids recompressing identical content seen before.
+On every `/v1/chat/completions` and `/v1/messages` request, messages are
+evaluated for compression. Each eligible message is assigned an **age ratio**
+— 0.0 for the oldest message, approaching 1.0 for the most recent eligible
+one — and compressed proportionally to its age: older content is compressed
+harder. Content already carrying a `<!--loom:compressed:TIER:HASH-->` tag is
+skipped (double-compression prevention across turns), and a storage-backed
+compression cache (keyed by content hash + age ratio) avoids recompressing
+identical content seen before.
 
 Compression never changes message or content-block *shape* — only text
 payloads. This matters because the Anthropic and OpenAI APIs require
@@ -23,6 +23,32 @@ structured `tool_use` / `tool_result` content blocks; naively flattening a
 list-type `content` field into a JSON string produces malformed requests that
 the provider rejects (see the historical incident in
 [docs/gap-analysis.md](gap-analysis.md#compression-tool_use-fix--2026-07-10)).
+
+### Pipeline stages
+
+```
+Request in
+  │
+  ├─ 1. Loop detection — hash recent tool_use blocks, flag if ≥3 identical
+  │     calls in the last 16 assistant messages
+  │
+  ├─ 2. Recency protection — skip the last N messages entirely
+  │     (N = tool_result_protect_window, default 6; tripled when loop detected)
+  │
+  ├─ 3. Age ratio calculation — idx / max(n-1, 1) for each eligible message
+  │
+  ├─ 4. Relevance scoring (optional) — if variant store is enabled, content
+  │     indexed by an external context engine gets its age discounted by 0.25
+  │
+  ├─ 5. Graduated compression — per content block, route through the
+  │     content-type–specific compressor at the tier matching the age ratio
+  │
+  ├─ 6. Variant storage (optional) — store original text keyed by content
+  │     hash for later pointer resolution
+  │
+  └─ 7. Tag injection — mark compressed blocks with
+        <!--loom:compressed:TIER:HASH--> for idempotency
+```
 
 ## Tiers
 
@@ -43,6 +69,19 @@ Tier resolution priority (first match wins):
 3. `compression.default_tier` in `loom.yaml`
 4. `LOOM_COMPRESSION_TIER` environment variable
 5. `medium`
+
+## Recency protection
+
+The `tool_result_protect_window` (default: 6) shields the last N messages
+from compression regardless of age ratio. This prevents the destructive
+pattern where Claude reads a file, Loom compresses the output before Claude's
+next turn uses it, and Claude re-reads the same file — an infinite loop that
+wastes tokens.
+
+When the compression loop detector fires (≥3 identical tool calls in the last
+16 assistant messages), the protect window is automatically widened by the
+`loop_detected_protect_multiplier` (default: 3×), giving 18 messages of
+protection. A warning is logged when this happens.
 
 ## Content-aware compression
 
@@ -114,10 +153,9 @@ qwen3 family) have those tags stripped from the output automatically.
 
 ## Variant store (optional)
 
-`compression.variant_store: neo4j` (requires `pip install
-'loom-gateway[neo4j]'`) preserves the pre-compression original of every
-compressed payload, keyed by content hash, in a Neo4j graph. Two things
-become possible with it configured:
+The variant store preserves the pre-compression original of every compressed
+payload, keyed by content hash, in a graph database. Two things become
+possible with it configured:
 
 - **Pointer resolution** — a compressed payload's `loom:compressed` tag
   carries the hash needed to look up the original later (audit, retrieval,
@@ -128,9 +166,48 @@ become possible with it configured:
   which can push it below the tier's age floor and skip compression
   entirely.
 
-When unconfigured, unavailable, or the `neo4j` driver isn't installed, the
+When unconfigured, unavailable, or the required driver isn't installed, the
 gateway transparently falls back to a no-op store and behaves exactly as
 without this feature — it's an enhancement, never a request-path dependency.
+
+### Graph schema
+
+```
+(c:LoomContent {content_hash, content_id, source, original_text, content_type})
+  -[:HAS_COMPRESSED]->
+(v:CompressedVariant {variant_id, tier, original_tokens, compressed_tokens, text, content_hash})
+```
+
+Nodes created by the gateway have `source = 'gateway'`. Content indexed by an
+external context engine (any node with a different source) is considered
+"curated" and receives the relevance discount during compression.
+
+### Backends
+
+| Backend | Config | Dependency | Use case |
+|---------|--------|------------|----------|
+| **AGE** (recommended) | `variant_store: age` | `psycopg[binary]>=3.1` | Same Postgres instance as storage — no extra infrastructure |
+| **Neo4j** | `variant_store: neo4j` | `neo4j` driver | Standalone Neo4j — required for Tier 3 GDS algorithms (PageRank, community detection) |
+| **(off)** | `variant_store: ""` | none | No variant storage; compression still works, just without pointer resolution or relevance scoring |
+
+#### AGE (Apache AGE)
+
+AGE runs openCypher queries inside PostgreSQL via the [Apache AGE
+extension](https://age.apache.org/). It uses the same Postgres instance as
+Loom's storage backend, so there's no separate service to deploy.
+
+```yaml
+compression:
+  variant_store: age
+  age_dsn: "postgresql://user@host:5432/loom"   # or env LOOM_AGE_DSN
+  # If age_dsn is empty, falls back to storage.postgres_dsn automatically
+```
+
+Requirements: PostgreSQL with `pgvector` and `age` extensions,
+`shared_preload_libraries = 'age'` in `postgresql.conf`. See
+`docker/Dockerfile.postgres-age` for a ready-made image.
+
+#### Neo4j
 
 ```yaml
 compression:
@@ -139,6 +216,23 @@ compression:
   neo4j_user: neo4j                  # or env LOOM_NEO4J_USER
   neo4j_password: ""                 # or env LOOM_NEO4J_PASSWORD
 ```
+
+## Compression loop detection
+
+The gateway monitors for compression-induced read loops — when Claude
+repeatedly re-reads the same file because its output was compressed away
+before it could act on it. Detection works by hashing `(tool_name, input)`
+for recent `tool_use` blocks in assistant messages. If any hash appears 3 or
+more times in the last 16 assistant messages, the conversation is flagged as
+looping.
+
+When a loop is detected:
+- The recency protect window is widened by `loop_detected_protect_multiplier`
+  (default 3×, so 6 → 18 messages protected)
+- A warning is logged: `"compression loop detected — widening protect window"`
+
+This is a runtime safety net, not a configuration knob. If loops are
+appearing frequently, the `tool_result_protect_window` should be increased.
 
 ## Observability
 
@@ -174,16 +268,20 @@ for the full contract.
 
 All keys live under `compression:` in `loom.yaml`; see
 [loom.example.yaml](../loom.example.yaml) for a fully-commented starting
-point.
+point. These settings are also editable from the dashboard at
+**Settings → Compression**.
 
 | Key | Default | Purpose |
 |---|---|---|
 | `enabled` | `true` | Master on/off switch |
 | `default_tier` | `medium` | Tier used absent a header or source policy override |
 | `tool_results` | `true` | Compress text inside `tool_result` blocks |
+| `tool_result_protect_window` | `6` | Number of most-recent messages shielded from compression |
+| `loop_detected_protect_multiplier` | `3` | Multiplier applied to protect window when loop is detected |
 | `llm_prose` | `false` | Route prose through a local LLM instead of extractive compression |
 | `llm_url` | `http://localhost:11434` | Ollama or OpenAI-compatible (`/v1`) endpoint |
 | `llm_model` | `qwen2.5:7b` | Model name passed to the endpoint |
 | `llm_timeout_seconds` | `30.0` | Request timeout before falling back to extractive |
-| `variant_store` | `""` (off) | `""` or `neo4j` |
+| `variant_store` | `""` (off) | `""`, `"age"`, or `"neo4j"` |
+| `age_dsn` | `""` | AGE Postgres DSN; falls back to `storage.postgres_dsn` if empty |
 | `neo4j_uri` / `neo4j_user` / `neo4j_password` / `neo4j_database` | `""` / `""` / `""` / `neo4j` | Neo4j connection, only used when `variant_store: neo4j` |
