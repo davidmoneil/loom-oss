@@ -2993,24 +2993,13 @@ def _compress_messages_inline(
     """Compress older messages before forwarding to the provider.
 
     Skips the last ``protect_window`` messages (active context) and applies
-    graduated compression to everything else — oldest messages get compressed
-    most.  The default protect window is 6 (configurable via
-    ``compression.tool_result_protect_window``); when repeated identical tool
-    calls are detected the window is widened further to break the read →
-    compress → re-read loop.
+    graduated compression to everything else.  The default protect window
+    is 6 when config is provided (configurable via
+    ``compression.tool_result_protect_window``), or 2 for backward compat
+    when called without config.  When repeated identical tool calls are
+    detected the window is widened further to break the loop.
 
-    Messages already carrying a loom:compressed tag are passed through
-    untouched (double-compression prevention); the storage compression cache
-    is consulted before compressing and updated after.
-
-    Content-block lists are compressed in place without ever flattening:
-    text blocks and tool_result text get compressed, tool_use blocks pass
-    through verbatim (the Anthropic API requires the list structure — see
-    PR #11 for the 400s naive flattening caused).
-
-    Returns (messages, tokens_before, tokens_after, by_type) — estimated
-    tokens over the compression-eligible messages only; by_type breaks the
-    counts down by block type ("message" covers plain string messages).
+    Returns (messages, tokens_before, tokens_after, by_type, is_looping).
     """
     n = len(messages)
     by_type: dict[str, dict[str, int]] = {}
