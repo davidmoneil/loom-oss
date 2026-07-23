@@ -1,0 +1,23 @@
+FROM pgvector/pgvector:pg15
+
+ARG AGE_VERSION=1.6.0
+
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends \
+        build-essential \
+        libreadline-dev \
+        zlib1g-dev \
+        flex \
+        bison \
+        git \
+        postgresql-server-dev-15 \
+    && git clone --branch release/${AGE_VERSION}/PG15 --depth 1 \
+        https://github.com/apache/age.git /tmp/age \
+    && cd /tmp/age \
+    && make install \
+    && apt-get purge -y --auto-remove build-essential git flex bison \
+        postgresql-server-dev-15 libreadline-dev zlib1g-dev \
+    && rm -rf /tmp/age /var/lib/apt/lists/*
+
+RUN echo "shared_preload_libraries = 'age'" >> /usr/share/postgresql/postgresql.conf.sample
+COPY docker/age-init.sql /docker-entrypoint-initdb.d/00-age-init.sql

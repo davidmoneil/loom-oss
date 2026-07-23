@@ -2,7 +2,11 @@
 
 import hashlib
 
-from loom.compression.variants import NullVariantStore, create_variant_store
+from loom.compression.variants import (
+    AgeVariantStore,
+    NullVariantStore,
+    create_variant_store,
+)
 from loom.config import CompressionConfig
 from loom.gateway.app import (
     _compress_messages_inline,
@@ -34,7 +38,7 @@ class FakeProcessor:
 
 
 class MemoryVariantStore:
-    """In-memory stand-in matching the Neo4jVariantStore interface."""
+    """In-memory stand-in matching the variant store interface."""
 
     enabled = True
 
@@ -121,6 +125,17 @@ def test_create_variant_store_fallbacks():
     # neo4j backend with unreachable URI -> null store, no raise.
     cfg = CompressionConfig(
         variant_store="neo4j", neo4j_uri="bolt://127.0.0.1:1"
+    )
+    assert isinstance(create_variant_store(cfg), NullVariantStore)
+
+
+def test_create_variant_store_age_fallbacks():
+    # age backend without DSN -> null store.
+    cfg = CompressionConfig(variant_store="age")
+    assert isinstance(create_variant_store(cfg), NullVariantStore)
+    # age backend with unreachable DSN -> null store, no raise.
+    cfg = CompressionConfig(
+        variant_store="age", age_dsn="postgresql://bad@127.0.0.1:1/nonexist"
     )
     assert isinstance(create_variant_store(cfg), NullVariantStore)
 
