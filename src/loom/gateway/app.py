@@ -549,10 +549,14 @@ def _normalize_response(result: dict, provider: str, model: str) -> dict:
 def _model_cost(model_cfg: Optional[ModelConfig], usage: Any) -> float:
     if model_cfg is None:
         return 0.0
-    tokens_in, tokens_out, _, _ = _extract_tokens(usage)
-    return (tokens_in / 1000.0) * model_cfg.cost_per_1k_input + (
-        tokens_out / 1000.0
-    ) * model_cfg.cost_per_1k_output
+    tokens_in, tokens_out, cache_read, cache_creation = _extract_tokens(usage)
+    base_input = tokens_in - cache_read - cache_creation
+    input_cost = (
+        (base_input / 1000.0) * model_cfg.cost_per_1k_input
+        + (cache_read / 1000.0) * model_cfg.cost_per_1k_input * 0.1
+        + (cache_creation / 1000.0) * model_cfg.cost_per_1k_input * 1.25
+    )
+    return input_cost + (tokens_out / 1000.0) * model_cfg.cost_per_1k_output
 
 
 # --------------------------------------------------------------------------- #
@@ -1296,12 +1300,13 @@ def create_app() -> FastAPI:
 
             # Inline compression: compress older messages before forwarding.
             comp_before = comp_after = 0
+            comp_loop = False
             if gw.compression is not None and len(messages) > 2:
                 tier_name = _resolve_request_tier(gw, request, source)
                 # Off the event loop: compression is CPU-bound and, with
                 # llm_prose enabled, makes blocking HTTP calls to the local
                 # model — inline it would freeze every request incl. /health.
-                messages, comp_before, comp_after, comp_by_type = (
+                messages, comp_before, comp_after, comp_by_type, comp_loop = (
                     await asyncio.to_thread(
                         _compress_messages_inline,
                         gw.compression,
@@ -1310,6 +1315,7 @@ def create_app() -> FastAPI:
                         compress_tool_results=gw.config.compression.tool_results,
                         variants=gw.variants,
                         tier_name=tier_name,
+                        config=gw.config,
                     )
                 )
                 gw.comp_tokens_before += comp_before
@@ -1340,6 +1346,7 @@ def create_app() -> FastAPI:
                     round(comp_after / comp_before, 4) if comp_before > 0 else 1.0
                 ),
                 "tokens_saved": max(comp_before - comp_after, 0),
+                "compression_loop_detected": comp_loop,
                 "session_id": session_id if session_id != "unknown" else None,
             }
 
@@ -1462,12 +1469,13 @@ def create_app() -> FastAPI:
 
             # Inline compression: compress older messages before forwarding.
             comp_before = comp_after = 0
+            comp_loop = False
             if gw.compression is not None and len(messages) > 2:
                 tier_name = _resolve_request_tier(gw, request, source)
                 # Off the event loop: compression is CPU-bound and, with
                 # llm_prose enabled, makes blocking HTTP calls to the local
                 # model — inline it would freeze every request incl. /health.
-                messages, comp_before, comp_after, comp_by_type = (
+                messages, comp_before, comp_after, comp_by_type, comp_loop = (
                     await asyncio.to_thread(
                         _compress_messages_inline,
                         gw.compression,
@@ -1476,6 +1484,7 @@ def create_app() -> FastAPI:
                         compress_tool_results=gw.config.compression.tool_results,
                         variants=gw.variants,
                         tier_name=tier_name,
+                        config=gw.config,
                     )
                 )
                 gw.comp_tokens_before += comp_before
@@ -1507,6 +1516,7 @@ def create_app() -> FastAPI:
                     round(comp_after / comp_before, 4) if comp_before > 0 else 1.0
                 ),
                 "tokens_saved": max(comp_before - comp_after, 0),
+                "compression_loop_detected": comp_loop,
                 "session_id": session_id if session_id != "unknown" else None,
             }
 
@@ -2947,6 +2957,30 @@ def _score_messages_by_relevance(
 _RELEVANCE_AGE_DISCOUNT = 0.25
 
 
+def _detect_compression_loop(messages: list[dict]) -> bool:
+    """Detect repeated identical tool calls — a sign compression is eating
+    results faster than the model can consume them."""
+    from collections import Counter
+
+    hashes: list[int] = []
+    for msg in messages:
+        if msg.get("role") != "assistant":
+            continue
+        content = msg.get("content")
+        if not isinstance(content, list):
+            continue
+        for block in content:
+            if not isinstance(block, dict) or block.get("type") != "tool_use":
+                continue
+            h = hash((block.get("name", ""), json.dumps(block.get("input", {}), sort_keys=True)))
+            hashes.append(h)
+    recent = hashes[-16:]
+    if not recent:
+        return False
+    dupes = {h: c for h, c in Counter(recent).items() if c >= 3}
+    return len(dupes) > 0
+
+
 def _compress_messages_inline(
     processor: Any,
     messages: list[dict],
@@ -2954,11 +2988,17 @@ def _compress_messages_inline(
     compress_tool_results: bool = True,
     variants: Any = None,
     tier_name: str = "medium",
-) -> tuple[list[dict], int, int, dict]:
+    config: Any = None,
+) -> tuple[list[dict], int, int, dict, bool]:
     """Compress older messages before forwarding to the provider.
 
-    Skips the last 2 messages (active context) and applies graduated
-    compression to everything else — oldest messages get compressed most.
+    Skips the last ``protect_window`` messages (active context) and applies
+    graduated compression to everything else — oldest messages get compressed
+    most.  The default protect window is 6 (configurable via
+    ``compression.tool_result_protect_window``); when repeated identical tool
+    calls are detected the window is widened further to break the read →
+    compress → re-read loop.
+
     Messages already carrying a loom:compressed tag are passed through
     untouched (double-compression prevention); the storage compression cache
     is consulted before compressing and updated after.
@@ -2975,7 +3015,25 @@ def _compress_messages_inline(
     n = len(messages)
     by_type: dict[str, dict[str, int]] = {}
     if n <= 2:
-        return messages, 0, 0, by_type
+        return messages, 0, 0, by_type, False
+
+    protect_window = 2
+    loop_multiplier = 3
+    if config is not None:
+        comp = getattr(config, "compression", None)
+        if comp is not None:
+            protect_window = getattr(comp, "tool_result_protect_window", 6)
+            loop_multiplier = getattr(comp, "loop_detected_protect_multiplier", loop_multiplier)
+
+    is_looping = _detect_compression_loop(messages)
+    if is_looping:
+        protect_window *= loop_multiplier
+        get_logger("loom.gateway").warning(
+            "compression-loop detected: widening protect window to %d messages",
+            protect_window,
+        )
+
+    protect_cutoff = max(n - protect_window, 0)
 
     mode_b = None
     if compress_tool_results:
@@ -2986,13 +3044,13 @@ def _compress_messages_inline(
         except Exception:
             mode_b = None
 
-    relevance = _score_messages_by_relevance(messages[: n - 2], variants)
+    relevance = _score_messages_by_relevance(messages[:protect_cutoff], variants)
 
     compressed: list[dict] = []
     tokens_before = 0
     tokens_after = 0
     for idx, msg in enumerate(messages):
-        if idx >= n - 2:
+        if idx >= protect_cutoff:
             compressed.append(msg)
             continue
         content = msg.get("content", "")
@@ -3036,7 +3094,7 @@ def _compress_messages_inline(
             compressed.append(out)
         else:
             compressed.append(msg)
-    return compressed, tokens_before, tokens_after, by_type
+    return compressed, tokens_before, tokens_after, by_type, is_looping
 
 
 def _run_compress_graduated(

@@ -68,7 +68,7 @@ def _rel_hash(text: str) -> str:
 def test_originals_preserved_and_resolvable():
     store = MemoryVariantStore()
     msgs = _messages(8)
-    out, _, _, _ = _compress_messages_inline(
+    out, _, _, _, _ = _compress_messages_inline(
         FakeProcessor(), msgs, variants=store
     )
     # A compressed message's pointer tag resolves back to its original.
@@ -84,7 +84,7 @@ def test_relevance_skips_indexed_content():
     idx_hash = _rel_hash(msgs[4]["content"])
     store = MemoryVariantStore(indexed={idx_hash})
 
-    out, _, _, _ = _compress_messages_inline(
+    out, _, _, _, _ = _compress_messages_inline(
         FakeProcessor(), msgs, variants=store
     )
     # Indexed message: age 4/7 = 0.57 -> discounted to 0.32... still >= 0.3?
@@ -97,7 +97,7 @@ def test_relevance_skips_indexed_content():
 
     idx3 = _rel_hash(msgs[3]["content"])
     store2 = MemoryVariantStore(indexed={idx3})
-    out2, _, _, _ = _compress_messages_inline(
+    out2, _, _, _, _ = _compress_messages_inline(
         FakeProcessor(), msgs, variants=store2
     )
     # age 3/7 = 0.43 -> 0.18 after discount -> below 0.3 -> untouched
@@ -134,7 +134,7 @@ def test_store_errors_never_break_compression():
             raise RuntimeError("graph down")
 
     msgs = _messages(8)
-    out, before, after, _ = _compress_messages_inline(
+    out, before, after, _, _loop = _compress_messages_inline(
         FakeProcessor(), msgs, variants=ExplodingStore()
     )
     assert before > after  # compression still happened
