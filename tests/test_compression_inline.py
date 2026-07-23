@@ -34,7 +34,7 @@ class FakeProcessor:
 
 def test_savings_measured_and_tagged():
     msgs = _messages(8)
-    out, before, after, _ = _compress_messages_inline(FakeProcessor(), msgs)
+    out, before, after, _, _loop = _compress_messages_inline(FakeProcessor(), msgs)
     assert before > after > 0
     # Last 2 messages untouched
     assert out[-1] == msgs[-1] and out[-2] == msgs[-2]
@@ -45,9 +45,9 @@ def test_savings_measured_and_tagged():
 
 def test_tagged_messages_not_recompressed():
     msgs = _messages(8)
-    out1, _, _, _ = _compress_messages_inline(FakeProcessor(), msgs)
+    out1, _, _, _, _ = _compress_messages_inline(FakeProcessor(), msgs)
     # Second pass over the already-compressed conversation
-    out2, before2, after2, _ = _compress_messages_inline(FakeProcessor(), out1)
+    out2, before2, after2, _, _ = _compress_messages_inline(FakeProcessor(), out1)
     for m1, m2 in zip(out1[:-2], out2[:-2]):
         if _strip_loom_tag(
             m1["content"] if isinstance(m1["content"], str) else ""
@@ -60,14 +60,14 @@ def test_cache_roundtrip(tmp_path):
     store = LoomStorage(db_path=str(tmp_path / "cache.db"))
     store.connect()
     msgs = _messages(8)
-    out1, _, _, _ = _compress_messages_inline(FakeProcessor(), msgs, store)
+    out1, _, _, _, _ = _compress_messages_inline(FakeProcessor(), msgs, store)
 
     class ExplodingProcessor:
         def compress_graduated(self, text, age_ratio):
             raise AssertionError("should have hit the cache")
 
     # Same original messages -> cache supplies the compressed text.
-    out2, _, _, _ = _compress_messages_inline(
+    out2, _, _, _, _ = _compress_messages_inline(
         ExplodingProcessor(), _messages(8), store
     )
     assert [m["content"] for m in out2] == [m["content"] for m in out1]
@@ -76,7 +76,7 @@ def test_cache_roundtrip(tmp_path):
 
 def test_short_conversations_untouched():
     msgs = _messages(2)
-    out, before, after, _ = _compress_messages_inline(FakeProcessor(), msgs)
+    out, before, after, _, _loop = _compress_messages_inline(FakeProcessor(), msgs)
     assert out == msgs and before == 0 and after == 0
 
 
@@ -93,7 +93,7 @@ def test_block_content_messages():
     msgs = _messages(6)
     # Index 2 of 6 -> age_ratio 0.4, old enough to compress.
     msgs[2]["content"] = [{"type": "text", "text": FILLER}]
-    out, before, after, by_type = _compress_messages_inline(FakeProcessor(), msgs)
+    out, before, after, by_type, _loop = _compress_messages_inline(FakeProcessor(), msgs)
     assert before > after
     # The block list stays a block list, text compressed in place.
     assert isinstance(out[2]["content"], list)
@@ -134,7 +134,7 @@ def _tool_conversation() -> list[dict]:
 def test_tool_result_text_compressed_structure_preserved():
     """tool_result text is compressed while the block structure survives."""
     msgs = _tool_conversation()
-    out, before, after, by_type = _compress_messages_inline(FakeProcessor(), msgs)
+    out, before, after, by_type, _loop = _compress_messages_inline(FakeProcessor(), msgs)
 
     # Structure preserved: lists stay lists, block types and ids intact.
     assert isinstance(out[3]["content"], list)
@@ -172,7 +172,7 @@ def test_tool_result_block_list_content():
             },
         ],
     }
-    out, before, after, _ = _compress_messages_inline(FakeProcessor(), msgs)
+    out, before, after, _, _loop = _compress_messages_inline(FakeProcessor(), msgs)
     inner = out[4]["content"][0]["content"]
     assert isinstance(inner, list) and len(inner) == 2
     assert inner[0]["type"] == "text"
@@ -184,7 +184,7 @@ def test_tool_result_block_list_content():
 def test_tool_results_opt_out():
     """compress_tool_results=False restores the old skip behavior."""
     msgs = _tool_conversation()
-    out, before, after, _ = _compress_messages_inline(
+    out, before, after, _, _loop = _compress_messages_inline(
         FakeProcessor(), msgs, compress_tool_results=False
     )
     assert out[4]["content"] == msgs[4]["content"]
@@ -199,15 +199,15 @@ def test_short_tool_results_untouched():
             {"type": "tool_result", "tool_use_id": "toolu_03", "content": "ok"},
         ],
     }
-    out, _, _, _ = _compress_messages_inline(FakeProcessor(), msgs)
+    out, _, _, _, _ = _compress_messages_inline(FakeProcessor(), msgs)
     assert out[4]["content"] == msgs[4]["content"]
 
 
 def test_tool_result_not_recompressed():
     """A compressed tool_result is not compressed again on the next turn."""
     msgs = _tool_conversation()
-    out1, _, _, _ = _compress_messages_inline(FakeProcessor(), msgs)
-    out2, _, _, _ = _compress_messages_inline(FakeProcessor(), out1)
+    out1, _, _, _, _ = _compress_messages_inline(FakeProcessor(), msgs)
+    out2, _, _, _, _ = _compress_messages_inline(FakeProcessor(), out1)
     assert out2[4]["content"] == out1[4]["content"]
 
 
@@ -220,5 +220,5 @@ def test_recent_tool_results_untouched():
             {"type": "tool_result", "tool_use_id": "toolu_04", "content": FILLER},
         ],
     }
-    out, _, _, _ = _compress_messages_inline(FakeProcessor(), msgs)
+    out, _, _, _, _ = _compress_messages_inline(FakeProcessor(), msgs)
     assert out[7]["content"] == msgs[7]["content"]

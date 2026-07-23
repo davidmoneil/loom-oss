@@ -73,6 +73,10 @@ compression:
   default_tier: medium  # light | medium | heavy | extreme
   tool_results: true    # compress text inside tool_result blocks
                         # (structure always preserved; tool_use never touched)
+  tool_result_protect_window: 6   # shield the last N messages from compression
+                                  # (prevents read → compress → re-read loops)
+  loop_detected_protect_multiplier: 3  # widen window by this factor when
+                                       # repeated identical tool calls detected
   # Optional LLM prose summarization (default: fully local/extractive, no
   # model calls). Any LLM failure falls back to extractive silently.
   # llm_prose: true

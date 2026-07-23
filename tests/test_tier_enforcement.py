@@ -54,7 +54,7 @@ def test_tiers_produce_different_output():
     """default_tier measurably alters compression output per tier."""
     sizes = {}
     for tier in ("light", "medium", "heavy", "extreme"):
-        out, before, after, _ = _compress_messages_inline(
+        out, before, after, _, _loop = _compress_messages_inline(
             TierProcessor(), _messages(8), tier_name=tier
         )
         sizes[tier] = sum(
@@ -66,7 +66,7 @@ def test_tiers_produce_different_output():
 
 def test_light_tier_filler_only():
     proc = TierProcessor()
-    out, before, after, _ = _compress_messages_inline(
+    out, before, after, _, _loop = _compress_messages_inline(
         proc, _messages(8), tier_name="light"
     )
     # Light never invokes the graduated pass...
@@ -94,7 +94,7 @@ def test_extreme_forces_max_age_and_fingerprints_tool_results():
         ],
     }
     proc = TierProcessor()
-    out, before, after, by_type = _compress_messages_inline(
+    out, before, after, by_type, _loop = _compress_messages_inline(
         proc, msgs, tier_name="extreme"
     )
     # Text messages all compressed at age 1.0.
@@ -117,10 +117,10 @@ def test_extreme_fingerprint_not_refingerprinted():
             {"type": "tool_result", "tool_use_id": "toolu_x", "content": FILLER},
         ],
     }
-    out1, _, _, _ = _compress_messages_inline(
+    out1, _, _, _, _ = _compress_messages_inline(
         TierProcessor(), msgs, tier_name="extreme"
     )
-    out2, _, _, _ = _compress_messages_inline(
+    out2, _, _, _, _ = _compress_messages_inline(
         TierProcessor(), out1, tier_name="extreme"
     )
     assert out2[4]["content"] == out1[4]["content"]

@@ -87,6 +87,14 @@ class CompressionConfig(BaseModel):
     neo4j_user: str = ""
     neo4j_password: str = ""
     neo4j_database: str = "neo4j"
+    # How many recent messages are protected from compression.  The default
+    # (2) only shields the very last exchange; raise to 6-8 to prevent the
+    # "read → compress → re-read" loop that wastes tokens.
+    tool_result_protect_window: int = 6
+    # When the gateway detects repeated identical tool calls (a sign that
+    # compression is eating results faster than the model can use them),
+    # multiply the protect window by this factor.
+    loop_detected_protect_multiplier: int = 3
 
 
 class StorageConfig(BaseModel):
