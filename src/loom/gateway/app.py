@@ -1061,9 +1061,10 @@ async def lifespan(app: FastAPI):
     state.index_models()
 
     for provider in state.config.providers:
-        state.backends[provider.name] = state.build_backend(
-            provider.name, provider.api_base
-        )
+        backend = state.build_backend(provider.name, provider.api_base)
+        if hasattr(backend, "set_config_models") and provider.models:
+            backend.set_config_models([m.model_id for m in provider.models])
+        state.backends[provider.name] = backend
 
     if SensitiveDataScanner is not None:
         try:
@@ -1220,7 +1221,7 @@ def create_app() -> FastAPI:
     @app.middleware("http")
     async def rate_limit_middleware(request: Request, call_next):
         path = request.url.path
-        _EXEMPT_PREFIXES = ("/health", "/api/models", "/api/metrics", "/api/audit", "/api/config", "/api/scanner", "/api/tags")
+        _EXEMPT_PREFIXES = ("/health", "/v1/models", "/api/models", "/api/metrics", "/api/audit", "/api/config", "/api/scanner", "/api/tags")
         if any(path.startswith(p) for p in _EXEMPT_PREFIXES):
             return await call_next(request)
         client_ip = request.client.host if request.client else "unknown"
@@ -1379,6 +1380,34 @@ def create_app() -> FastAPI:
             _audit_error(gw, request_id, "/v1/chat/completions", source, 500)
             return _error_response(exc, request_id)
 
+    # ------------------------------------------- models (Anthropic discovery)
+    @app.get("/v1/models")
+    async def models_endpoint(request: Request):
+        gw = state()
+        anthropic_provider = None
+        for p in gw.config.providers:
+            if p.name == "anthropic":
+                anthropic_provider = p
+                break
+        if not anthropic_provider or not anthropic_provider.models:
+            return JSONResponse(
+                {"data": [], "has_more": False, "first_id": None, "last_id": None}
+            )
+        data = []
+        for m in anthropic_provider.models:
+            data.append({
+                "id": m.model_id,
+                "display_name": m.display_name or m.model_id,
+                "type": "model",
+                "created_at": "2024-01-01T00:00:00Z",
+            })
+        return JSONResponse({
+            "data": data,
+            "has_more": False,
+            "first_id": data[0]["id"] if data else None,
+            "last_id": data[-1]["id"] if data else None,
+        })
+
     # ------------------------------------------- count_tokens (Anthropic passthrough)
     @app.post("/v1/messages/count_tokens")
     async def count_tokens_endpoint(request: Request):
@@ -1398,6 +1427,24 @@ def create_app() -> FastAPI:
             return _error_response(
                 ProviderError("invalid JSON body", status_code=400), request_id, 400
             )
+        if (
+            gw.config.compression
+            and gw.config.compression.enabled
+            and gw.processor
+            and body.get("messages")
+        ):
+            try:
+                body["messages"], _, _, _, _ = _compress_messages_inline(
+                    gw.processor,
+                    body["messages"],
+                    gw.storage,
+                    compress_tool_results=True,
+                    variants=getattr(gw, "variants", None),
+                    tier_name="medium",
+                    config=gw.config,
+                )
+            except Exception:
+                pass
         try:
             status_code, payload = await counter(body, dict(request.headers))
             return JSONResponse(
@@ -2914,6 +2961,13 @@ def _compress_content_blocks(
             out_blocks.append(block)
             continue
 
+        if "cache_control" in block:
+            tb = _block_tokens(block)
+            tokens_before += tb
+            tokens_after += tb
+            out_blocks.append(block)
+            continue
+
         btype = block.get("type")
         if btype == "text" and isinstance(block.get("text"), str):
             text = block["text"]
@@ -3029,6 +3083,17 @@ def _detect_compression_loop(messages: list[dict]) -> bool:
     return len(dupes) > 0
 
 
+def _has_cache_control(msg: dict) -> bool:
+    """Return True if any content block in *msg* carries a cache_control key."""
+    content = msg.get("content")
+    if isinstance(content, list):
+        return any(
+            isinstance(block, dict) and "cache_control" in block
+            for block in content
+        )
+    return False
+
+
 def _compress_messages_inline(
     processor: Any,
     messages: list[dict],
@@ -3090,6 +3155,11 @@ def _compress_messages_inline(
         if idx >= protect_cutoff:
             compressed.append(msg)
             continue
+
+        if _has_cache_control(msg):
+            compressed.append(msg)
+            continue
+
         content = msg.get("content", "")
         age_ratio = idx / max(n - 1, 1)
         if relevance.get(idx, 0.0) >= 0.7:
