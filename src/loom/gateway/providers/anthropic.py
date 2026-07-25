@@ -90,6 +90,10 @@ def _extract_ratelimit_headers(resp: httpx.Response) -> dict:
 class AnthropicBackend(ProviderBackend):
     name = "anthropic"
     _last_ratelimit: dict = {}
+    _config_models: list[str] | None = None
+
+    def set_config_models(self, model_ids: list[str]) -> None:
+        self._config_models = model_ids
 
     _STRIP_HEADERS = frozenset({
         "host", "connection", "keep-alive", "proxy-authenticate",
@@ -256,6 +260,8 @@ class AnthropicBackend(ProviderBackend):
                     yield chunk
 
     async def list_models(self) -> list[str]:
+        if self._config_models:
+            return list(self._config_models)
         return list(_KNOWN_MODELS)
 
 
