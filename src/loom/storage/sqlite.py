@@ -20,7 +20,11 @@ import threading
 import time
 from typing import Any, Optional
 
-SCHEMA_VERSION = 11
+SCHEMA_VERSION = 12
+
+# Compression-cache entries live this long, matching the Postgres backend's
+# "NOW() + INTERVAL '7 days'".
+CACHE_TTL_SECONDS = 7 * 86400
 
 _FLUSH_INTERVAL_SECONDS = 2.0
 
@@ -346,6 +350,26 @@ class LoomStorage:
                     CREATE UNIQUE INDEX IF NOT EXISTS idx_gateway_keys_hash
                         ON gateway_keys (key_hash);
                 """)
+            except sqlite3.OperationalError:
+                pass
+
+        if current < 12:
+            # Cache hit tracking + TTL, mirroring the Postgres schema so
+            # cache_stats/cleanup_expired_cache behave identically.
+            for ddl in (
+                "ALTER TABLE compression_cache ADD COLUMN hits INTEGER DEFAULT 0",
+                "ALTER TABLE compression_cache ADD COLUMN expires_at REAL",
+            ):
+                try:
+                    c.execute(ddl)
+                except sqlite3.OperationalError:
+                    pass
+            try:
+                c.execute(
+                    "UPDATE compression_cache SET expires_at = created_at + ? "
+                    "WHERE expires_at IS NULL",
+                    (CACHE_TTL_SECONDS,),
+                )
             except sqlite3.OperationalError:
                 pass
 
@@ -1053,18 +1077,26 @@ class LoomStorage:
     ) -> Optional[dict]:
         row = self.conn.execute(
             """
-            SELECT content_hash, age_ratio, compressed_text, tier,
+            SELECT id, content_hash, age_ratio, compressed_text, tier,
                    tokens_before, tokens_after, created_at
             FROM compression_cache
-            WHERE content_hash = ?
+            WHERE content_hash = ? AND (expires_at IS NULL OR expires_at > ?)
             ORDER BY ABS(age_ratio - ?) ASC, created_at DESC
             LIMIT 1
             """,
-            (content_hash, age_ratio),
+            (content_hash, time.time(), age_ratio),
         ).fetchone()
         if row is None:
             return None
-        return dict(row)
+        entry = dict(row)
+        row_id = entry.pop("id")
+        with self._write_lock:
+            self.conn.execute(
+                "UPDATE compression_cache SET hits = hits + 1 WHERE id = ?",
+                (row_id,),
+            )
+            self._schedule_flush()
+        return entry
 
     def put_compression_cached(
         self,
@@ -1080,8 +1112,8 @@ class LoomStorage:
                 """
                 INSERT INTO compression_cache (
                     content_hash, age_ratio, compressed_text, tier,
-                    tokens_before, tokens_after, created_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?)
+                    tokens_before, tokens_after, created_at, expires_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     content_hash,
@@ -1091,9 +1123,32 @@ class LoomStorage:
                     tokens_before,
                     tokens_after,
                     time.time(),
+                    time.time() + CACHE_TTL_SECONDS,
                 ),
             )
             self._schedule_flush()
+
+    def cleanup_expired_cache(self) -> int:
+        with self._write_lock:
+            cur = self.conn.execute(
+                "DELETE FROM compression_cache WHERE expires_at < ?",
+                (time.time(),),
+            )
+            self.conn.commit()
+        return cur.rowcount
+
+    def cache_stats(self) -> dict:
+        row = self.conn.execute(
+            "SELECT count(*), coalesce(sum(hits), 0), "
+            "coalesce(sum(tokens_before - tokens_after), 0) "
+            "FROM compression_cache WHERE expires_at IS NULL OR expires_at > ?",
+            (time.time(),),
+        ).fetchone()
+        return {
+            "entries": row[0],
+            "total_hits": row[1],
+            "total_tokens_saved": row[2],
+        }
 
     # ---- gateway key management ----
 

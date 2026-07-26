@@ -495,6 +495,68 @@ class PostgresStorage:
         return result.rowcount
 
     # ------------------------------------------------------------------ reads
+    def get_routing_decisions(self, hours: int = 24, limit: int = 200) -> dict:
+        since = time.time() - hours * 3600
+        rows = self.conn.execute(
+            """
+            SELECT timestamp, request_id, source, task_type,
+                   model_recommended, model_used, routing_reason,
+                   determinism_score, alternatives_json
+            FROM routing_decisions
+            WHERE timestamp >= %s
+            ORDER BY timestamp DESC LIMIT %s
+            """,
+            (since, limit),
+        ).fetchall()
+        cols = (
+            "timestamp", "request_id", "source", "task_type",
+            "model_recommended", "model_used", "routing_reason",
+            "determinism_score", "alternatives_json",
+        )
+        entries = []
+        for r in rows:
+            entry = dict(zip(cols, r))
+            raw = entry.pop("alternatives_json", None)
+            if raw:
+                try:
+                    entry["alternatives"] = (
+                        raw if isinstance(raw, list) else json.loads(raw)
+                    )
+                except Exception:
+                    entry["alternatives"] = []
+            else:
+                entry["alternatives"] = []
+            entries.append(entry)
+
+        reason_rows = self.conn.execute(
+            """
+            SELECT routing_reason, COUNT(*) AS n
+            FROM routing_decisions
+            WHERE timestamp >= %s
+            GROUP BY routing_reason
+            ORDER BY n DESC
+            """,
+            (since,),
+        ).fetchall()
+        by_reason = {r[0]: r[1] for r in reason_rows}
+
+        override_row = self.conn.execute(
+            """
+            SELECT COUNT(*) AS n
+            FROM routing_decisions
+            WHERE timestamp >= %s AND model_recommended != model_used
+            """,
+            (since,),
+        ).fetchone()
+
+        return {
+            "hours": hours,
+            "total": len(entries),
+            "entries": entries,
+            "by_reason": by_reason,
+            "overrides": override_row[0] if override_row else 0,
+        }
+
     def get_routing_stats(self, hours: int = 24) -> dict:
         since = time.time() - hours * 3600
         rows = self.conn.execute(

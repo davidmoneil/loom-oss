@@ -1187,9 +1187,28 @@ async def lifespan(app: FastAPI):
     except Exception:
         state.variants = None
 
+    async def _cache_janitor() -> None:
+        # Expired compression-cache rows previously accumulated forever —
+        # cleanup_expired_cache existed but was never called on either backend.
+        while True:
+            await asyncio.sleep(3600)
+            if state.storage is None:
+                continue
+            try:
+                removed = await asyncio.to_thread(state.storage.cleanup_expired_cache)
+                if removed:
+                    get_logger("loom.gateway").info(
+                        "cache janitor removed %d expired entries", removed
+                    )
+            except Exception:
+                pass
+
+    janitor = asyncio.create_task(_cache_janitor())
+
     try:
         yield
     finally:
+        janitor.cancel()
         if state.variants is not None:
             try:
                 state.variants.close()
