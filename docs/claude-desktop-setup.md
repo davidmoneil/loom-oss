@@ -1,24 +1,57 @@
-# Using Loom with Claude Desktop (Developer Mode)
+# Using Loom with Claude Desktop
 
 Route Claude Desktop's API traffic through Loom for compression and observability.
-Requires **Developer Mode** (Settings → Developer).
 
 ## How It Works
 
-Claude Desktop in developer mode lets you configure a custom base URL for Anthropic API
-calls. Point it at Loom, and all chat traffic flows through the gateway. Because Claude
-Desktop sends its own API key in the `Authorization` header, you need a **separate**
-gateway key (`x-loom-gateway-key`) if Loom has key authentication enabled — otherwise the
-`Authorization` bearer token would be consumed by gateway auth and never reach the
-upstream provider.
+Claude Desktop lets you configure a custom base URL for Anthropic API calls (the
+third-party inference form, or `anthropicBaseUrl` in the developer config). Point it at
+Loom, and all chat traffic flows through the gateway.
 
-## Prerequisites
+**Important credential behavior**: if you enter *any* credential in Claude Desktop's
+third-party inference form, the app abandons your claude.ai (MAX subscription) OAuth
+login and sends only that credential. There is no way to send both a gateway key and
+your OAuth token from that form. This leads to two distinct setups:
 
-- Loom running locally (default port `4444`)
-- Claude Desktop with Developer Mode enabled (Settings → Developer)
-- A gateway key, if Loom has key authentication enabled
+- **OAuth passthrough (recommended for subscription users)** — configure the base URL
+  *only*, leave the credential blank, and enable `oauth_passthrough` in Loom. Claude
+  Desktop keeps using your claude.ai login; Loom lets the OAuth token through and
+  Anthropic validates it upstream. Usage bills to your subscription, not an API key.
+- **API key + gateway key** — enter your Anthropic API key as the credential (billing
+  moves to that key), or use the developer-config `defaultHeaders` route with a
+  `x-loom-gateway-key` header if your Claude Desktop build supports it.
 
-## Setup
+## Setup A: OAuth Passthrough (subscription billing)
+
+### 1. Enable passthrough in Loom
+
+In `loom.yaml`:
+
+```yaml
+server:
+  oauth_passthrough: true
+```
+
+Or via environment: `LOOM_OAUTH_PASSTHROUGH=1`. Restart Loom.
+
+With passthrough enabled, requests carrying an Anthropic OAuth token
+(`Authorization: Bearer sk-ant-oat...`) skip gateway key validation. Everything else
+still requires a gateway key when key auth is enabled. The token is never stored by
+Loom; Anthropic validates it upstream, and the per-IP rate limiter still applies.
+
+### 2. Configure Claude Desktop
+
+In the third-party inference / custom base URL setting:
+
+- **Base URL**: `http://localhost:4444` (or your Loom host)
+- **Credential**: leave **blank** — entering one disables your claude.ai login
+
+Restart Claude Desktop and confirm you are still signed in to your claude.ai account.
+
+## Setup B: API Key + Gateway Key
+
+Use this when you want Claude Desktop traffic billed to an Anthropic API key, or when
+you cannot enable `oauth_passthrough`.
 
 ### 1. Create a gateway key (if key auth is enabled)
 
@@ -32,11 +65,9 @@ curl -s http://localhost:4444/api/gateway-keys \
 
 Save the returned key — it is shown only once.
 
-If you're running Loom without gateway key auth (no keys configured), skip this step.
-
 ### 2. Configure Claude Desktop
 
-Open Claude Desktop → Settings → Developer → Edit Config, and add:
+If your build exposes Developer → Edit Config with header support:
 
 ```json
 {
@@ -57,7 +88,11 @@ Open Claude Desktop → Settings → Developer → Edit Config, and add:
 | `x-loom-client` | Identifies this client in session metadata and the dashboard | Recommended |
 | `x-loom-source` | Routes requests through the `desktop` source policy in `loom.yaml` | Optional |
 
-### 3. (Optional) Add a source policy
+With `x-loom-gateway-key` present, the middleware validates it as the gateway key and
+the `Authorization` header passes through untouched to the upstream provider. The
+`x-loom-gateway-key` header is stripped before forwarding.
+
+## (Optional) Source policy
 
 In `loom.yaml`, add a source-specific configuration:
 
@@ -70,24 +105,6 @@ sources:
 ```
 
 Without a dedicated source policy, requests from Claude Desktop use the `default` source.
-
-## How Gateway Key Auth Works with Claude Desktop
-
-Without the `x-loom-gateway-key` header:
-
-1. Claude Desktop sends `Authorization: Bearer sk-ant-...` (its Anthropic API key)
-2. Loom's gateway auth middleware reads the `Authorization` header
-3. The bearer token is validated as a gateway key — **it fails** because it's an Anthropic key, not a gateway key
-4. Request is rejected with 401
-
-With the `x-loom-gateway-key` header:
-
-1. Claude Desktop sends both `Authorization: Bearer sk-ant-...` and `x-loom-gateway-key: gk-...`
-2. Loom's auth middleware reads `x-loom-gateway-key` first — validates it as a gateway key
-3. The `Authorization` header passes through untouched to the upstream provider
-4. Anthropic receives the original API key and authenticates normally
-
-The `x-loom-gateway-key` header is stripped before forwarding to upstream providers.
 
 ## Verify
 
@@ -107,7 +124,8 @@ curl -sf http://localhost:4444/health | jq .requests
 
 | Symptom | Cause | Fix |
 |---------|-------|-----|
-| 401 Unauthorized | Gateway key auth is on, no `x-loom-gateway-key` header | Add the header to `defaultHeaders` in Claude Desktop config |
+| 401 from Anthropic after adding a credential | Entering a credential in the third-party form disabled the claude.ai OAuth login | Clear the credential (base URL only) and enable `oauth_passthrough` in Loom |
+| 401 `invalid gateway key` from Loom | Key auth is on and the request has neither a valid gateway key nor an OAuth token with passthrough enabled | Enable `oauth_passthrough` (Setup A) or supply `x-loom-gateway-key` (Setup B) |
 | Connection refused | Loom is not running | Start Loom; Claude Desktop will retry |
-| Requests show as `client_type: "api"` | Missing `x-loom-client` header | Add `"x-loom-client": "claude-desktop"` to `defaultHeaders` |
+| Requests show as `client_type: "api"` | Missing `x-loom-client` header (OAuth passthrough setup cannot send custom headers) | Expected under Setup A — the dashboard falls back to User-Agent detection |
 | Claude Desktop ignores the config | Developer mode not enabled | Settings → Developer → enable Developer Mode, then restart |

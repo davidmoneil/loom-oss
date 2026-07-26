@@ -676,11 +676,33 @@ def _bearer(request: Request) -> str:
 
 
 def _gateway_key(request: Request) -> str:
-    """Extract gateway key: x-loom-gateway-key first, then Authorization Bearer."""
+    """Extract gateway key: x-loom-gateway-key, x-api-key, or Authorization Bearer."""
     gk = request.headers.get("x-loom-gateway-key", "").strip()
     if gk:
         return gk
+    xapi = request.headers.get("x-api-key", "").strip()
+    if xapi:
+        return xapi
     return _bearer(request)
+
+
+def _provider_api_key(request: Request) -> str:
+    """Extract the upstream provider API key, skipping the gateway key header.
+
+    If x-loom-gateway-key carried the gateway credential, both x-api-key and
+    Authorization are available for the provider.  If x-api-key carried it,
+    fall back to Authorization.  If Authorization carried it, fall back to
+    x-api-key.  This prevents the gateway key from being forwarded upstream.
+    """
+    gk_header = request.headers.get("x-loom-gateway-key", "").strip()
+    xapi = request.headers.get("x-api-key", "").strip()
+    bearer = _bearer(request)
+
+    if gk_header:
+        return xapi or bearer
+    if xapi:
+        return bearer
+    return ""
 
 
 def _source(request: Request) -> str:
@@ -1242,9 +1264,18 @@ def create_app() -> FastAPI:
                 if keys_exist is None:
                     keys_exist = bool(gw_inner.storage.list_gateway_keys())
                     gw_inner._gateway_keys_exist = keys_exist
-                if keys_exist:
+                oauth_bearer = (
+                    config.server.oauth_passthrough
+                    and _bearer(request).startswith("sk-ant-oat")
+                )
+                if keys_exist and not oauth_bearer:
                     raw_key = _gateway_key(request)
                     if not raw_key or not gw_inner.storage.validate_gateway_key(raw_key):
+                        get_logger("loom.gateway").warning(
+                            "gateway auth failed (path=%s, key=%s)",
+                            path,
+                            "present" if raw_key else "missing",
+                        )
                         return JSONResponse(
                             {"error": {"message": "invalid gateway key", "type": "authentication_error"}},
                             status_code=401,
@@ -1282,7 +1313,7 @@ def create_app() -> FastAPI:
             )
 
         messages = body.get("messages") or []
-        api_key = _bearer(request)
+        api_key = _provider_api_key(request) or _bearer(request)
         source = _source(request)
         stream = bool(body.get("stream", False))
 
@@ -1496,7 +1527,7 @@ def create_app() -> FastAPI:
             )
 
         messages = body.get("messages") or []
-        api_key = request.headers.get("x-api-key", "") or _bearer(request)
+        api_key = _provider_api_key(request) or request.headers.get("x-api-key", "") or _bearer(request)
         source = _source(request)
         stream = bool(body.get("stream", False))
 
