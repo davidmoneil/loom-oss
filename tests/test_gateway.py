@@ -259,3 +259,64 @@ def test_derive_session_id_legacy_compat():
     )
     assert isinstance(sid, str)
     assert sid.startswith("gw-")
+
+
+def test_gateway_key_prefers_header_over_bearer():
+    """_gateway_key uses x-loom-gateway-key when present, ignoring Bearer."""
+    from loom.gateway.app import _gateway_key
+    from starlette.testclient import TestClient
+    from starlette.requests import Request
+    from starlette.datastructures import Headers
+
+    scope = {
+        "type": "http",
+        "method": "POST",
+        "path": "/v1/messages",
+        "headers": [
+            (b"authorization", b"Bearer user-provider-key"),
+            (b"x-loom-gateway-key", b"gk-secret-123"),
+        ],
+    }
+    request = Request(scope)
+    assert _gateway_key(request) == "gk-secret-123"
+
+
+def test_gateway_key_falls_back_to_bearer():
+    """_gateway_key uses Bearer when x-loom-gateway-key is absent."""
+    from loom.gateway.app import _gateway_key
+    from starlette.requests import Request
+
+    scope = {
+        "type": "http",
+        "method": "POST",
+        "path": "/v1/messages",
+        "headers": [
+            (b"authorization", b"Bearer my-api-key"),
+        ],
+    }
+    request = Request(scope)
+    assert _gateway_key(request) == "my-api-key"
+
+
+def test_extract_session_signals_x_loom_client():
+    """x-loom-client header takes priority over User-Agent detection."""
+    from loom.gateway.app import _extract_session_signals
+
+    msgs = [{"role": "user", "content": "hello"}]
+    signals = _extract_session_signals(
+        msgs, "default",
+        headers={"x-loom-client": "claude-desktop", "user-agent": "python-requests/2.31"},
+    )
+    assert signals["client_type"] == "claude-desktop"
+
+
+def test_extract_session_signals_x_loom_client_empty_falls_through():
+    """Empty x-loom-client falls through to User-Agent detection."""
+    from loom.gateway.app import _extract_session_signals
+
+    msgs = [{"role": "user", "content": "hello"}]
+    signals = _extract_session_signals(
+        msgs, "default",
+        headers={"x-loom-client": "", "user-agent": "python-requests/2.31"},
+    )
+    assert signals["client_type"] == "sdk-python"
