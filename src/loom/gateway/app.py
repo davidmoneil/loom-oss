@@ -1218,12 +1218,30 @@ def create_app() -> FastAPI:
         window_seconds=config.server.rate_limit_window_seconds,
     )
 
+    _AUTH_REQUIRED_PREFIXES = ("/v1/messages", "/v1/chat/completions")
+
     @app.middleware("http")
     async def rate_limit_middleware(request: Request, call_next):
         path = request.url.path
         _EXEMPT_PREFIXES = ("/health", "/v1/models", "/api/models", "/api/metrics", "/api/audit", "/api/config", "/api/scanner", "/api/tags")
         if any(path.startswith(p) for p in _EXEMPT_PREFIXES):
             return await call_next(request)
+
+        if any(path.startswith(p) for p in _AUTH_REQUIRED_PREFIXES):
+            gw_inner = app.state.gateway
+            if hasattr(gw_inner.storage, "validate_gateway_key"):
+                keys_exist = getattr(gw_inner, "_gateway_keys_exist", None)
+                if keys_exist is None:
+                    keys_exist = bool(gw_inner.storage.list_gateway_keys())
+                    gw_inner._gateway_keys_exist = keys_exist
+                if keys_exist:
+                    raw_key = _bearer(request)
+                    if not raw_key or not gw_inner.storage.validate_gateway_key(raw_key):
+                        return JSONResponse(
+                            {"error": {"message": "invalid gateway key", "type": "authentication_error"}},
+                            status_code=401,
+                        )
+
         client_ip = request.client.host if request.client else "unknown"
         if not rate_limiter.is_allowed(client_ip):
             return JSONResponse(
@@ -2378,6 +2396,58 @@ def create_app() -> FastAPI:
             return JSONResponse({"error": "source not found"}, status_code=404)
         del gw.config.sources[source_name]
         return _sanitized_config(gw.config)
+
+    # -------------------------------------------------------- gateway key management
+    @app.post(
+        "/api/config/gateway-keys",
+        tags=["config"],
+        summary="Create a new gateway API key (full key returned ONCE)",
+    )
+    async def api_create_gateway_key(request: Request):
+        gw = state()
+        if not hasattr(gw.storage, "create_gateway_key"):
+            return JSONResponse({"error": "gateway keys require postgres storage"}, status_code=501)
+        body = await request.json()
+        name = body.get("name", "Unnamed Key")
+        result = gw.storage.create_gateway_key(name)
+        gw._gateway_keys_exist = True
+        return JSONResponse(result, status_code=201)
+
+    @app.get(
+        "/api/config/gateway-keys",
+        tags=["config"],
+        summary="List gateway keys (masked — prefix only)",
+    )
+    async def api_list_gateway_keys():
+        gw = state()
+        if not hasattr(gw.storage, "list_gateway_keys"):
+            return JSONResponse({"error": "gateway keys require postgres storage"}, status_code=501)
+        return JSONResponse(gw.storage.list_gateway_keys())
+
+    @app.patch(
+        "/api/config/gateway-keys/{key_id}",
+        tags=["config"],
+        summary="Enable or disable a gateway key",
+    )
+    async def api_toggle_gateway_key(key_id: int, request: Request):
+        gw = state()
+        body = await request.json()
+        enabled = body.get("enabled", True)
+        if gw.storage.toggle_gateway_key(key_id, enabled):
+            return JSONResponse({"ok": True})
+        return JSONResponse({"error": "key not found"}, status_code=404)
+
+    @app.delete(
+        "/api/config/gateway-keys/{key_id}",
+        tags=["config"],
+        summary="Delete a gateway key",
+    )
+    async def api_delete_gateway_key(key_id: int):
+        gw = state()
+        if gw.storage.delete_gateway_key(key_id):
+            gw._gateway_keys_exist = None
+            return JSONResponse({"ok": True})
+        return JSONResponse({"error": "key not found"}, status_code=404)
 
     # -------------------------------------------------------- scanner management
     @app.get(

@@ -17,7 +17,10 @@ from typing import Any, Optional
 
 logger = get_logger("loom.storage.postgres")
 
-SCHEMA_VERSION = 10
+import hashlib
+import secrets
+
+SCHEMA_VERSION = 11
 
 
 class PostgresStorage:
@@ -172,6 +175,21 @@ class PostgresStorage:
                 applied_at DOUBLE PRECISION
             )
         """)
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS gateway_keys (
+                id SERIAL PRIMARY KEY,
+                name TEXT NOT NULL,
+                key_hash TEXT NOT NULL,
+                key_prefix TEXT NOT NULL,
+                created_at DOUBLE PRECISION NOT NULL,
+                last_used_at DOUBLE PRECISION,
+                enabled BOOLEAN DEFAULT TRUE
+            )
+        """)
+        conn.execute(
+            "CREATE UNIQUE INDEX IF NOT EXISTS idx_gateway_keys_hash "
+            "ON gateway_keys (key_hash)"
+        )
         self._table_created = True
 
     def migrate(self) -> None:
@@ -273,6 +291,23 @@ class PostgresStorage:
             )
             conn.execute("ALTER TABLE metrics ADD COLUMN IF NOT EXISTS skill TEXT")
             conn.execute("CREATE INDEX IF NOT EXISTS idx_metrics_skill ON metrics (skill)")
+
+        if current < 11:
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS gateway_keys (
+                    id SERIAL PRIMARY KEY,
+                    name TEXT NOT NULL,
+                    key_hash TEXT NOT NULL,
+                    key_prefix TEXT NOT NULL,
+                    created_at DOUBLE PRECISION NOT NULL,
+                    last_used_at DOUBLE PRECISION,
+                    enabled BOOLEAN DEFAULT TRUE
+                )
+            """)
+            conn.execute(
+                "CREATE UNIQUE INDEX IF NOT EXISTS idx_gateway_keys_hash "
+                "ON gateway_keys (key_hash)"
+            )
 
         if current < SCHEMA_VERSION:
             conn.execute(
@@ -1011,3 +1046,76 @@ class PostgresStorage:
             "total_hits": row[1],
             "total_tokens_saved": row[2],
         }
+
+    # ---- gateway key management ----
+
+    @staticmethod
+    def _hash_key(raw_key: str) -> str:
+        return hashlib.sha256(raw_key.encode()).hexdigest()
+
+    def create_gateway_key(self, name: str) -> dict:
+        """Create a new gateway key. Returns the full key ONCE."""
+        raw_key = f"loom-{secrets.token_urlsafe(32)}"
+        key_hash = self._hash_key(raw_key)
+        prefix = raw_key[:12]
+        now = time.time()
+        row = self.conn.execute(
+            "INSERT INTO gateway_keys (name, key_hash, key_prefix, created_at) "
+            "VALUES (%s, %s, %s, %s) RETURNING id",
+            (name, key_hash, prefix, now),
+        ).fetchone()
+        return {
+            "id": row[0],
+            "name": name,
+            "key": raw_key,
+            "key_prefix": prefix,
+            "created_at": now,
+        }
+
+    def validate_gateway_key(self, raw_key: str) -> Optional[dict]:
+        """Validate a key. Returns key info if valid, None if not."""
+        key_hash = self._hash_key(raw_key)
+        row = self.conn.execute(
+            "SELECT id, name, key_prefix, enabled FROM gateway_keys "
+            "WHERE key_hash = %s",
+            (key_hash,),
+        ).fetchone()
+        if not row or not row[3]:
+            return None
+        self.conn.execute(
+            "UPDATE gateway_keys SET last_used_at = %s WHERE id = %s",
+            (time.time(), row[0]),
+        )
+        return {"id": row[0], "name": row[1], "key_prefix": row[2]}
+
+    def list_gateway_keys(self) -> list[dict]:
+        """List all keys (masked — prefix only, no full key)."""
+        rows = self.conn.execute(
+            "SELECT id, name, key_prefix, created_at, last_used_at, enabled "
+            "FROM gateway_keys ORDER BY created_at DESC"
+        ).fetchall()
+        return [
+            {
+                "id": r[0],
+                "name": r[1],
+                "key_preview": f"{r[2]}...",
+                "created_at": r[3],
+                "last_used_at": r[4],
+                "enabled": r[5],
+            }
+            for r in rows
+        ]
+
+    def toggle_gateway_key(self, key_id: int, enabled: bool) -> bool:
+        cur = self.conn.execute(
+            "UPDATE gateway_keys SET enabled = %s WHERE id = %s RETURNING id",
+            (enabled, key_id),
+        )
+        return cur.fetchone() is not None
+
+    def delete_gateway_key(self, key_id: int) -> bool:
+        cur = self.conn.execute(
+            "DELETE FROM gateway_keys WHERE id = %s RETURNING id",
+            (key_id,),
+        )
+        return cur.fetchone() is not None

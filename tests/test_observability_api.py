@@ -109,7 +109,7 @@ def test_observability_routes_are_tagged_and_typed():
         path = getattr(route, "path", None)
         if path is None or path in proxy_paths:
             continue
-        if not (path == "/health" or path.startswith("/api/")):
+        if not (path == "/health" or path.startswith("/api/")) or path.startswith("/api/config/"):
             continue
         if not getattr(route, "include_in_schema", True):
             continue
