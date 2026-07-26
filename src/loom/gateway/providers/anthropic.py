@@ -100,6 +100,7 @@ class AnthropicBackend(ProviderBackend):
         "proxy-authorization", "te", "trailers", "transfer-encoding",
         "upgrade", "accept-encoding", "content-length", "content-type",
         "authorization", "x-api-key",
+        "x-loom-gateway-key", "x-loom-client",
     })
 
     def _headers(
@@ -113,7 +114,8 @@ class AnthropicBackend(ProviderBackend):
         }
         if inbound_headers:
             for name, value in inbound_headers.items():
-                if name.lower() not in self._STRIP_HEADERS:
+                lname = name.lower()
+                if lname not in self._STRIP_HEADERS and not lname.startswith("x-loom-"):
                     headers[name] = value
         upstream_host = self.api_base.replace("https://", "").replace("http://", "").split("/")[0]
         headers["host"] = upstream_host

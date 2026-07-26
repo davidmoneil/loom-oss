@@ -675,6 +675,14 @@ def _bearer(request: Request) -> str:
     return auth.strip()
 
 
+def _gateway_key(request: Request) -> str:
+    """Extract gateway key: x-loom-gateway-key first, then Authorization Bearer."""
+    gk = request.headers.get("x-loom-gateway-key", "").strip()
+    if gk:
+        return gk
+    return _bearer(request)
+
+
 def _source(request: Request) -> str:
     return request.headers.get("x-loom-source", "default")
 
@@ -1235,7 +1243,7 @@ def create_app() -> FastAPI:
                     keys_exist = bool(gw_inner.storage.list_gateway_keys())
                     gw_inner._gateway_keys_exist = keys_exist
                 if keys_exist:
-                    raw_key = _bearer(request)
+                    raw_key = _gateway_key(request)
                     if not raw_key or not gw_inner.storage.validate_gateway_key(raw_key):
                         return JSONResponse(
                             {"error": {"message": "invalid gateway key", "type": "authentication_error"}},
@@ -2675,13 +2683,16 @@ def _extract_session_signals(
     api_key_suffix = raw_key[-8:] if len(raw_key) >= 8 else ""
 
     # 3. Client type from headers
+    loom_client = headers.get("x-loom-client", "").strip().lower()
     user_agent = headers.get("user-agent", "")
     stainless_runtime = headers.get("x-stainless-runtime", "")
     stainless_os = headers.get("x-stainless-os", "")
     stainless_arch = headers.get("x-stainless-arch", "")
     beta_flags = headers.get("anthropic-beta", "")
 
-    if "claude-code" in user_agent.lower() or "prompt-caching" in beta_flags:
+    if loom_client:
+        client_type = loom_client
+    elif "claude-code" in user_agent.lower() or "prompt-caching" in beta_flags:
         client_type = "claude-code"
     elif stainless_runtime:
         client_type = f"sdk-{stainless_runtime}"
