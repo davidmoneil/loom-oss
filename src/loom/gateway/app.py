@@ -41,7 +41,9 @@ from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from loom import __version__
 from loom.config import LoomConfig, ModelConfig, SourcePolicy
+from loom.gateway.auth import check_request_auth, gateway_keys_exist, is_public_path
 from loom.logging_setup import configure_logging, get_logger
+from loom.netcheck import UnsafeURLError, validate_outbound_url
 from loom.storage import LoomStorage, create_storage
 
 from .providers import (
@@ -1122,6 +1124,19 @@ async def lifespan(app: FastAPI):
     except Exception:
         state.storage = None
 
+    # Auth posture at a glance. Without keys the whole API is open — that's
+    # intended for first-run setup, but it must never be a silent state.
+    try:
+        auth_on = state.storage is not None and gateway_keys_exist(state)
+    except Exception:
+        auth_on = False
+    if not auth_on:
+        get_logger("loom.gateway").critical(
+            "AUTH DISABLED: no gateway keys exist — every API endpoint is "
+            "unauthenticated. Create a key (POST /api/config/gateway-keys or "
+            "the dashboard Settings page) to enable authentication."
+        )
+
     if ThrottleGovernor is not None:
         try:
             state.governor = ThrottleGovernor()
@@ -1205,12 +1220,20 @@ class _RateLimiter:
         self._window = window_seconds
         self._buckets: dict[str, list[float]] = {}
         self._lock = threading.Lock()
+        self._last_sweep = time.monotonic()
 
     def is_allowed(self, key: str) -> bool:
         now = time.monotonic()
         with self._lock:
-            bucket = self._buckets.setdefault(key, [])
             cutoff = now - self._window
+            # Evict buckets for IPs that went quiet, or the dict grows
+            # unboundedly with one entry per client address ever seen.
+            if now - self._last_sweep > self._window:
+                self._buckets = {
+                    k: v for k, v in self._buckets.items() if v and v[-1] > cutoff
+                }
+                self._last_sweep = now
+            bucket = self._buckets.setdefault(key, [])
             bucket[:] = [t for t in bucket if t > cutoff]
             if len(bucket) >= self._max:
                 return False
@@ -1248,38 +1271,27 @@ def create_app() -> FastAPI:
         window_seconds=config.server.rate_limit_window_seconds,
     )
 
-    _AUTH_REQUIRED_PREFIXES = ("/v1/messages", "/v1/chat/completions")
-
     @app.middleware("http")
     async def rate_limit_middleware(request: Request, call_next):
         path = request.url.path
-        _EXEMPT_PREFIXES = ("/health", "/v1/models", "/api/models", "/api/metrics", "/api/audit", "/api/config", "/api/scanner", "/api/tags")
-        if any(path.startswith(p) for p in _EXEMPT_PREFIXES):
+        if is_public_path(path):
             return await call_next(request)
 
-        if any(path.startswith(p) for p in _AUTH_REQUIRED_PREFIXES):
-            gw_inner = app.state.gateway
-            if hasattr(gw_inner.storage, "validate_gateway_key"):
-                keys_exist = getattr(gw_inner, "_gateway_keys_exist", None)
-                if keys_exist is None:
-                    keys_exist = bool(gw_inner.storage.list_gateway_keys())
-                    gw_inner._gateway_keys_exist = keys_exist
-                oauth_bearer = (
-                    config.server.oauth_passthrough
-                    and _bearer(request).startswith("sk-ant-oat")
-                )
-                if keys_exist and not oauth_bearer:
-                    raw_key = _gateway_key(request)
-                    if not raw_key or not gw_inner.storage.validate_gateway_key(raw_key):
-                        get_logger("loom.gateway").warning(
-                            "gateway auth failed (path=%s, key=%s)",
-                            path,
-                            "present" if raw_key else "missing",
-                        )
-                        return JSONResponse(
-                            {"error": {"message": "invalid gateway key", "type": "authentication_error"}},
-                            status_code=401,
-                        )
+        denial = check_request_auth(
+            path,
+            _gateway_key(request),
+            _bearer(request),
+            app.state.gateway,
+            config.server.oauth_passthrough,
+        )
+        if denial is not None:
+            get_logger("loom.gateway").warning(
+                "gateway auth failed (path=%s, key=%s)", path, denial
+            )
+            return JSONResponse(
+                {"error": {"message": "invalid gateway key", "type": "authentication_error"}},
+                status_code=401,
+            )
 
         client_ip = request.client.host if request.client else "unknown"
         if not rate_limiter.is_allowed(client_ip):
@@ -1491,7 +1503,10 @@ def create_app() -> FastAPI:
             and body.get("messages")
         ):
             try:
-                body["messages"], _, _, _, _ = _compress_messages_inline(
+                # Off the event loop for the same reason as /v1/messages:
+                # compression is CPU-bound and may make blocking LLM calls.
+                body["messages"], _, _, _, _ = await asyncio.to_thread(
+                    _compress_messages_inline,
                     gw.processor,
                     body["messages"],
                     gw.storage,
@@ -1947,24 +1962,33 @@ def create_app() -> FastAPI:
                 }
             )
 
-        compressed: list[dict] = []
-        original_chars = 0
-        compressed_chars = 0
         n = len(messages)
-        try:
+
+        def _compress_all() -> tuple[list[dict], int, int]:
+            out_msgs: list[dict] = []
+            chars_in = 0
+            chars_out = 0
             for idx, msg in enumerate(messages):
                 content = msg.get("content", "")
                 text = content if isinstance(content, str) else json.dumps(content)
-                original_chars += len(text)
+                chars_in += len(text)
                 age_ratio = idx / max(n - 1, 1) if n > 1 else 0.0
                 if mode == "audit":
                     new_text = text
                 else:
                     new_text = _run_compress_graduated(gw.compression, text, age_ratio)
-                compressed_chars += len(new_text)
+                chars_out += len(new_text)
                 out = dict(msg)
                 out["content"] = new_text
-                compressed.append(out)
+                out_msgs.append(out)
+            return out_msgs, chars_in, chars_out
+
+        try:
+            # Off the event loop: graduated compression is CPU-bound and may
+            # call the prose LLM synchronously.
+            compressed, original_chars, compressed_chars = await asyncio.to_thread(
+                _compress_all
+            )
         except Exception as exc:
             return _error_response(exc, request_id)
 
@@ -2020,9 +2044,14 @@ def create_app() -> FastAPI:
     )
     async def health():
         gw = state()
+        try:
+            auth_enabled = gw.storage is not None and gateway_keys_exist(gw)
+        except Exception:
+            auth_enabled = False
         return {
             "status": "healthy",
             "version": __version__,
+            "auth_enabled": auth_enabled,
             "uptime_seconds": round(time.time() - gw.started_at, 1),
             "requests": gw.request_count,
             "errors": gw.error_count,
@@ -2344,6 +2373,7 @@ def create_app() -> FastAPI:
             "llm_url": str,
             "llm_model": str,
             "llm_timeout_seconds": float,
+            "allow_private_llm_url": bool,
             "variant_store": str,
         }
         VALID_TIERS = {"light", "medium", "heavy", "extreme"}
@@ -2371,6 +2401,14 @@ def create_app() -> FastAPI:
             updates[key] = val
         if not updates:
             return JSONResponse({"error": "no valid fields"}, status_code=400)
+        if "llm_url" in updates:
+            allow_private = updates.get(
+                "allow_private_llm_url", gw.config.compression.allow_private_llm_url
+            )
+            try:
+                validate_outbound_url(updates["llm_url"], allow_private=allow_private)
+            except UnsafeURLError as exc:
+                return JSONResponse({"error": f"llm_url rejected: {exc}"}, status_code=400)
         for key, val in updates.items():
             setattr(gw.config.compression, key, val)
         return _sanitized_config(gw.config)
@@ -2444,8 +2482,8 @@ def create_app() -> FastAPI:
     )
     async def api_create_gateway_key(request: Request):
         gw = state()
-        if not hasattr(gw.storage, "create_gateway_key"):
-            return JSONResponse({"error": "gateway keys require postgres storage"}, status_code=501)
+        if gw.storage is None:
+            return JSONResponse({"error": "storage unavailable"}, status_code=503)
         body = await request.json()
         name = body.get("name", "Unnamed Key")
         result = gw.storage.create_gateway_key(name)
@@ -2459,8 +2497,8 @@ def create_app() -> FastAPI:
     )
     async def api_list_gateway_keys():
         gw = state()
-        if not hasattr(gw.storage, "list_gateway_keys"):
-            return JSONResponse({"error": "gateway keys require postgres storage"}, status_code=501)
+        if gw.storage is None:
+            return JSONResponse({"error": "storage unavailable"}, status_code=503)
         return JSONResponse(gw.storage.list_gateway_keys())
 
     @app.patch(
@@ -2470,6 +2508,8 @@ def create_app() -> FastAPI:
     )
     async def api_toggle_gateway_key(key_id: int, request: Request):
         gw = state()
+        if gw.storage is None:
+            return JSONResponse({"error": "storage unavailable"}, status_code=503)
         body = await request.json()
         enabled = body.get("enabled", True)
         if gw.storage.toggle_gateway_key(key_id, enabled):
@@ -2483,6 +2523,8 @@ def create_app() -> FastAPI:
     )
     async def api_delete_gateway_key(key_id: int):
         gw = state()
+        if gw.storage is None:
+            return JSONResponse({"error": "storage unavailable"}, status_code=503)
         if gw.storage.delete_gateway_key(key_id):
             gw._gateway_keys_exist = None
             return JSONResponse({"ok": True})

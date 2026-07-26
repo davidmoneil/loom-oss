@@ -25,6 +25,8 @@ class ObservabilityResponse(BaseModel):
 class HealthResponse(ObservabilityResponse):
     status: str
     version: str | None = None
+    # False means no gateway keys exist and the API is running open.
+    auth_enabled: bool | None = None
     uptime_seconds: float | None = None
     checks: dict[str, Any] = {}
 

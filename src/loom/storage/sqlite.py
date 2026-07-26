@@ -11,14 +11,16 @@ via a periodic flush to avoid blocking the async event loop on every write.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
+import secrets
 import sqlite3
 import threading
 import time
 from typing import Any, Optional
 
-SCHEMA_VERSION = 10
+SCHEMA_VERSION = 11
 
 _FLUSH_INTERVAL_SECONDS = 2.0
 
@@ -324,6 +326,26 @@ class LoomStorage:
                     pass
             try:
                 c.execute("CREATE INDEX IF NOT EXISTS idx_metrics_skill ON metrics (skill)")
+            except sqlite3.OperationalError:
+                pass
+
+        if current < 11:
+            # Gateway API keys — parity with the Postgres backend so key auth
+            # works on the default install, not just Postgres deployments.
+            try:
+                c.executescript("""
+                    CREATE TABLE IF NOT EXISTS gateway_keys (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        name TEXT NOT NULL,
+                        key_hash TEXT NOT NULL,
+                        key_prefix TEXT NOT NULL,
+                        created_at REAL NOT NULL,
+                        last_used_at REAL,
+                        enabled INTEGER DEFAULT 1
+                    );
+                    CREATE UNIQUE INDEX IF NOT EXISTS idx_gateway_keys_hash
+                        ON gateway_keys (key_hash);
+                """)
             except sqlite3.OperationalError:
                 pass
 
@@ -1072,3 +1094,84 @@ class LoomStorage:
                 ),
             )
             self._schedule_flush()
+
+    # ---- gateway key management ----
+
+    @staticmethod
+    def _hash_key(raw_key: str) -> str:
+        return hashlib.sha256(raw_key.encode()).hexdigest()
+
+    def create_gateway_key(self, name: str) -> dict:
+        """Create a new gateway key. Returns the full key ONCE."""
+        raw_key = f"loom-{secrets.token_urlsafe(32)}"
+        key_hash = self._hash_key(raw_key)
+        prefix = raw_key[:12]
+        now = time.time()
+        with self._write_lock:
+            cur = self.conn.execute(
+                "INSERT INTO gateway_keys (name, key_hash, key_prefix, created_at) "
+                "VALUES (?, ?, ?, ?)",
+                (name, key_hash, prefix, now),
+            )
+            self.conn.commit()
+        return {
+            "id": cur.lastrowid,
+            "name": name,
+            "key": raw_key,
+            "key_prefix": prefix,
+            "created_at": now,
+        }
+
+    def validate_gateway_key(self, raw_key: str) -> Optional[dict]:
+        """Validate a key. Returns key info if valid, None if not."""
+        key_hash = self._hash_key(raw_key)
+        row = self.conn.execute(
+            "SELECT id, name, key_prefix, enabled FROM gateway_keys "
+            "WHERE key_hash = ?",
+            (key_hash,),
+        ).fetchone()
+        if not row or not row[3]:
+            return None
+        with self._write_lock:
+            self.conn.execute(
+                "UPDATE gateway_keys SET last_used_at = ? WHERE id = ?",
+                (time.time(), row[0]),
+            )
+            self._schedule_flush()
+        return {"id": row[0], "name": row[1], "key_prefix": row[2]}
+
+    def list_gateway_keys(self) -> list[dict]:
+        """List all keys (masked — prefix only, no full key)."""
+        rows = self.conn.execute(
+            "SELECT id, name, key_prefix, created_at, last_used_at, enabled "
+            "FROM gateway_keys ORDER BY created_at DESC"
+        ).fetchall()
+        return [
+            {
+                "id": r[0],
+                "name": r[1],
+                "key_preview": f"{r[2]}...",
+                "created_at": r[3],
+                "last_used_at": r[4],
+                "enabled": bool(r[5]),
+            }
+            for r in rows
+        ]
+
+    def toggle_gateway_key(self, key_id: int, enabled: bool) -> bool:
+        with self._write_lock:
+            cur = self.conn.execute(
+                "UPDATE gateway_keys SET enabled = ? WHERE id = ?",
+                (1 if enabled else 0, key_id),
+            )
+            self.conn.commit()
+        return cur.rowcount > 0
+
+    def delete_gateway_key(self, key_id: int) -> bool:
+        with self._write_lock:
+            cur = self.conn.execute(
+                "DELETE FROM gateway_keys WHERE id = ?",
+                (key_id,),
+            )
+            self.conn.commit()
+        return cur.rowcount > 0

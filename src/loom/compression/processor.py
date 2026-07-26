@@ -1260,7 +1260,9 @@ class ContentProcessor:
         result is rejected (raising, so the caller falls back) when empty
         or longer than the input.
         """
-        import urllib.request
+        import httpx
+
+        from loom.netcheck import validate_outbound_url
 
         truncated = content[:4000]
         prompt = (
@@ -1277,29 +1279,35 @@ class ContentProcessor:
         model = getattr(comp_cfg, "llm_model", "qwen2.5:7b")
         timeout = float(getattr(comp_cfg, "llm_timeout_seconds", 30.0))
 
+        # Checked at call time, not only on config PATCH: the config object is
+        # mutable at runtime, so the URL must be re-validated where the request
+        # is actually made. A rejection raises, and the caller falls back to
+        # extractive compression.
+        validate_outbound_url(
+            base, allow_private=getattr(comp_cfg, "allow_private_llm_url", False)
+        )
+
         if base.endswith("/v1") or "/v1/" in base:
             # OpenAI-compatible endpoint
             url = f"{base.rstrip('/v1').rstrip('/')}/v1/chat/completions"
-            payload = json.dumps({
+            payload = {
                 "model": model,
                 "messages": [{"role": "user", "content": prompt}],
                 "temperature": 0.0,
-            }).encode()
+            }
         else:
             # Ollama native endpoint
             url = f"{base}/api/generate"
-            payload = json.dumps({
+            payload = {
                 "model": model,
                 "prompt": prompt,
                 "temperature": 0.0,
                 "stream": False,
-            }).encode()
+            }
 
-        req = urllib.request.Request(
-            url, data=payload, headers={"Content-Type": "application/json"}
-        )
-        with urllib.request.urlopen(req, timeout=timeout) as resp:
-            data = json.loads(resp.read())
+        resp = httpx.post(url, json=payload, timeout=timeout, follow_redirects=False)
+        resp.raise_for_status()
+        data = resp.json()
 
         if "choices" in data:
             result = data["choices"][0]["message"]["content"].strip()

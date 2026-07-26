@@ -1,5 +1,5 @@
-import { useEffect } from "react";
-import { NavLink, Outlet } from "react-router-dom";
+import { useEffect, useState } from "react";
+import { Link, NavLink, Outlet } from "react-router-dom";
 import { api, setDisplayTimezone } from "../api.js";
 import { FEATURE_STATUS } from "../featureStatus.js";
 import FeatureStatusBanner from "./FeatureStatusBanner.jsx";
@@ -19,11 +19,16 @@ const NAV = [
 ];
 
 export default function Layout() {
+  const [authOff, setAuthOff] = useState(false);
+
   useEffect(() => {
     api.config().then((cfg) => {
       const tz = cfg?.server?.display_timezone;
       if (tz) setDisplayTimezone(tz);
     }).catch(() => {});
+    api.health()
+      .then((h) => setAuthOff(h?.auth_enabled === false))
+      .catch(() => {});
   }, []);
 
   return (
@@ -78,6 +83,16 @@ export default function Layout() {
         </div>
       </aside>
       <main className="flex-1 overflow-x-hidden">
+        {authOff && (
+          <div className="border-b border-red-500/30 bg-red-500/10 px-4 py-2 text-xs text-red-300">
+            <span className="font-semibold">Authentication disabled:</span>{" "}
+            no gateway keys exist, so every API endpoint is open.{" "}
+            <Link to="/settings" className="underline hover:text-red-200">
+              Create a key in Settings
+            </Link>{" "}
+            to protect this gateway.
+          </div>
+        )}
         <FeatureStatusBanner />
         <Outlet />
       </main>

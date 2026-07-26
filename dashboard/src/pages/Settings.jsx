@@ -1,5 +1,5 @@
 import { useEffect, useState, useCallback } from "react";
-import { api, setDisplayTimezone } from "../api.js";
+import { api, setDisplayTimezone, getGatewayKey, setGatewayKey } from "../api.js";
 
 const TIER_OPTIONS = ["economy", "standard", "premium"];
 const PROVIDER_OPTIONS = ["anthropic", "openai", "google", "ollama"];
@@ -291,6 +291,14 @@ export default function Settings() {
         </div>
       </div>
 
+      {/* API access / gateway keys */}
+      <ApiAccessSettings
+        saving={saving}
+        setSaving={setSaving}
+        setError={setError}
+        flashSuccess={flashSuccess}
+      />
+
       {/* Compression */}
       <CompressionSettings
         config={config}
@@ -369,6 +377,181 @@ export default function Settings() {
           </div>
         </div>
       )}
+    </div>
+  );
+}
+
+function ApiAccessSettings({ saving, setSaving, setError, flashSuccess }) {
+  const [keys, setKeys] = useState(null);
+  const [newKeyName, setNewKeyName] = useState("");
+  const [createdKey, setCreatedKey] = useState(null);
+  const [browserKey, setBrowserKey] = useState(getGatewayKey());
+
+  const refreshKeys = useCallback(() => {
+    api.gatewayKeys().then(setKeys).catch(() => setKeys(null));
+  }, []);
+
+  useEffect(() => {
+    refreshKeys();
+  }, [refreshKeys]);
+
+  async function createKey() {
+    const name = newKeyName.trim();
+    if (!name) return;
+    setSaving(true);
+    setError(null);
+    try {
+      const created = await api.createGatewayKey(name);
+      setCreatedKey(created);
+      setNewKeyName("");
+      // First key on a fresh install: adopt it for this browser immediately,
+      // otherwise the very next dashboard request would 401.
+      if (!getGatewayKey()) {
+        setGatewayKey(created.key);
+        setBrowserKey(created.key);
+      }
+      refreshKeys();
+      flashSuccess(`Created key "${name}"`);
+    } catch (e) {
+      setError(e.message || "Failed to create key");
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  async function toggleKey(k) {
+    setSaving(true);
+    setError(null);
+    try {
+      await api.toggleGatewayKey(k.id, !k.enabled);
+      refreshKeys();
+    } catch (e) {
+      setError(e.message || "Failed to update key");
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  async function deleteKey(k) {
+    setSaving(true);
+    setError(null);
+    try {
+      await api.deleteGatewayKey(k.id);
+      refreshKeys();
+      flashSuccess(`Deleted key "${k.name}"`);
+    } catch (e) {
+      setError(e.message || "Failed to delete key");
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  return (
+    <div className="mb-6 rounded-lg border border-border bg-card p-5">
+      <h2 className="mb-4 text-sm font-semibold uppercase text-gray-400">API Access</h2>
+      <p className="mb-4 text-xs text-gray-500">
+        Once at least one gateway key exists, every API and inference request must
+        present one (header <span className="font-mono">x-loom-gateway-key</span>).
+        With no keys, the gateway runs open — fine for first-run setup, not for
+        anything reachable by others.
+      </p>
+
+      {/* Browser key */}
+      <div className="mb-4 flex items-center justify-between">
+        <div>
+          <span className="text-sm text-white">This browser&apos;s key</span>
+          <p className="text-xs text-gray-500">
+            Used by the dashboard for its own API calls. Stored in this browser only.
+          </p>
+        </div>
+        <input
+          type="password"
+          value={browserKey}
+          onChange={(e) => {
+            setBrowserKey(e.target.value);
+            setGatewayKey(e.target.value.trim());
+          }}
+          placeholder="loom-..."
+          className="w-64 rounded border border-border bg-gray-800 px-2 py-1 font-mono text-sm text-white placeholder-gray-600"
+        />
+      </div>
+
+      {/* One-time display of a newly created key */}
+      {createdKey && (
+        <div className="mb-4 rounded border border-amber-500/30 bg-amber-500/10 px-3 py-2">
+          <p className="text-xs font-semibold text-amber-400">
+            Key created — copy it now, it will not be shown again:
+          </p>
+          <code className="mt-1 block break-all font-mono text-xs text-amber-200">
+            {createdKey.key}
+          </code>
+        </div>
+      )}
+
+      {/* Key list */}
+      {keys === null ? (
+        <p className="mb-3 text-xs text-gray-500">
+          Key list unavailable (storage offline or this browser&apos;s key is missing/invalid).
+        </p>
+      ) : keys.length === 0 ? (
+        <p className="mb-3 text-xs text-red-400">
+          No gateway keys exist — authentication is disabled.
+        </p>
+      ) : (
+        <div className="mb-3 space-y-2">
+          {keys.map((k) => (
+            <div
+              key={k.id}
+              className="flex items-center justify-between rounded border border-border/50 bg-gray-800/50 px-3 py-2"
+            >
+              <div>
+                <span className="text-sm font-medium text-white">{k.name}</span>
+                <span className="ml-2 font-mono text-xs text-gray-500">{k.key_preview}</span>
+                {!k.enabled && (
+                  <span className="ml-2 rounded bg-gray-700 px-1.5 py-0.5 text-[10px] text-gray-400">
+                    disabled
+                  </span>
+                )}
+              </div>
+              <div className="flex items-center gap-3">
+                <button
+                  onClick={() => toggleKey(k)}
+                  disabled={saving}
+                  className="text-xs text-gray-400 hover:text-white"
+                >
+                  {k.enabled ? "Disable" : "Enable"}
+                </button>
+                <button
+                  onClick={() => deleteKey(k)}
+                  disabled={saving}
+                  className="text-xs text-red-400/70 hover:text-red-400"
+                >
+                  Delete
+                </button>
+              </div>
+            </div>
+          ))}
+        </div>
+      )}
+
+      {/* Create */}
+      <div className="flex items-center gap-2 border-t border-border/50 pt-4">
+        <input
+          type="text"
+          value={newKeyName}
+          onChange={(e) => setNewKeyName(e.target.value)}
+          placeholder="key name (e.g. laptop, ci)"
+          className="flex-1 rounded border border-border bg-gray-800 px-3 py-1.5 text-sm text-white placeholder-gray-500"
+          onKeyDown={(e) => e.key === "Enter" && createKey()}
+        />
+        <button
+          onClick={createKey}
+          disabled={saving || !newKeyName.trim()}
+          className="rounded bg-accent px-3 py-1.5 text-sm font-medium text-white hover:opacity-90 disabled:opacity-50"
+        >
+          Create Key
+        </button>
+      </div>
     </div>
   );
 }
@@ -531,6 +714,22 @@ function CompressionSettings({ config, setConfig, saving, setSaving, setError, f
 
             {comp.llm_prose && (
               <>
+                <div className="flex items-center justify-between">
+                  <div>
+                    <span className="text-sm text-white">Allow LAN endpoints</span>
+                    <p className="text-xs text-gray-500">
+                      Permit private-network LLM URLs (e.g. an Ollama box on 192.168.x).
+                      Localhost is always allowed.
+                    </p>
+                  </div>
+                  <button
+                    onClick={() => update({ allow_private_llm_url: !comp.allow_private_llm_url })}
+                    disabled={saving}
+                    className={`h-5 w-9 rounded-full transition-colors ${comp.allow_private_llm_url ? "bg-green-500" : "bg-gray-600"} relative`}
+                  >
+                    <span className={`absolute top-0.5 h-4 w-4 rounded-full bg-white transition-transform ${comp.allow_private_llm_url ? "left-[18px]" : "left-0.5"}`} />
+                  </button>
+                </div>
                 <div className="flex items-center justify-between">
                   <span className="text-sm text-white">LLM URL</span>
                   <input
