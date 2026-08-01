@@ -320,3 +320,74 @@ def test_extract_session_signals_x_loom_client_empty_falls_through():
         headers={"x-loom-client": "", "user-agent": "python-requests/2.31"},
     )
     assert signals["client_type"] == "sdk-python"
+
+
+# --- OAuth passthrough (gateway key bypass for sk-ant-oat tokens) ---
+
+class _FakeKeyStorage:
+    """Storage stub where gateway keys exist and only 'gk-valid' validates."""
+
+    def list_gateway_keys(self):
+        return [{"id": 1, "name": "test"}]
+
+    def validate_gateway_key(self, key):
+        return key == "gk-valid"
+
+
+def _auth_test_client(monkeypatch, passthrough: bool):
+    from loom.gateway.app import create_app
+
+    if passthrough:
+        monkeypatch.setenv("LOOM_OAUTH_PASSTHROUGH", "1")
+    else:
+        monkeypatch.delenv("LOOM_OAUTH_PASSTHROUGH", raising=False)
+    app = create_app()
+    app.state.gateway.storage = _FakeKeyStorage()
+    app.state.gateway._gateway_keys_exist = None
+    return TestClient(app)
+
+
+def _post_messages(client, headers):
+    # Invalid JSON body: requests that clear auth stop at the 400 body check
+    # instead of reaching a provider (no network in tests).
+    return client.post("/v1/messages", content=b"not json", headers=headers)
+
+
+def test_oauth_token_rejected_when_passthrough_disabled(monkeypatch):
+    client = _auth_test_client(monkeypatch, passthrough=False)
+    resp = _post_messages(client, {"authorization": "Bearer sk-ant-oat01-abc"})
+    assert resp.status_code == 401
+    assert resp.json()["error"]["type"] == "authentication_error"
+
+
+def test_oauth_token_bypasses_gateway_key_when_enabled(monkeypatch):
+    client = _auth_test_client(monkeypatch, passthrough=True)
+    resp = _post_messages(client, {"authorization": "Bearer sk-ant-oat01-abc"})
+    assert resp.status_code == 400  # cleared auth, failed JSON parse
+
+
+def test_non_oauth_bearer_still_requires_gateway_key(monkeypatch):
+    client = _auth_test_client(monkeypatch, passthrough=True)
+    resp = _post_messages(client, {"authorization": "Bearer sk-ant-api03-xyz"})
+    assert resp.status_code == 401
+
+
+def test_valid_gateway_key_still_works_with_passthrough(monkeypatch):
+    client = _auth_test_client(monkeypatch, passthrough=True)
+    resp = _post_messages(client, {"x-loom-gateway-key": "gk-valid"})
+    assert resp.status_code == 400  # cleared auth, failed JSON parse
+
+
+def test_oauth_passthrough_env_override():
+    from loom.config import LoomConfig
+
+    cfg = LoomConfig()
+    assert cfg.server.oauth_passthrough is False
+    import os
+    os.environ["LOOM_OAUTH_PASSTHROUGH"] = "true"
+    try:
+        cfg = LoomConfig()
+        cfg._apply_env_overrides()
+        assert cfg.server.oauth_passthrough is True
+    finally:
+        del os.environ["LOOM_OAUTH_PASSTHROUGH"]

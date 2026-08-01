@@ -6,6 +6,8 @@ server:
   log_destination: stderr
   log_file: logs/loom.log
   display_timezone: "America/Denver"
+  # Claude Desktop MAX-subscription auth: sk-ant-oat* bearers bypass gateway key
+  oauth_passthrough: true
 
 providers:
   - name: anthropic

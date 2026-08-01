@@ -132,6 +132,9 @@ class ServerConfig(BaseModel):
     cors_origins: list[str] = Field(default_factory=list)
     rate_limit_requests: int = 200
     rate_limit_window_seconds: int = 60
+    # When enabled, requests bearing an Anthropic OAuth token (sk-ant-oat*)
+    # bypass gateway key auth; the token is forwarded and validated upstream.
+    oauth_passthrough: bool = False
 
 
 class LoomConfig(BaseModel):
@@ -184,6 +187,11 @@ class LoomConfig(BaseModel):
         log_level = os.environ.get("LOOM_SERVER_LOG_LEVEL")
         if log_level:
             self.server.log_level = log_level
+        oauth_passthrough = os.environ.get("LOOM_OAUTH_PASSTHROUGH")
+        if oauth_passthrough:
+            self.server.oauth_passthrough = oauth_passthrough.lower() in (
+                "1", "true", "yes", "on",
+            )
         db_path = os.environ.get("LOOM_STORAGE_DATABASE_PATH")
         if db_path:
             self.storage.database_path = db_path
