@@ -2168,9 +2168,10 @@ def create_app() -> FastAPI:
     )
     async def api_metrics_timeseries(hours: int = 24, bucket: str = "1h"):
         gw = state()
+        bucket_secs = _bucket_seconds(bucket)
         empty = {
-            "hours": hours,
-            "bucket_seconds": _bucket_seconds(bucket),
+            "window_hours": hours,
+            "interval_minutes": bucket_secs // 60,
             "buckets": [],
             "by_model": {},
             "by_source": {},
@@ -2180,9 +2181,10 @@ def create_app() -> FastAPI:
             return empty
         try:
             return _jsonable(
-                gw.storage.get_metrics_timeseries(hours, _bucket_seconds(bucket))
+                gw.storage.get_metrics_timeseries(hours, bucket_secs)
             )
         except Exception:
+            get_logger("loom.gateway").exception("metrics timeseries query failed")
             return empty
 
     # ------------------------------------------------------------------- audit

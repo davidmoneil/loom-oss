@@ -71,7 +71,7 @@ class MetricsResponse(ObservabilityResponse):
 class MetricsTimeseriesResponse(ObservabilityResponse):
     window_hours: int
     interval_minutes: int
-    series: list[dict[str, Any]] = []
+    buckets: list[dict[str, Any]] = []
 
 
 class AuditPageResponse(ObservabilityResponse):
