@@ -20,7 +20,9 @@ import threading
 import time
 from typing import Any, Optional
 
-SCHEMA_VERSION = 12
+from loom.storage.base import _summarize_compression
+
+SCHEMA_VERSION = 13
 
 # Compression-cache entries live this long, matching the Postgres backend's
 # "NOW() + INTERVAL '7 days'".
@@ -373,6 +375,15 @@ class LoomStorage:
             except sqlite3.OperationalError:
                 pass
 
+        if current < 13:
+            # Compression analytics: persist the resolved compression tier so
+            # savings can be broken down by tier (previously only aggregated
+            # in-memory per process lifetime).
+            try:
+                c.execute("ALTER TABLE metrics ADD COLUMN tier TEXT")
+            except sqlite3.OperationalError:
+                pass
+
         if current < SCHEMA_VERSION:
             c.execute(
                 "INSERT OR REPLACE INTO schema_version (version, applied_at) VALUES (?, ?)",
@@ -436,6 +447,7 @@ class LoomStorage:
         cache_read_tokens: int = 0,
         cache_creation_tokens: int = 0,
         skill: Optional[str] = None,
+        tier: Optional[str] = None,
     ) -> None:
         with self._write_lock:
             self.conn.execute(
@@ -445,8 +457,9 @@ class LoomStorage:
                     task_type, tokens_in, tokens_out,
                     latency_ms, cost_estimate, compressed, compression_ratio,
                     message_count, source, tokens_saved, session_id,
-                    status_code, cache_read_tokens, cache_creation_tokens, skill
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    status_code, cache_read_tokens, cache_creation_tokens, skill,
+                    tier
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     time.time(),
@@ -469,6 +482,7 @@ class LoomStorage:
                     cache_read_tokens,
                     cache_creation_tokens,
                     skill,
+                    tier,
                 ),
             )
             self._schedule_flush()
@@ -1026,6 +1040,36 @@ class LoomStorage:
         ]
 
         return {"total": total, "offset": offset, "limit": limit, "entries": entries}
+
+    def get_compression_summary(self, days: int = 30) -> dict:
+        """Compression-performance aggregates for /api/metrics/compression.
+
+        Ratio statistics and the histogram are computed in Python from the
+        window's per-request rows (identical logic on both backends; request
+        volumes make this cheap).
+        """
+        since = time.time() - days * 86400
+        rows = self.conn.execute(
+            """
+            SELECT compressed, compression_ratio, tokens_saved, tier,
+                   model, source, timestamp
+            FROM metrics WHERE timestamp >= ?
+            """,
+            (since,),
+        ).fetchall()
+        records = [
+            {
+                "compressed": bool(r["compressed"]),
+                "compression_ratio": r["compression_ratio"],
+                "tokens_saved": r["tokens_saved"] or 0,
+                "tier": r["tier"],
+                "model": r["model"] or "unknown",
+                "source": r["source"] or "unknown",
+                "timestamp": r["timestamp"],
+            }
+            for r in rows
+        ]
+        return _summarize_compression(records, days)
 
     # ------------------------------------------------------------------ rate limits
     def get_rate_limit_current(self, provider: str = "anthropic") -> Optional[dict]:

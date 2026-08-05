@@ -99,6 +99,7 @@ export const api = {
     getJSON(`/api/routing?hours=${hours}&limit=${limit}`),
   sessions: (hours = 24) => getJSON(`/api/sessions?hours=${hours}`),
   costs: (days = 30) => getJSON(`/api/costs?days=${days}`),
+  compressionMetrics: (days = 30) => getJSON(`/api/metrics/compression?days=${days}`),
   updateServerConfig: (updates) => patchJSON("/api/config/server", updates),
   updateCompression: (updates) => patchJSON("/api/config/compression", updates),
   updateSourcePolicy: (name, updates) =>

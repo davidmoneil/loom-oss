@@ -50,6 +50,17 @@ class CostSummaryResponse(ObservabilityResponse):
     by_hour: list[dict[str, Any]] = []
 
 
+class CompressionSummaryResponse(ObservabilityResponse):
+    available: bool = True
+    window_days: int | None = None
+    totals: dict[str, Any] = {}
+    ratio_histogram: list[dict[str, Any]] = []
+    by_tier: list[dict[str, Any]] = []
+    by_model: list[dict[str, Any]] = []
+    by_source: list[dict[str, Any]] = []
+    by_day: list[dict[str, Any]] = []
+
+
 class SessionListResponse(ObservabilityResponse):
     supported: bool
     sessions: int

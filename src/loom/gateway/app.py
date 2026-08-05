@@ -57,6 +57,7 @@ from .providers import (
 from loom.gateway.schemas import (
     AuditContentResponse,
     AuditPageResponse,
+    CompressionSummaryResponse,
     ConfigResponse,
     CostSummaryResponse,
     GovernorOverrideDeleteResponse,
@@ -304,6 +305,7 @@ def _record_request(
     compressed: bool = False,
     compression_ratio: float = 1.0,
     tokens_saved: int = 0,
+    tier: Optional[str] = None,
     ratelimit: Optional[dict] = None,
     session_id: Optional[str] = None,
 ) -> None:
@@ -327,6 +329,7 @@ def _record_request(
                 compressed=compressed,
                 compression_ratio=compression_ratio,
                 tokens_saved=tokens_saved,
+                tier=tier,
                 session_id=session_id,
                 status_code=status_code,
                 cache_read_tokens=cache_read,
@@ -1389,6 +1392,7 @@ def create_app() -> FastAPI:
 
             # Inline compression: compress older messages before forwarding.
             comp_before = comp_after = 0
+            tier_name = None
             if gw.compression is not None and len(messages) > 2:
                 tier_name = _resolve_request_tier(gw, request, source)
                 # Off the event loop: compression is CPU-bound and, with
@@ -1434,6 +1438,7 @@ def create_app() -> FastAPI:
                     round(comp_after / comp_before, 4) if comp_before > 0 else 1.0
                 ),
                 "tokens_saved": max(comp_before - comp_after, 0),
+                "tier": tier_name if comp_before > 0 else None,
                 "session_id": session_id if session_id != "unknown" else None,
             }
 
@@ -1605,6 +1610,7 @@ def create_app() -> FastAPI:
 
             # Inline compression: compress older messages before forwarding.
             comp_before = comp_after = 0
+            tier_name = None
             if gw.compression is not None and len(messages) > 2:
                 tier_name = _resolve_request_tier(gw, request, source)
                 # Off the event loop: compression is CPU-bound and, with
@@ -1651,6 +1657,7 @@ def create_app() -> FastAPI:
                     round(comp_after / comp_before, 4) if comp_before > 0 else 1.0
                 ),
                 "tokens_saved": max(comp_before - comp_after, 0),
+                "tier": tier_name if comp_before > 0 else None,
                 "session_id": session_id if session_id != "unknown" else None,
             }
 
@@ -2150,6 +2157,33 @@ def create_app() -> FastAPI:
         for bucket in summary["by_hour"]:
             bucket.setdefault("savings_usd", 0.0)
         summary["totals"]["savings_usd"] = round(total_savings, 4)
+        return summary
+
+    # ------------------------------------------- compression analytics
+    @app.get(
+        "/api/metrics/compression",
+        response_model=CompressionSummaryResponse,
+        tags=["observability"],
+        summary="Compression performance: savings totals, ratio distribution, breakdowns",
+    )
+    async def api_compression_metrics(days: int = 30):
+        gw = state()
+        if gw.storage is None:
+            return {"available": False, "window_days": days}
+        try:
+            summary = _jsonable(gw.storage.get_compression_summary(days=days))
+        except Exception as exc:
+            return JSONResponse({"error": str(exc)}, status_code=500)
+
+        # USD estimation happens here, not in storage: token→dollar rates come
+        # from live provider config (model_index), which storage can't see.
+        total_usd = 0.0
+        for bucket in summary["by_model"]:
+            rate = _input_rate_per_1k(gw, bucket["model"])
+            bucket["est_savings_usd"] = round(bucket["tokens_saved"] / 1000 * rate, 4)
+            total_usd += bucket["est_savings_usd"]
+        summary["totals"]["est_savings_usd"] = round(total_usd, 4)
+        summary["available"] = True
         return summary
 
     # ---------------------------------------------------- sessions (contract)

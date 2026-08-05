@@ -20,7 +20,7 @@ logger = get_logger("loom.storage.postgres")
 import hashlib
 import secrets
 
-SCHEMA_VERSION = 11
+SCHEMA_VERSION = 13
 
 
 class PostgresStorage:
@@ -309,6 +309,11 @@ class PostgresStorage:
                 "ON gateway_keys (key_hash)"
             )
 
+        if current < 13:
+            # Compression analytics: persist the resolved compression tier.
+            # (v12 was SQLite-only cache-column parity; skipped here.)
+            conn.execute("ALTER TABLE metrics ADD COLUMN IF NOT EXISTS tier TEXT")
+
         if current < SCHEMA_VERSION:
             conn.execute(
                 "INSERT INTO schema_version (version, applied_at) VALUES (%s, %s) "
@@ -370,6 +375,7 @@ class PostgresStorage:
         cache_read_tokens: int = 0,
         cache_creation_tokens: int = 0,
         skill: Optional[str] = None,
+        tier: Optional[str] = None,
     ) -> None:
         self.conn.execute(
             """
@@ -378,8 +384,9 @@ class PostgresStorage:
                 task_type, tokens_in, tokens_out,
                 latency_ms, cost_estimate, compressed, compression_ratio,
                 message_count, source, tokens_saved, session_id,
-                status_code, cache_read_tokens, cache_creation_tokens, skill
-            ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                status_code, cache_read_tokens, cache_creation_tokens, skill,
+                tier
+            ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
             """,
             (
                 time.time(),
@@ -402,6 +409,7 @@ class PostgresStorage:
                 cache_read_tokens,
                 cache_creation_tokens,
                 skill,
+                tier,
             ),
         )
 
@@ -495,6 +503,37 @@ class PostgresStorage:
         return result.rowcount
 
     # ------------------------------------------------------------------ reads
+    def get_compression_summary(self, days: int = 30) -> dict:
+        """Compression-performance aggregates for /api/metrics/compression.
+
+        Mirrors the SQLite backend: fetch the window's per-request rows and
+        delegate to the shared _summarize_compression helper.
+        """
+        from loom.storage.base import _summarize_compression
+
+        since = time.time() - days * 86400
+        rows = self.conn.execute(
+            """
+            SELECT compressed, compression_ratio, tokens_saved, tier,
+                   model, source, timestamp
+            FROM metrics WHERE timestamp >= %s
+            """,
+            (since,),
+        ).fetchall()
+        records = [
+            {
+                "compressed": bool(r[0]),
+                "compression_ratio": r[1],
+                "tokens_saved": r[2] or 0,
+                "tier": r[3],
+                "model": r[4] or "unknown",
+                "source": r[5] or "unknown",
+                "timestamp": r[6],
+            }
+            for r in rows
+        ]
+        return _summarize_compression(records, days)
+
     def get_routing_decisions(self, hours: int = 24, limit: int = 200) -> dict:
         since = time.time() - hours * 3600
         rows = self.conn.execute(
