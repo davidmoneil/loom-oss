@@ -1,5 +1,5 @@
-import { useEffect } from "react";
-import { NavLink, Outlet } from "react-router-dom";
+import { useEffect, useState } from "react";
+import { Link, NavLink, Outlet } from "react-router-dom";
 import { api, setDisplayTimezone } from "../api.js";
 import { FEATURE_STATUS } from "../featureStatus.js";
 import FeatureStatusBanner from "./FeatureStatusBanner.jsx";
@@ -8,6 +8,7 @@ const NAV = [
   { to: "/", label: "Overview", end: true, icon: GridIcon },
   { to: "/sessions", label: "Sessions", icon: UsersIcon },
   { to: "/costs", label: "Costs", icon: DollarIcon },
+  { to: "/compression", label: "Compression", icon: CompressIcon },
   { to: "/models", label: "Models", icon: CubeIcon },
   { to: "/metrics", label: "Metrics", icon: ChartIcon },
   { to: "/audit", label: "Audit", icon: ListIcon },
@@ -19,11 +20,16 @@ const NAV = [
 ];
 
 export default function Layout() {
+  const [authOff, setAuthOff] = useState(false);
+
   useEffect(() => {
     api.config().then((cfg) => {
       const tz = cfg?.server?.display_timezone;
       if (tz) setDisplayTimezone(tz);
     }).catch(() => {});
+    api.health()
+      .then((h) => setAuthOff(h?.auth_enabled === false))
+      .catch(() => {});
   }, []);
 
   return (
@@ -78,6 +84,16 @@ export default function Layout() {
         </div>
       </aside>
       <main className="flex-1 overflow-x-hidden">
+        {authOff && (
+          <div className="border-b border-red-500/30 bg-red-500/10 px-4 py-2 text-xs text-red-300">
+            <span className="font-semibold">Authentication disabled:</span>{" "}
+            no gateway keys exist, so every API endpoint is open.{" "}
+            <Link to="/settings" className="underline hover:text-red-200">
+              Create a key in Settings
+            </Link>{" "}
+            to protect this gateway.
+          </div>
+        )}
         <FeatureStatusBanner />
         <Outlet />
       </main>
@@ -172,6 +188,17 @@ function RouteIcon() {
       <circle cx="6" cy="19" r="3" />
       <circle cx="18" cy="5" r="3" />
       <path d="M12 19h4.5a3.5 3.5 0 0 0 0-7h-9a3.5 3.5 0 0 1 0-7H12" />
+    </svg>
+  );
+}
+
+function CompressIcon() {
+  return (
+    <svg className="h-5 w-5 shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth="2">
+      <path d="M8 3v4a1 1 0 0 1-1 1H3" />
+      <path d="M16 3v4a1 1 0 0 0 1 1h4" />
+      <path d="M8 21v-4a1 1 0 0 0-1-1H3" />
+      <path d="M16 21v-4a1 1 0 0 1 1-1h4" />
     </svg>
   );
 }

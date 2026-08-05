@@ -79,6 +79,11 @@ class CompressionConfig(BaseModel):
     llm_url: str = "http://localhost:11434"
     llm_model: str = "qwen2.5:7b"
     llm_timeout_seconds: float = 30.0
+    # Loopback llm_url targets are always allowed. Non-loopback private/LAN
+    # addresses (e.g. an Ollama box on 192.168.x) require this opt-in so a
+    # runtime config change can't turn the gateway into an SSRF proxy for
+    # internal networks or cloud metadata services.
+    allow_private_llm_url: bool = False
     # Optional compressed-variant store: preserves pre-compression originals
     # for pointer resolution and enables relevance-aware compression.
     # "" (off) | "age" (Postgres AGE extension) | "neo4j" (standalone Neo4j)

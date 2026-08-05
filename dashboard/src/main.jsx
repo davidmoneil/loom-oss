@@ -5,6 +5,7 @@ import Layout from "./components/Layout.jsx";
 import Overview from "./pages/Overview.jsx";
 import Sessions from "./pages/Sessions.jsx";
 import Costs from "./pages/Costs.jsx";
+import Compression from "./pages/Compression.jsx";
 import Metrics from "./pages/Metrics.jsx";
 import Audit from "./pages/Audit.jsx";
 import Models from "./pages/Models.jsx";
@@ -23,6 +24,7 @@ ReactDOM.createRoot(document.getElementById("root")).render(
           <Route path="/" element={<Overview />} />
           <Route path="/sessions" element={<Sessions />} />
           <Route path="/costs" element={<Costs />} />
+          <Route path="/compression" element={<Compression />} />
           <Route path="/metrics" element={<Metrics />} />
           <Route path="/models" element={<Models />} />
           <Route path="/audit" element={<Audit />} />

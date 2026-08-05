@@ -25,6 +25,8 @@ class ObservabilityResponse(BaseModel):
 class HealthResponse(ObservabilityResponse):
     status: str
     version: str | None = None
+    # False means no gateway keys exist and the API is running open.
+    auth_enabled: bool | None = None
     uptime_seconds: float | None = None
     checks: dict[str, Any] = {}
 
@@ -46,6 +48,17 @@ class CostSummaryResponse(ObservabilityResponse):
     by_tier: list[dict[str, Any]] = []
     by_day: list[dict[str, Any]] = []
     by_hour: list[dict[str, Any]] = []
+
+
+class CompressionSummaryResponse(ObservabilityResponse):
+    available: bool = True
+    window_days: int | None = None
+    totals: dict[str, Any] = {}
+    ratio_histogram: list[dict[str, Any]] = []
+    by_tier: list[dict[str, Any]] = []
+    by_model: list[dict[str, Any]] = []
+    by_source: list[dict[str, Any]] = []
+    by_day: list[dict[str, Any]] = []
 
 
 class SessionListResponse(ObservabilityResponse):

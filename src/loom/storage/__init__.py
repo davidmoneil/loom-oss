@@ -1,3 +1,4 @@
+from .base import StorageBackend
 from .sqlite import LoomStorage
 
 try:
@@ -6,10 +7,24 @@ except ImportError:
     PostgresStorage = None  # type: ignore[assignment,misc]
 
 
+def _check_contract(storage):
+    if not isinstance(storage, StorageBackend):
+        missing = [
+            name
+            for name in dir(StorageBackend)
+            if not name.startswith("_") and not hasattr(storage, name)
+        ]
+        raise TypeError(
+            f"{type(storage).__name__} does not satisfy the storage contract; "
+            f"missing: {', '.join(missing)}"
+        )
+    return storage
+
+
 def create_storage(config=None):
     """Factory that returns the appropriate storage backend based on config."""
     if config is None:
-        return LoomStorage()
+        return _check_contract(LoomStorage())
 
     storage_cfg = config.storage if hasattr(config, "storage") else config
     backend = getattr(storage_cfg, "backend", "sqlite")
@@ -22,8 +37,10 @@ def create_storage(config=None):
                 "psycopg is required for the Postgres backend. "
                 "Install with: pip install 'loom-gateway[postgres]'"
             )
-        return PostgresStorage(dsn=dsn)
-    return LoomStorage(db_path=getattr(storage_cfg, "database_path", "loom.db"))
+        return _check_contract(PostgresStorage(dsn=dsn))
+    return _check_contract(
+        LoomStorage(db_path=getattr(storage_cfg, "database_path", "loom.db"))
+    )
 
 
-__all__ = ["LoomStorage", "PostgresStorage", "create_storage"]
+__all__ = ["LoomStorage", "PostgresStorage", "StorageBackend", "create_storage"]

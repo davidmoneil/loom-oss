@@ -4,29 +4,14 @@ Set LOOM_TEST_POSTGRES_DSN to a *disposable* database to exercise the Postgres
 backend (tables are created and rows written; never point this at production).
 """
 
-import os
 import uuid
 
 import pytest
 
-from loom.storage import LoomStorage, PostgresStorage, create_storage
+from loom.storage import LoomStorage, create_storage
 
-POSTGRES_DSN = os.environ.get("LOOM_TEST_POSTGRES_DSN", "")
-
-BACKENDS = ["sqlite"]
-if POSTGRES_DSN and PostgresStorage is not None:
-    BACKENDS.append("postgres")
-
-
-@pytest.fixture(params=BACKENDS)
-def storage(request, tmp_path):
-    if request.param == "sqlite":
-        store = LoomStorage(db_path=str(tmp_path / "test.db"))
-    else:
-        store = PostgresStorage(dsn=POSTGRES_DSN)
-    store.connect()
-    yield store
-    store.close()
+# The parametrized `storage` fixture (SQLite always, Postgres when
+# LOOM_TEST_POSTGRES_DSN is set) comes from tests/conftest.py.
 
 
 def _record_request(store, request_id, model="haiku", cost=0.01, **metrics_kwargs):

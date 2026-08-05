@@ -11,14 +11,22 @@ via a periodic flush to avoid blocking the async event loop on every write.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
+import secrets
 import sqlite3
 import threading
 import time
 from typing import Any, Optional
 
-SCHEMA_VERSION = 10
+from loom.storage.base import _summarize_compression
+
+SCHEMA_VERSION = 13
+
+# Compression-cache entries live this long, matching the Postgres backend's
+# "NOW() + INTERVAL '7 days'".
+CACHE_TTL_SECONDS = 7 * 86400
 
 _FLUSH_INTERVAL_SECONDS = 2.0
 
@@ -327,6 +335,55 @@ class LoomStorage:
             except sqlite3.OperationalError:
                 pass
 
+        if current < 11:
+            # Gateway API keys — parity with the Postgres backend so key auth
+            # works on the default install, not just Postgres deployments.
+            try:
+                c.executescript("""
+                    CREATE TABLE IF NOT EXISTS gateway_keys (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        name TEXT NOT NULL,
+                        key_hash TEXT NOT NULL,
+                        key_prefix TEXT NOT NULL,
+                        created_at REAL NOT NULL,
+                        last_used_at REAL,
+                        enabled INTEGER DEFAULT 1
+                    );
+                    CREATE UNIQUE INDEX IF NOT EXISTS idx_gateway_keys_hash
+                        ON gateway_keys (key_hash);
+                """)
+            except sqlite3.OperationalError:
+                pass
+
+        if current < 12:
+            # Cache hit tracking + TTL, mirroring the Postgres schema so
+            # cache_stats/cleanup_expired_cache behave identically.
+            for ddl in (
+                "ALTER TABLE compression_cache ADD COLUMN hits INTEGER DEFAULT 0",
+                "ALTER TABLE compression_cache ADD COLUMN expires_at REAL",
+            ):
+                try:
+                    c.execute(ddl)
+                except sqlite3.OperationalError:
+                    pass
+            try:
+                c.execute(
+                    "UPDATE compression_cache SET expires_at = created_at + ? "
+                    "WHERE expires_at IS NULL",
+                    (CACHE_TTL_SECONDS,),
+                )
+            except sqlite3.OperationalError:
+                pass
+
+        if current < 13:
+            # Compression analytics: persist the resolved compression tier so
+            # savings can be broken down by tier (previously only aggregated
+            # in-memory per process lifetime).
+            try:
+                c.execute("ALTER TABLE metrics ADD COLUMN tier TEXT")
+            except sqlite3.OperationalError:
+                pass
+
         if current < SCHEMA_VERSION:
             c.execute(
                 "INSERT OR REPLACE INTO schema_version (version, applied_at) VALUES (?, ?)",
@@ -390,6 +447,7 @@ class LoomStorage:
         cache_read_tokens: int = 0,
         cache_creation_tokens: int = 0,
         skill: Optional[str] = None,
+        tier: Optional[str] = None,
     ) -> None:
         with self._write_lock:
             self.conn.execute(
@@ -399,8 +457,9 @@ class LoomStorage:
                     task_type, tokens_in, tokens_out,
                     latency_ms, cost_estimate, compressed, compression_ratio,
                     message_count, source, tokens_saved, session_id,
-                    status_code, cache_read_tokens, cache_creation_tokens, skill
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    status_code, cache_read_tokens, cache_creation_tokens, skill,
+                    tier
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     time.time(),
@@ -423,6 +482,7 @@ class LoomStorage:
                     cache_read_tokens,
                     cache_creation_tokens,
                     skill,
+                    tier,
                 ),
             )
             self._schedule_flush()
@@ -981,6 +1041,36 @@ class LoomStorage:
 
         return {"total": total, "offset": offset, "limit": limit, "entries": entries}
 
+    def get_compression_summary(self, days: int = 30) -> dict:
+        """Compression-performance aggregates for /api/metrics/compression.
+
+        Ratio statistics and the histogram are computed in Python from the
+        window's per-request rows (identical logic on both backends; request
+        volumes make this cheap).
+        """
+        since = time.time() - days * 86400
+        rows = self.conn.execute(
+            """
+            SELECT compressed, compression_ratio, tokens_saved, tier,
+                   model, source, timestamp
+            FROM metrics WHERE timestamp >= ?
+            """,
+            (since,),
+        ).fetchall()
+        records = [
+            {
+                "compressed": bool(r["compressed"]),
+                "compression_ratio": r["compression_ratio"],
+                "tokens_saved": r["tokens_saved"] or 0,
+                "tier": r["tier"],
+                "model": r["model"] or "unknown",
+                "source": r["source"] or "unknown",
+                "timestamp": r["timestamp"],
+            }
+            for r in rows
+        ]
+        return _summarize_compression(records, days)
+
     # ------------------------------------------------------------------ rate limits
     def get_rate_limit_current(self, provider: str = "anthropic") -> Optional[dict]:
         row = self.conn.execute(
@@ -1031,18 +1121,26 @@ class LoomStorage:
     ) -> Optional[dict]:
         row = self.conn.execute(
             """
-            SELECT content_hash, age_ratio, compressed_text, tier,
+            SELECT id, content_hash, age_ratio, compressed_text, tier,
                    tokens_before, tokens_after, created_at
             FROM compression_cache
-            WHERE content_hash = ?
+            WHERE content_hash = ? AND (expires_at IS NULL OR expires_at > ?)
             ORDER BY ABS(age_ratio - ?) ASC, created_at DESC
             LIMIT 1
             """,
-            (content_hash, age_ratio),
+            (content_hash, time.time(), age_ratio),
         ).fetchone()
         if row is None:
             return None
-        return dict(row)
+        entry = dict(row)
+        row_id = entry.pop("id")
+        with self._write_lock:
+            self.conn.execute(
+                "UPDATE compression_cache SET hits = hits + 1 WHERE id = ?",
+                (row_id,),
+            )
+            self._schedule_flush()
+        return entry
 
     def put_compression_cached(
         self,
@@ -1058,8 +1156,8 @@ class LoomStorage:
                 """
                 INSERT INTO compression_cache (
                     content_hash, age_ratio, compressed_text, tier,
-                    tokens_before, tokens_after, created_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?)
+                    tokens_before, tokens_after, created_at, expires_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     content_hash,
@@ -1069,6 +1167,110 @@ class LoomStorage:
                     tokens_before,
                     tokens_after,
                     time.time(),
+                    time.time() + CACHE_TTL_SECONDS,
                 ),
             )
             self._schedule_flush()
+
+    def cleanup_expired_cache(self) -> int:
+        with self._write_lock:
+            cur = self.conn.execute(
+                "DELETE FROM compression_cache WHERE expires_at < ?",
+                (time.time(),),
+            )
+            self.conn.commit()
+        return cur.rowcount
+
+    def cache_stats(self) -> dict:
+        row = self.conn.execute(
+            "SELECT count(*), coalesce(sum(hits), 0), "
+            "coalesce(sum(tokens_before - tokens_after), 0) "
+            "FROM compression_cache WHERE expires_at IS NULL OR expires_at > ?",
+            (time.time(),),
+        ).fetchone()
+        return {
+            "entries": row[0],
+            "total_hits": row[1],
+            "total_tokens_saved": row[2],
+        }
+
+    # ---- gateway key management ----
+
+    @staticmethod
+    def _hash_key(raw_key: str) -> str:
+        return hashlib.sha256(raw_key.encode()).hexdigest()
+
+    def create_gateway_key(self, name: str) -> dict:
+        """Create a new gateway key. Returns the full key ONCE."""
+        raw_key = f"loom-{secrets.token_urlsafe(32)}"
+        key_hash = self._hash_key(raw_key)
+        prefix = raw_key[:12]
+        now = time.time()
+        with self._write_lock:
+            cur = self.conn.execute(
+                "INSERT INTO gateway_keys (name, key_hash, key_prefix, created_at) "
+                "VALUES (?, ?, ?, ?)",
+                (name, key_hash, prefix, now),
+            )
+            self.conn.commit()
+        return {
+            "id": cur.lastrowid,
+            "name": name,
+            "key": raw_key,
+            "key_prefix": prefix,
+            "created_at": now,
+        }
+
+    def validate_gateway_key(self, raw_key: str) -> Optional[dict]:
+        """Validate a key. Returns key info if valid, None if not."""
+        key_hash = self._hash_key(raw_key)
+        row = self.conn.execute(
+            "SELECT id, name, key_prefix, enabled FROM gateway_keys "
+            "WHERE key_hash = ?",
+            (key_hash,),
+        ).fetchone()
+        if not row or not row[3]:
+            return None
+        with self._write_lock:
+            self.conn.execute(
+                "UPDATE gateway_keys SET last_used_at = ? WHERE id = ?",
+                (time.time(), row[0]),
+            )
+            self._schedule_flush()
+        return {"id": row[0], "name": row[1], "key_prefix": row[2]}
+
+    def list_gateway_keys(self) -> list[dict]:
+        """List all keys (masked — prefix only, no full key)."""
+        rows = self.conn.execute(
+            "SELECT id, name, key_prefix, created_at, last_used_at, enabled "
+            "FROM gateway_keys ORDER BY created_at DESC"
+        ).fetchall()
+        return [
+            {
+                "id": r[0],
+                "name": r[1],
+                "key_preview": f"{r[2]}...",
+                "created_at": r[3],
+                "last_used_at": r[4],
+                "enabled": bool(r[5]),
+            }
+            for r in rows
+        ]
+
+    def toggle_gateway_key(self, key_id: int, enabled: bool) -> bool:
+        with self._write_lock:
+            cur = self.conn.execute(
+                "UPDATE gateway_keys SET enabled = ? WHERE id = ?",
+                (1 if enabled else 0, key_id),
+            )
+            self.conn.commit()
+        return cur.rowcount > 0
+
+    def delete_gateway_key(self, key_id: int) -> bool:
+        with self._write_lock:
+            cur = self.conn.execute(
+                "DELETE FROM gateway_keys WHERE id = ?",
+                (key_id,),
+            )
+            self.conn.commit()
+        return cur.rowcount > 0

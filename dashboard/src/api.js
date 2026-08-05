@@ -1,35 +1,74 @@
 // Thin fetch wrappers around the Loom gateway API. All endpoints are served
 // from the same origin as the dashboard, so relative paths just work.
 
+// Gateway key for the browser session. The API requires it on every /api/*
+// call once at least one key exists; stored locally so a page reload keeps it.
+const KEY_STORAGE = "loom-gateway-key";
+
+export function getGatewayKey() {
+  try {
+    return localStorage.getItem(KEY_STORAGE) || "";
+  } catch {
+    return "";
+  }
+}
+
+export function setGatewayKey(key) {
+  try {
+    if (key) localStorage.setItem(KEY_STORAGE, key);
+    else localStorage.removeItem(KEY_STORAGE);
+  } catch {
+    // Private-mode browsers may block storage; the key just won't persist.
+  }
+}
+
+function authHeaders() {
+  const key = getGatewayKey();
+  return key ? { "x-loom-gateway-key": key } : {};
+}
+
+function fail(path, res) {
+  const err = new Error(
+    res.status === 401
+      ? "Authentication required — set your gateway key in Settings."
+      : `${path} -> ${res.status}`
+  );
+  err.status = res.status;
+  return err;
+}
+
 async function getJSON(path) {
-  const res = await fetch(path, { headers: { Accept: "application/json" } });
-  if (!res.ok) throw new Error(`${path} -> ${res.status}`);
+  const res = await fetch(path, {
+    headers: { Accept: "application/json", ...authHeaders() },
+  });
+  if (!res.ok) throw fail(path, res);
   return res.json();
 }
 
-async function patchJSON(path, body) {
+async function sendJSON(method, path, body) {
   const res = await fetch(path, {
-    method: "PATCH",
-    headers: { "Content-Type": "application/json", Accept: "application/json" },
-    body: JSON.stringify(body),
+    method,
+    headers: {
+      "Content-Type": "application/json",
+      Accept: "application/json",
+      ...authHeaders(),
+    },
+    body: body === undefined ? undefined : JSON.stringify(body),
   });
-  if (!res.ok) throw new Error(`${path} -> ${res.status}`);
+  if (!res.ok) throw fail(path, res);
   return res.json();
 }
 
-async function putJSON(path, body) {
-  const res = await fetch(path, {
-    method: "PUT",
-    headers: { "Content-Type": "application/json", Accept: "application/json" },
-    body: JSON.stringify(body),
-  });
-  if (!res.ok) throw new Error(`${path} -> ${res.status}`);
-  return res.json();
-}
+const patchJSON = (path, body) => sendJSON("PATCH", path, body);
+const putJSON = (path, body) => sendJSON("PUT", path, body);
+const postJSON = (path, body) => sendJSON("POST", path, body);
 
 async function deleteJSON(path) {
-  const res = await fetch(path, { method: "DELETE", headers: { Accept: "application/json" } });
-  if (!res.ok) throw new Error(`${path} -> ${res.status}`);
+  const res = await fetch(path, {
+    method: "DELETE",
+    headers: { Accept: "application/json", ...authHeaders() },
+  });
+  if (!res.ok) throw fail(path, res);
   return res.json();
 }
 
@@ -60,6 +99,7 @@ export const api = {
     getJSON(`/api/routing?hours=${hours}&limit=${limit}`),
   sessions: (hours = 24) => getJSON(`/api/sessions?hours=${hours}`),
   costs: (days = 30) => getJSON(`/api/costs?days=${days}`),
+  compressionMetrics: (days = 30) => getJSON(`/api/metrics/compression?days=${days}`),
   updateServerConfig: (updates) => patchJSON("/api/config/server", updates),
   updateCompression: (updates) => patchJSON("/api/config/compression", updates),
   updateSourcePolicy: (name, updates) =>
@@ -68,6 +108,11 @@ export const api = {
     putJSON(`/api/config/sources/${encodeURIComponent(name)}`, fields),
   deleteSourcePolicy: (name) =>
     deleteJSON(`/api/config/sources/${encodeURIComponent(name)}`),
+  gatewayKeys: () => getJSON("/api/config/gateway-keys"),
+  createGatewayKey: (name) => postJSON("/api/config/gateway-keys", { name }),
+  toggleGatewayKey: (id, enabled) =>
+    patchJSON(`/api/config/gateway-keys/${id}`, { enabled }),
+  deleteGatewayKey: (id) => deleteJSON(`/api/config/gateway-keys/${id}`),
 };
 
 // Display timezone — loaded from server config, cached in module state.
