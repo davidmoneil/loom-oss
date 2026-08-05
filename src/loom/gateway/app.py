@@ -1487,12 +1487,12 @@ def create_app() -> FastAPI:
         if (
             gw.config.compression
             and gw.config.compression.enabled
-            and gw.processor
+            and gw.compression
             and body.get("messages")
         ):
             try:
                 body["messages"], _, _, _, _ = _compress_messages_inline(
-                    gw.processor,
+                    gw.compression,
                     body["messages"],
                     gw.storage,
                     compress_tool_results=True,
