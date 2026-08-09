@@ -207,6 +207,10 @@ class AnthropicBackend(ProviderBackend):
         try:
             resp = await client.send(req)
         except httpx.HTTPError as exc:
+            _log.error(
+                "upstream request failed: url=%s exc_type=%s exc=%s",
+                req.url, type(exc).__name__, exc,
+            )
             raise ProviderError(f"anthropic request failed: {exc}") from exc
         self._last_ratelimit = _extract_ratelimit_headers(resp)
         if resp.status_code >= 400:
