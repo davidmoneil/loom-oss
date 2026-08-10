@@ -102,7 +102,7 @@ routes through a single `logging.config.dictConfig` set up at process start
 `uvicorn`/`uvicorn.access`/`uvicorn.error` loggers are configured the same way, so
 gateway and access logs share one level, format, and destination.
 
-Configure it under `server:` in `loom.yaml` (or `loom.homelab.yaml`):
+Configure it under `server:` in `loom.yaml`:
 
 ```yaml
 server:

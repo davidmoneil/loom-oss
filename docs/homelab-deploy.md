@@ -4,9 +4,9 @@ The homelab deployment is `main` + two overlay files — no separate branch.
 
 | File | Tracked? | Purpose |
 |------|----------|---------|
-| `loom.homelab.yaml` | yes (secret-free) | model registry (fable/opus/sonnet/haiku, gpt-4o, qwen3 family), source policies incl. `headless`, Postgres backend selection, DLP scanner config |
+| `loom.homelab.yaml` | no — untracked local, in `.gitignore` (secret-free, but reveals internal topology) | model registry (fable/opus/sonnet/haiku, gpt-4o, qwen3 family), source policies incl. `headless`, Postgres backend selection, DLP scanner config |
 | `.env.homelab` | no — copy from `.env.homelab.example` | `LOOM_POSTGRES_DSN` (the deployment's only secret) |
-| `docker-compose.homelab.yml` | yes | binds `loom.homelab.yaml`, joins the n8n Postgres network, installs the `postgres` extras |
+| `docker-compose.homelab.yml` | no — untracked local, in `.gitignore` | binds `loom.homelab.yaml`, joins the n8n Postgres network, installs the `postgres` extras |
 
 ## Deploy / update
 
@@ -22,11 +22,14 @@ The gateway serves the observability API (`docs/observability-api.md`) on
 
 ## Reproducing on a new machine
 
-Clone the repo, create `.env.homelab` with a DSN pointing at your Postgres
-(tables are created automatically on first connect), and run the compose
-command above. If there is no external Postgres, use `./setup.sh` instead and
-pick the bundled-Postgres option (that path uses the default
-`docker-compose.yml`, not the homelab overlay).
+`loom.homelab.yaml` and `docker-compose.homelab.yml` are gitignored (not
+shipped in the public repo — see the table above) — copy them in from a
+private backup of this machine before running the steps below. Then create
+`.env.homelab` with a DSN pointing at your Postgres (tables are created
+automatically on first connect), and run the compose command above. If there
+is no external Postgres, use `./setup.sh` instead and pick the
+bundled-Postgres option (that path uses the default `docker-compose.yml`, not
+the homelab overlay).
 
 ## Storage DSN: single source of truth
 
