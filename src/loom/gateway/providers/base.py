@@ -44,7 +44,7 @@ class ProviderBackend(ABC):
         if self._client is None or self._client.is_closed:
             self._client = httpx.AsyncClient(
                 base_url=self.api_base,
-                timeout=httpx.Timeout(120.0, connect=120.0, read=120.0, write=120.0, pool=120.0),
+                timeout=httpx.Timeout(310.0, connect=30.0, read=310.0, write=310.0, pool=310.0),
             )
         return self._client
 
