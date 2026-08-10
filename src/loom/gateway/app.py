@@ -946,6 +946,40 @@ def _extract_stream_usage(lines: list[str]) -> tuple[dict | None, list[str]]:
     return (usage if usage else None), text_parts
 
 
+_STREAM_IDLE_TIMEOUT_SECONDS = 180.0
+_COMPRESSION_TIMEOUT_SECONDS = 60.0
+_UPSTREAM_TIMEOUT_SECONDS = 300.0
+
+
+async def _iter_with_idle_timeout(
+    aiter: AsyncIterator[bytes], timeout: float, request_id: str
+) -> AsyncIterator[bytes]:
+    """Wrap an async byte iterator so a stalled upstream raises instead of hanging.
+
+    httpx's own read timeout only fires when a single read waits past its
+    threshold; an upstream that keeps trickling bytes (e.g. SSE keepalive
+    pings) without making real progress never trips it, so this adds an
+    explicit per-chunk idle ceiling.
+    """
+    log = get_logger("loom.gateway")
+    it = aiter.__aiter__()
+    while True:
+        try:
+            chunk = await asyncio.wait_for(it.__anext__(), timeout=timeout)
+        except StopAsyncIteration:
+            return
+        except asyncio.TimeoutError:
+            log.error(
+                "stream idle timeout: no chunk from upstream in %.0fs (request_id=%s)",
+                timeout, request_id,
+            )
+            raise ProviderError(
+                f"upstream stream idle for {timeout:.0f}s — aborting",
+                status_code=504,
+            ) from None
+        yield chunk
+
+
 async def _wrapped_stream(
     state: GatewayState,
     upstream: AsyncIterator[bytes],
@@ -962,6 +996,8 @@ async def _wrapped_stream(
     Otherwise passes through directly with zero overhead.
     """
     status = 200
+    request_id = meta.get("request_id", "?")
+    upstream = _iter_with_idle_timeout(upstream, _STREAM_IDLE_TIMEOUT_SECONDS, request_id)
     scan_enabled = (
         state.scanner is not None
         and state.scanner.enabled
@@ -1614,31 +1650,67 @@ def create_app() -> FastAPI:
                 # Off the event loop: compression is CPU-bound and, with
                 # llm_prose enabled, makes blocking HTTP calls to the local
                 # model — inline it would freeze every request incl. /health.
-                messages, comp_before, comp_after, comp_by_type, _comp_loop = (
-                    await asyncio.to_thread(
-                        _compress_messages_inline,
-                        gw.compression,
-                        messages,
-                        gw.storage,
-                        compress_tool_results=gw.config.compression.tool_results,
-                        variants=gw.variants,
-                        tier_name=tier_name,
-                        config=gw.config,
+                # Bounded with wait_for: under concurrent load this can queue
+                # behind other requests' compression work on the shared thread
+                # pool indefinitely, which previously showed up as a request
+                # that hangs forever with no error (e.g. a large /compact).
+                comp_t0 = time.monotonic()
+                _log = get_logger("loom.gateway")
+                try:
+                    messages, comp_before, comp_after, comp_by_type, _comp_loop = (
+                        await asyncio.wait_for(
+                            asyncio.to_thread(
+                                _compress_messages_inline,
+                                gw.compression,
+                                messages,
+                                gw.storage,
+                                compress_tool_results=gw.config.compression.tool_results,
+                                variants=gw.variants,
+                                tier_name=tier_name,
+                                config=gw.config,
+                            ),
+                            timeout=_COMPRESSION_TIMEOUT_SECONDS,
+                        )
                     )
+                except asyncio.TimeoutError:
+                    _log.error(
+                        "compression phase exceeded %.0fs (request_id=%s, messages=%d)",
+                        _COMPRESSION_TIMEOUT_SECONDS, request_id, len(messages),
+                    )
+                    raise ProviderError(
+                        f"compression phase exceeded {_COMPRESSION_TIMEOUT_SECONDS:.0f}s timeout",
+                        status_code=504,
+                    ) from None
+                _log.info(
+                    "compression phase completed in %.1fs (request_id=%s)",
+                    time.monotonic() - comp_t0, request_id,
                 )
                 gw.comp_tokens_before += comp_before
                 gw.comp_tokens_after += comp_after
                 for k, v in comp_by_type.items():
                     _tally(gw.comp_by_type, k, v["before"], v["after"])
-            result = await backend.chat_completion(
-                model=actual_model,
-                messages=messages,
-                api_key=api_key,
-                stream=stream,
-                inbound_headers=inbound_hdrs,
-                query_string=request.url.query or "",
-                raw_body=body,
-            )
+            try:
+                result = await asyncio.wait_for(
+                    backend.chat_completion(
+                        model=actual_model,
+                        messages=messages,
+                        api_key=api_key,
+                        stream=stream,
+                        inbound_headers=inbound_hdrs,
+                        query_string=request.url.query or "",
+                        raw_body=body,
+                    ),
+                    timeout=_UPSTREAM_TIMEOUT_SECONDS,
+                )
+            except asyncio.TimeoutError:
+                get_logger("loom.gateway").error(
+                    "upstream request exceeded %.0fs (request_id=%s)",
+                    _UPSTREAM_TIMEOUT_SECONDS, request_id,
+                )
+                raise ProviderError(
+                    f"upstream request exceeded {_UPSTREAM_TIMEOUT_SECONDS:.0f}s timeout",
+                    status_code=504,
+                ) from None
 
             meta = {
                 "request_id": request_id,
