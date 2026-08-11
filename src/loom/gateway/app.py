@@ -559,7 +559,7 @@ def _model_cost(model_cfg: Optional[ModelConfig], usage: Any) -> float:
     input_cost = (
         (base_input / 1000.0) * model_cfg.cost_per_1k_input
         + (cache_read / 1000.0) * model_cfg.cost_per_1k_input * 0.1
-        + (cache_creation / 1000.0) * model_cfg.cost_per_1k_input * 1.25
+        + (cache_creation / 1000.0) * model_cfg.cost_per_1k_input * 2.0
     )
     return input_cost + (tokens_out / 1000.0) * model_cfg.cost_per_1k_output
 

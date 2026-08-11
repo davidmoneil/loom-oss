@@ -169,6 +169,18 @@ class ProviderRegistry:
                 "max_context_tokens": 1000000,
                 "tier": "premium",
             },
+            "sonnet-5": {
+                "provider": "anthropic",
+                "model_id": "claude-sonnet-5",
+                "display_name": "sonnet-5",
+                "engine": "anthropic",
+                "supports_tools": True,
+                "supports_json_mode": True,
+                "cost_per_1k_input": 0.002,
+                "cost_per_1k_output": 0.010,
+                "max_context_tokens": 1000000,
+                "tier": "standard",
+            },
             "sonnet": {
                 "provider": "anthropic",
                 "model_id": "claude-sonnet-4-6",
