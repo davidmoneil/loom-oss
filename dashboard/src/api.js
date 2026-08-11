@@ -89,6 +89,8 @@ export const api = {
   auditContent: (requestId) => getJSON(`/api/audit/${requestId}/content`),
   scannerRules: () => getJSON("/api/scanner/rules"),
   scannerStats: () => getJSON("/api/scanner/stats"),
+  updateScannerRule: (name, updates) =>
+    putJSON(`/api/scanner/rules/${encodeURIComponent(name)}`, updates),
   governorSettings: () => getJSON("/api/governor"),
   governorStatus: () => getJSON("/api/governor/status"),
   updateGovernor: (updates) => patchJSON("/api/governor", updates),

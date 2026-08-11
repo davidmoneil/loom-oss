@@ -1,24 +1,6 @@
 import { useEffect, useState, useCallback } from "react";
 import StatCard from "../components/StatCard.jsx";
-import { fmtNumber } from "../api.js";
-
-const API_BASE = "";
-
-async function getJSON(path) {
-  const res = await fetch(`${API_BASE}${path}`, { headers: { Accept: "application/json" } });
-  if (!res.ok) throw new Error(`${path} -> ${res.status}`);
-  return res.json();
-}
-
-async function putJSON(path, body) {
-  const res = await fetch(`${API_BASE}${path}`, {
-    method: "PUT",
-    headers: { "Content-Type": "application/json", Accept: "application/json" },
-    body: JSON.stringify(body),
-  });
-  if (!res.ok) throw new Error(`${path} -> ${res.status}`);
-  return res.json();
-}
+import { api, fmtNumber } from "../api.js";
 
 const ACTION_OPTIONS = ["redact", "mask", "pseudonymize", "log_only", "pass"];
 
@@ -30,8 +12,8 @@ export default function Scanner() {
 
   const refresh = useCallback(() => {
     Promise.all([
-      getJSON("/api/scanner/rules"),
-      getJSON("/api/scanner/stats"),
+      api.scannerRules(),
+      api.scannerStats(),
     ])
       .then(([rulesData, statsData]) => {
         setData(rulesData);
@@ -50,7 +32,7 @@ export default function Scanner() {
   async function toggleRule(name, enabled) {
     setUpdating(name);
     try {
-      await putJSON(`/api/scanner/rules/${name}`, { enabled });
+      await api.updateScannerRule(name, { enabled });
       refresh();
     } catch (e) {
       console.error("Failed to update rule:", e);
@@ -62,7 +44,7 @@ export default function Scanner() {
   async function changeAction(name, action) {
     setUpdating(name);
     try {
-      await putJSON(`/api/scanner/rules/${name}`, { action });
+      await api.updateScannerRule(name, { action });
       refresh();
     } catch (e) {
       console.error("Failed to update rule:", e);
