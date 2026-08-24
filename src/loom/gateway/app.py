@@ -3316,21 +3316,31 @@ def _score_messages_by_relevance(
     loop lowers its effective age so it is compressed less aggressively.
     Ported from the internal proxy's Neo4j/embeddings scoring; returns an
     empty dict (pure age-ratio mode) when no store is configured.
+
+    Uses a single batched ``is_indexed_batch()`` call instead of one
+    ``is_indexed()`` round trip per message — the latter was the N+1 query
+    pattern behind the 6-8s compression stalls (see
+    docs/investigations/compression-relevance-nplus1.md).
     """
     if variants is None or not getattr(variants, "enabled", False):
         return {}
-    scores: dict[int, float] = {}
+    hashes_by_idx: dict[int, str] = {}
     for idx, msg in enumerate(messages):
         text = _relevance_text(msg.get("content", ""))
         if not text:
             continue
-        h = hashlib.sha256(text[:512].encode()).hexdigest()[:16]
-        try:
-            if variants.is_indexed(h):
-                scores[idx] = 0.85  # curated Loom content — preserve
-        except Exception:
-            return scores
-    return scores
+        hashes_by_idx[idx] = hashlib.sha256(text[:512].encode()).hexdigest()[:16]
+    if not hashes_by_idx:
+        return {}
+    try:
+        indexed = variants.is_indexed_batch(list(hashes_by_idx.values()))
+    except Exception:
+        return {}
+    return {
+        idx: 0.85  # curated Loom content — preserve
+        for idx, h in hashes_by_idx.items()
+        if h in indexed
+    }
 
 
 # High-relevance content gets its effective age reduced by this much
