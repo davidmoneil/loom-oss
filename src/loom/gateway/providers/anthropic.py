@@ -7,6 +7,7 @@ via the ``x-api-key`` header plus a pinned ``anthropic-version``.
 
 from __future__ import annotations
 
+import asyncio
 from typing import AsyncIterator
 
 import httpx
@@ -14,6 +15,29 @@ import httpx
 from .base import ProviderBackend, ProviderError
 
 ANTHROPIC_VERSION = "2023-06-01"
+
+# A 429 with a short retry-after is a transient per-minute/concurrency collision
+# (e.g. several sessions hitting the account's rate limit in the same moment) —
+# worth one bounded retry so the client never sees a torn-down stream for it.
+# A 429 with no retry-after, or a long one (e.g. the weekly rolling quota), means
+# genuine exhaustion — retrying would just hang the connection, so it's surfaced
+# to the client immediately instead.
+_MAX_429_RETRY_AFTER_SECONDS = 10.0
+_MAX_429_RETRIES = 1
+
+
+def _short_retry_after(resp: httpx.Response, cap: float = _MAX_429_RETRY_AFTER_SECONDS) -> float | None:
+    """Return retry-after in seconds if present and within the transient-collision cap, else None."""
+    raw = resp.headers.get("retry-after")
+    if raw is None:
+        return None
+    try:
+        seconds = float(raw)
+    except (TypeError, ValueError):
+        return None
+    if seconds <= 0 or seconds > cap:
+        return None
+    return seconds
 
 # Anthropic has no public "list models" endpoint, so this is a maintained list.
 _KNOWN_MODELS = [
@@ -200,34 +224,45 @@ class AnthropicBackend(ProviderBackend):
         hdrs = self._headers(api_key, inbound_headers)
         from loom.logging_setup import get_logger
         _log = get_logger("loom.anthropic")
-        req = client.build_request("POST", url, json=body, headers=hdrs)
-        _log.info("DEBUG upstream request: url=%s headers=%s",
-                  req.url, {k: v for k, v in req.headers.items()
-                            if k.lower() not in ("x-api-key", "authorization")})
-        try:
-            resp = await client.send(req)
-        except httpx.HTTPError as exc:
-            _log.error(
-                "upstream request failed: url=%s exc_type=%s exc=%s",
-                req.url, type(exc).__name__, exc,
-            )
-            raise ProviderError(f"anthropic request failed: {exc}") from exc
-        self._last_ratelimit = _extract_ratelimit_headers(resp)
-        if resp.status_code >= 400:
-            payload = _safe_json(resp)
-            _log.error(
-                "upstream %s — headers sent: %s — payload: %s",
-                resp.status_code,
-                {k: v for k, v in self._headers(api_key, inbound_headers).items()
-                 if k.lower() != "x-api-key" and k.lower() != "authorization"},
-                payload,
-            )
-            raise ProviderError(
-                f"anthropic returned {resp.status_code}",
-                status_code=resp.status_code,
-                payload=payload,
-            )
-        return resp.json()
+        attempt = 0
+        while True:
+            req = client.build_request("POST", url, json=body, headers=hdrs)
+            _log.info("DEBUG upstream request: url=%s headers=%s",
+                      req.url, {k: v for k, v in req.headers.items()
+                                if k.lower() not in ("x-api-key", "authorization")})
+            try:
+                resp = await client.send(req)
+            except httpx.HTTPError as exc:
+                _log.error(
+                    "upstream request failed: url=%s exc_type=%s exc=%s",
+                    req.url, type(exc).__name__, exc,
+                )
+                raise ProviderError(f"anthropic request failed: {exc}") from exc
+            self._last_ratelimit = _extract_ratelimit_headers(resp)
+            if resp.status_code == 429 and attempt < _MAX_429_RETRIES:
+                retry_after = _short_retry_after(resp)
+                if retry_after is not None:
+                    attempt += 1
+                    _log.warning(
+                        "upstream 429 — retrying once after %.1fs", retry_after,
+                    )
+                    await asyncio.sleep(retry_after)
+                    continue
+            if resp.status_code >= 400:
+                payload = _safe_json(resp)
+                _log.error(
+                    "upstream %s — headers sent: %s — payload: %s",
+                    resp.status_code,
+                    {k: v for k, v in self._headers(api_key, inbound_headers).items()
+                     if k.lower() != "x-api-key" and k.lower() != "authorization"},
+                    payload,
+                )
+                raise ProviderError(
+                    f"anthropic returned {resp.status_code}",
+                    status_code=resp.status_code,
+                    payload=payload,
+                )
+            return resp.json()
 
     async def _stream(
         self,
@@ -238,32 +273,47 @@ class AnthropicBackend(ProviderBackend):
     ) -> AsyncIterator[bytes]:
         client = await self.get_client()
         url = self._upstream_url("/v1/messages", query_string)
-        async with client.stream(
-            "POST",
-            url,
-            json=body,
-            headers=self._headers(api_key, inbound_headers),
-        ) as resp:
-            self._last_ratelimit = _extract_ratelimit_headers(resp)
-            if resp.status_code >= 400:
-                await resp.aread()
-                payload = _safe_json(resp)
-                from loom.logging_setup import get_logger
-                get_logger("loom.anthropic").error(
-                    "upstream stream %s — headers sent: %s — payload: %s",
-                    resp.status_code,
-                    {k: v for k, v in self._headers(api_key, inbound_headers).items()
-                     if k.lower() != "x-api-key" and k.lower() != "authorization"},
-                    payload,
-                )
-                raise ProviderError(
-                    f"anthropic stream returned {resp.status_code}",
-                    status_code=resp.status_code,
-                    payload=payload,
-                )
-            async for chunk in resp.aiter_raw():
-                if chunk:
-                    yield chunk
+        from loom.logging_setup import get_logger
+        _log = get_logger("loom.anthropic")
+        attempt = 0
+        while True:
+            async with client.stream(
+                "POST",
+                url,
+                json=body,
+                headers=self._headers(api_key, inbound_headers),
+            ) as resp:
+                self._last_ratelimit = _extract_ratelimit_headers(resp)
+                if resp.status_code == 429 and attempt < _MAX_429_RETRIES:
+                    retry_after = _short_retry_after(resp)
+                    if retry_after is not None:
+                        await resp.aread()
+                        attempt += 1
+                        _log.warning(
+                            "upstream stream 429 — retrying once after %.1fs",
+                            retry_after,
+                        )
+                        await asyncio.sleep(retry_after)
+                        continue
+                if resp.status_code >= 400:
+                    await resp.aread()
+                    payload = _safe_json(resp)
+                    _log.error(
+                        "upstream stream %s — headers sent: %s — payload: %s",
+                        resp.status_code,
+                        {k: v for k, v in self._headers(api_key, inbound_headers).items()
+                         if k.lower() != "x-api-key" and k.lower() != "authorization"},
+                        payload,
+                    )
+                    raise ProviderError(
+                        f"anthropic stream returned {resp.status_code}",
+                        status_code=resp.status_code,
+                        payload=payload,
+                    )
+                async for chunk in resp.aiter_raw():
+                    if chunk:
+                        yield chunk
+                return
 
     async def list_models(self) -> list[str]:
         if self._config_models:
