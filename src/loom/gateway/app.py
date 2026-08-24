@@ -377,6 +377,7 @@ def _record_request(
                 cost_estimate=cost,
                 routing_reason=routing_reason,
                 status_code=status_code,
+                session_id=session_id,
             )
             if ratelimit:
                 audit_kwargs["ratelimit"] = ratelimit
