@@ -60,6 +60,9 @@ class NullVariantStore:
     def is_indexed(self, content_hash: str) -> bool:
         return False
 
+    def is_indexed_batch(self, content_hashes: list[str]) -> set[str]:
+        return set()
+
     def close(self) -> None:
         return None
 
@@ -248,6 +251,40 @@ class AgeVariantStore:
         )
         return len(rows) > 0
 
+    def is_indexed_batch(self, content_hashes: list[str]) -> set[str]:
+        """Batched :meth:`is_indexed` — one round trip for many hashes.
+
+        Avoids the N+1 query pattern relevance scoring previously hit by
+        calling :meth:`is_indexed` once per message.
+        """
+        if not content_hashes:
+            return set()
+        conn = self._conn()
+        quoted = ", ".join(
+            "'" + h.replace("\\", "\\\\").replace("'", "\\'") + "'"
+            for h in content_hashes
+        )
+        rows = self._cypher(
+            conn,
+            f"""
+            MATCH (c:LoomContent)
+            WHERE c.content_hash IN [{quoted}] AND c.source <> 'gateway'
+            RETURN c.content_hash
+            """,
+        )
+        import json
+
+        found: set[str] = set()
+        for row in rows:
+            val = row[0]
+            if isinstance(val, str):
+                try:
+                    val = json.loads(val)
+                except (json.JSONDecodeError, TypeError):
+                    pass
+            found.add(val)
+        return found
+
     def close(self) -> None:
         conn = getattr(self._local, "conn", None)
         if conn is not None:
@@ -364,6 +401,22 @@ class Neo4jVariantStore:
                 content_hash=content_hash,
             ).single()
             return record is not None
+
+    def is_indexed_batch(self, content_hashes: list[str]) -> set[str]:
+        """Batched :meth:`is_indexed` — one round trip for many hashes."""
+        if not content_hashes:
+            return set()
+        with self._driver.session(database=self._database) as session:
+            records = session.run(
+                """
+                MATCH (c:LoomContent)
+                WHERE c.content_hash IN $content_hashes
+                AND coalesce(c.source, '') <> 'gateway'
+                RETURN c.content_hash AS content_hash
+                """,
+                content_hashes=content_hashes,
+            )
+            return {r["content_hash"] for r in records}
 
     def close(self) -> None:
         try:
