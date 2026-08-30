@@ -36,7 +36,12 @@ _MAX_STREAM_CONN_RETRIES = 1
 
 
 def _short_retry_after(resp: httpx.Response, cap: float = _MAX_429_RETRY_AFTER_SECONDS) -> float | None:
-    """Return retry-after in seconds if present and within the transient-collision cap, else None."""
+    """Return retry-after in seconds if present and within the transient-collision cap, else None.
+
+    REPO_META capability=gateway.provider.retry-policy
+    REPO_META purpose="Decides whether a 429 response is a short transient collision worth one bounded retry, versus genuine quota exhaustion that must surface immediately."
+    REPO_META role=policy
+    """
     raw = resp.headers.get("retry-after")
     if raw is None:
         return None
@@ -91,6 +96,14 @@ _STR_KEYS = frozenset(
 
 
 def _extract_ratelimit_headers(resp: httpx.Response) -> dict:
+    """Normalize Anthropic's per-request and unified rate-limit headers into a flat dict.
+
+    REPO_META capability=gateway.provider.ratelimit-telemetry
+    REPO_META purpose="Normalizes Anthropic's per-request and unified rate-limit headers into a flat dict, deriving utilization ratios the dashboard and gateway consume."
+    REPO_META reads=data.upstream-response-headers
+    REPO_META writes=data.rate-limit-snapshot
+    REPO_META role=adapter
+    """
     out: dict = {}
     for hdr, key in _RATELIMIT_HEADER_MAP.items():
         raw = resp.headers.get(hdr)
@@ -141,6 +154,14 @@ class AnthropicBackend(ProviderBackend):
         api_key: str,
         inbound_headers: dict[str, str] | None = None,
     ) -> dict[str, str]:
+        """Build upstream request headers, choosing OAuth bearer vs static x-api-key auth.
+
+        REPO_META capability=gateway.provider.auth-headers
+        REPO_META purpose="Builds upstream request headers, choosing between OAuth bearer (with the required beta flag) and static x-api-key auth based on the key's shape."
+        REPO_META external=service.anthropic
+        REPO_META sensitivity=credential
+        REPO_META role=adapter
+        """
         headers: dict[str, str] = {
             "Content-Type": "application/json",
             "anthropic-version": ANTHROPIC_VERSION,
@@ -174,6 +195,13 @@ class AnthropicBackend(ProviderBackend):
         raw_body: dict | None = None,
         **kwargs,
     ) -> dict | AsyncIterator[bytes]:
+        """Normalize a chat completion request into Anthropic's Messages API body shape.
+
+        REPO_META capability=gateway.provider.chat-completion
+        REPO_META purpose="Normalizes a chat completion request into Anthropic's Messages API body shape and dispatches to the streaming or non-streaming code path."
+        REPO_META external=service.anthropic
+        REPO_META role=orchestrator
+        """
         if raw_body is not None:
             body = dict(raw_body)
             body["model"] = model
@@ -198,6 +226,12 @@ class AnthropicBackend(ProviderBackend):
 
         Auth headers are relayed as received (x-api-key or Authorization
         bearer) so both API-key and OAuth callers work.
+
+        REPO_META capability=gateway.provider.count-tokens
+        REPO_META purpose="Forwards a token-count request to Anthropic's count_tokens endpoint, passing through whichever auth scheme the client used unmodified."
+        REPO_META external=service.anthropic
+        REPO_META sensitivity=credential
+        REPO_META role=adapter
         """
         headers = {
             "Content-Type": "application/json",
@@ -228,6 +262,15 @@ class AnthropicBackend(ProviderBackend):
         inbound_headers: dict[str, str] | None = None,
         query_string: str = "",
     ) -> dict:
+        """Send a non-streaming Messages API request, applying the bounded 429 retry policy.
+
+        REPO_META capability=gateway.provider.chat-completion
+        REPO_META purpose="Sends a non-streaming Messages API request, applying the bounded 429 retry policy and capturing rate-limit headers before returning the parsed response."
+        REPO_META external=service.anthropic
+        REPO_META sensitivity=credential
+        REPO_META writes=data.rate-limit-snapshot
+        REPO_META role=adapter
+        """
         client = await self.get_client()
         url = self._upstream_url("/v1/messages", query_string)
         hdrs = self._headers(api_key, inbound_headers)
@@ -280,6 +323,15 @@ class AnthropicBackend(ProviderBackend):
         inbound_headers: dict[str, str] | None = None,
         query_string: str = "",
     ) -> AsyncIterator[bytes]:
+        """Stream a Messages API response, retrying once on a 429 or a pre-data connection failure.
+
+        REPO_META capability=gateway.provider.chat-completion
+        REPO_META purpose="Streams a Messages API response chunk-by-chunk, retrying once on a 429 or a connection failure that occurred before any bytes reached the client."
+        REPO_META external=service.anthropic
+        REPO_META sensitivity=credential
+        REPO_META writes=data.rate-limit-snapshot
+        REPO_META role=adapter
+        """
         client = await self.get_client()
         url = self._upstream_url("/v1/messages", query_string)
         from loom.logging_setup import get_logger
@@ -344,6 +396,12 @@ class AnthropicBackend(ProviderBackend):
                 continue
 
     async def list_models(self) -> list[str]:
+        """Return the configured model allowlist, or a maintained fallback list.
+
+        REPO_META capability=gateway.provider.list-models
+        REPO_META purpose="Returns the configured model allowlist if set, otherwise a maintained fallback list, since Anthropic has no public list-models endpoint."
+        REPO_META role=adapter
+        """
         if self._config_models:
             return list(self._config_models)
         return list(_KNOWN_MODELS)
