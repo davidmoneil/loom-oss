@@ -25,6 +25,15 @@ ANTHROPIC_VERSION = "2023-06-01"
 _MAX_429_RETRY_AFTER_SECONDS = 10.0
 _MAX_429_RETRIES = 1
 
+# A connection-level failure (peer closed a stale pooled keep-alive connection,
+# a reset mid-handshake, etc.) that happens before any bytes have reached the
+# client is safe to retry once with a fresh connection — same rationale as the
+# 429 case above: the alternative is tearing down the SSE stream with zero
+# bytes sent, which surfaces to Claude Code as "Streaming response ended
+# before any complete data was received". Once any chunk has been yielded,
+# retrying would duplicate/corrupt the stream, so it's not attempted.
+_MAX_STREAM_CONN_RETRIES = 1
+
 
 def _short_retry_after(resp: httpx.Response, cap: float = _MAX_429_RETRY_AFTER_SECONDS) -> float | None:
     """Return retry-after in seconds if present and within the transient-collision cap, else None."""
@@ -276,44 +285,63 @@ class AnthropicBackend(ProviderBackend):
         from loom.logging_setup import get_logger
         _log = get_logger("loom.anthropic")
         attempt = 0
+        conn_attempt = 0
         while True:
-            async with client.stream(
-                "POST",
-                url,
-                json=body,
-                headers=self._headers(api_key, inbound_headers),
-            ) as resp:
-                self._last_ratelimit = _extract_ratelimit_headers(resp)
-                if resp.status_code == 429 and attempt < _MAX_429_RETRIES:
-                    retry_after = _short_retry_after(resp)
-                    if retry_after is not None:
+            yielded_any = False
+            try:
+                async with client.stream(
+                    "POST",
+                    url,
+                    json=body,
+                    headers=self._headers(api_key, inbound_headers),
+                ) as resp:
+                    self._last_ratelimit = _extract_ratelimit_headers(resp)
+                    if resp.status_code == 429 and attempt < _MAX_429_RETRIES:
+                        retry_after = _short_retry_after(resp)
+                        if retry_after is not None:
+                            await resp.aread()
+                            attempt += 1
+                            _log.warning(
+                                "upstream stream 429 — retrying once after %.1fs",
+                                retry_after,
+                            )
+                            await asyncio.sleep(retry_after)
+                            continue
+                    if resp.status_code >= 400:
                         await resp.aread()
-                        attempt += 1
-                        _log.warning(
-                            "upstream stream 429 — retrying once after %.1fs",
-                            retry_after,
+                        payload = _safe_json(resp)
+                        _log.error(
+                            "upstream stream %s — headers sent: %s — payload: %s",
+                            resp.status_code,
+                            {k: v for k, v in self._headers(api_key, inbound_headers).items()
+                             if k.lower() != "x-api-key" and k.lower() != "authorization"},
+                            payload,
                         )
-                        await asyncio.sleep(retry_after)
-                        continue
-                if resp.status_code >= 400:
-                    await resp.aread()
-                    payload = _safe_json(resp)
+                        raise ProviderError(
+                            f"anthropic stream returned {resp.status_code}",
+                            status_code=resp.status_code,
+                            payload=payload,
+                        )
+                    async for chunk in resp.aiter_raw():
+                        if chunk:
+                            yielded_any = True
+                            yield chunk
+                    return
+            except httpx.HTTPError as exc:
+                if yielded_any or conn_attempt >= _MAX_STREAM_CONN_RETRIES:
                     _log.error(
-                        "upstream stream %s — headers sent: %s — payload: %s",
-                        resp.status_code,
-                        {k: v for k, v in self._headers(api_key, inbound_headers).items()
-                         if k.lower() != "x-api-key" and k.lower() != "authorization"},
-                        payload,
+                        "upstream stream connection failed: exc_type=%s exc=%s "
+                        "(yielded_any=%s, conn_attempt=%d)",
+                        type(exc).__name__, exc, yielded_any, conn_attempt,
                     )
-                    raise ProviderError(
-                        f"anthropic stream returned {resp.status_code}",
-                        status_code=resp.status_code,
-                        payload=payload,
-                    )
-                async for chunk in resp.aiter_raw():
-                    if chunk:
-                        yield chunk
-                return
+                    raise ProviderError(f"anthropic stream failed: {exc}") from exc
+                conn_attempt += 1
+                _log.warning(
+                    "upstream stream connection failed before any data — "
+                    "retrying once: exc_type=%s exc=%s",
+                    type(exc).__name__, exc,
+                )
+                continue
 
     async def list_models(self) -> list[str]:
         if self._config_models:

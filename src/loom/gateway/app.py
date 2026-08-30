@@ -1014,6 +1014,15 @@ async def _wrapped_stream(
         except ProviderError as exc:
             status = exc.status_code
             chunks.append(b"data: " + json.dumps(exc.payload).encode("utf-8") + b"\n\n")
+        except Exception as exc:
+            status = 502
+            get_logger("loom.gateway").error(
+                "unhandled exception mid-stream (scan mode): exc_type=%s exc=%s "
+                "(request_id=%s)",
+                type(exc).__name__, exc, request_id,
+            )
+            payload = {"error": {"message": str(exc), "type": "provider_error"}}
+            chunks.append(b"data: " + json.dumps(payload).encode("utf-8") + b"\n\n")
 
         full_body = b"".join(chunks)
         was_gzip = full_body[:2] == b"\x1f\x8b"
@@ -1087,6 +1096,19 @@ async def _wrapped_stream(
             status = exc.status_code
             body = json.dumps(exc.payload).encode("utf-8")
             yield b"data: " + body + b"\n\n"
+        except Exception as exc:
+            # Anything unanticipated (not a ProviderError the backend already
+            # classified) still degrades to a well-formed SSE error event
+            # instead of a bare connection close with zero bytes sent — the
+            # latter surfaces to clients as "stream ended before any complete
+            # data was received" with no diagnosable detail on either side.
+            status = 502
+            get_logger("loom.gateway").error(
+                "unhandled exception mid-stream: exc_type=%s exc=%s (request_id=%s)",
+                type(exc).__name__, exc, request_id,
+            )
+            payload = {"error": {"message": str(exc), "type": "provider_error"}}
+            yield b"data: " + json.dumps(payload).encode("utf-8") + b"\n\n"
         raw_body = b"".join(raw_chunks)
         if raw_body[:2] == b"\x1f\x8b":
             try:
