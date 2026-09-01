@@ -111,6 +111,11 @@ sources:
 routing:
   default_determinism_target: 0.7
   min_empirical_runs: 10
+  search_sources:
+    obsidian: "/mnt/synology_nas/Obsidian/Master"
+    aiprojects_context: "/home/davidmoneil/AIProjects/.claude/context"
+    aiprojects_knowledge: "/home/davidmoneil/AIProjects/knowledge"
+    code: "/home/davidmoneil/Code"
 
 compression:
   enabled: true
