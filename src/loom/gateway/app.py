@@ -1812,7 +1812,7 @@ def create_app() -> FastAPI:
         # Programmatic search — skip LLM if search-shaped
         if get_search_tier is not None and gw.config.routing.programmatic_search_enabled:
             try:
-                search = get_search_tier(gw.config.routing.search_sources).search(prompt)
+                search = await get_search_tier(gw.config.routing.search_sources).search(prompt)
                 if search.tier == "zero-inference" and search.hits:
                     lines = [f"{h.file}:{h.line_number}: {h.line}" for h in search.hits]
                     result_text = f"Found {len(search.hits)} results:\n" + "\n".join(lines)
