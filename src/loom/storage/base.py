@@ -13,6 +13,7 @@ drift is caught in CI without a running gateway.
 
 from __future__ import annotations
 
+import json
 import statistics
 import time
 from typing import Any, Optional, Protocol, runtime_checkable
@@ -80,7 +81,9 @@ def _summarize_compression(records: list[dict], days: int) -> dict:
     the statistics/histogram/breakdown logic cannot drift between them.
 
     ``records``: dicts with compressed, compression_ratio (after/before),
-    tokens_saved, tier, model, source, timestamp.
+    tokens_saved, tier, model, source, timestamp, and optionally
+    skip_reasons (a JSON text blob of per-stage skip/apply counters — see
+    ``_compress_messages_inline``'s ``stats`` param).
 
     Savings percentages are reported as (1 - after/before) * 100 — "what
     fraction of the context was removed" — over compressed requests only.
@@ -89,6 +92,24 @@ def _summarize_compression(records: list[dict], days: int) -> dict:
         r for r in records
         if r["compressed"] and r["compression_ratio"] is not None
     ]
+
+    skip_reasons_totals: dict[str, int] = {}
+    for r in records:
+        raw = r.get("skip_reasons")
+        if not raw:
+            continue
+        try:
+            parsed = json.loads(raw)
+        except (TypeError, ValueError):
+            continue
+        if not isinstance(parsed, dict):
+            continue
+        for key, value in parsed.items():
+            if isinstance(value, bool):
+                if value:
+                    skip_reasons_totals[key] = skip_reasons_totals.get(key, 0) + 1
+            elif isinstance(value, (int, float)):
+                skip_reasons_totals[key] = skip_reasons_totals.get(key, 0) + value
     savings = [max(0.0, 1.0 - r["compression_ratio"]) for r in compressed]
     tokens_saved_total = sum(r["tokens_saved"] for r in records)
 
@@ -152,4 +173,5 @@ def _summarize_compression(records: list[dict], days: int) -> dict:
         "by_model": _breakdown("model"),
         "by_source": _breakdown("source"),
         "by_day": sorted(by_day.values(), key=lambda d: d["day"]),
+        "skip_reasons": skip_reasons_totals,
     }

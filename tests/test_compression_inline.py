@@ -1,6 +1,7 @@
 """Inline compression: savings measurement, loom tags, cache reuse, sessions."""
 
 import uuid
+from types import SimpleNamespace
 
 from loom.gateway.app import (
     _compress_messages_inline,
@@ -222,3 +223,127 @@ def test_recent_tool_results_untouched():
     }
     out, _, _, _, _ = _compress_messages_inline(FakeProcessor(), msgs)
     assert out[7]["content"] == msgs[7]["content"]
+
+
+def _config_stub(protect_window: int = 6, loop_multiplier: int = 3) -> SimpleNamespace:
+    return SimpleNamespace(
+        compression=SimpleNamespace(
+            tool_result_protect_window=protect_window,
+            loop_detected_protect_multiplier=loop_multiplier,
+        )
+    )
+
+
+def test_protect_window_distinguishes_6_from_2():
+    """window=6 protects 6 recent messages; window=2 only protects 2 —
+    a conversation-length regression from 6 to 2 must be observable."""
+    msgs = _messages(12)
+
+    out6, *_ = _compress_messages_inline(
+        FakeProcessor(), msgs, config=_config_stub(protect_window=6),
+    )
+    for idx in range(6, 12):
+        assert out6[idx] == msgs[idx]
+
+    out2, *_ = _compress_messages_inline(
+        FakeProcessor(), msgs, config=_config_stub(protect_window=2),
+    )
+    # Indices n-6..n-3 (6,7,8,9): protected under window=6, compressed
+    # under window=2 — this is the exact gap test_recent_tool_results_
+    # untouched above cannot see (it only checks indices window=2 already
+    # protects).
+    for idx in range(6, 10):
+        assert out2[idx] != msgs[idx]
+
+
+def test_loop_detection_widens_protect_window():
+    """3+ identical tool_use calls (same name+input) trigger loop detection
+    and widen the protect window enough to spare messages a plain
+    window=6 would otherwise compress."""
+    msgs = _messages(12)
+    for i in (1, 3, 9):
+        msgs[i] = {
+            "role": "assistant",
+            "content": [
+                {"type": "text", "text": FILLER},
+                {
+                    "type": "tool_use",
+                    "id": f"toolu_{i}",
+                    "name": "bash",
+                    "input": {"cmd": "ls -la"},
+                },
+            ],
+        }
+
+    stats: dict = {}
+    out, _, _, _, is_looping = _compress_messages_inline(
+        FakeProcessor(), msgs, config=_config_stub(protect_window=6, loop_multiplier=3),
+        stats=stats,
+    )
+    assert is_looping is True
+    assert stats["loop_detected"] is True
+    # Index 5 (age_ratio 5/11 ~= 0.45) is old enough to compress and sits
+    # inside a plain window=6 (protect_cutoff=6), but the loop-widened
+    # window (6*3=18 > n=12) protects the entire conversation instead.
+    assert out[5] == msgs[5]
+
+
+def test_stats_plumbing_keys_present():
+    """Passing a stats dict surfaces per-stage counters; omitting it
+    (the default) is a no-op, matching prior behavior exactly."""
+    msgs = _messages(8)
+    stats: dict = {}
+    out, before, after, _, is_looping = _compress_messages_inline(
+        FakeProcessor(), msgs, stats=stats,
+    )
+    assert before > after
+
+    # Default protect_window (no config) is 2 for backward compat.
+    assert stats["msgs_total"] == 8
+    assert stats["protected_recency"] == 2
+    assert stats["loop_detected"] is False
+    # Indices 3,4,5 (age_ratio >= 0.3) compress to "medium"; 0,1,2 don't.
+    assert stats["applied_medium"] == 3
+    assert stats["unchanged"] == 3
+
+    # No stats dict passed -> no crash, no behavior change.
+    out_nostats, before2, after2, _, _ = _compress_messages_inline(FakeProcessor(), msgs)
+    assert (before2, after2) == (before, after)
+    assert out_nostats == out
+
+
+def test_record_metrics_skip_reasons_roundtrip(tmp_path):
+    """skip_reasons is stored and comes back out through the compression
+    summary aggregation added in base.py's _summarize_compression."""
+    store = LoomStorage(db_path=str(tmp_path / "skip_reasons.db"))
+    store.connect()
+    try:
+        store.record_metrics(
+            request_id="req-skip-1",
+            model="claude-x",
+            provider="anthropic",
+            tokens_in=100,
+            tokens_out=50,
+            latency_ms=12.3,
+            cost=0.001,
+            compressed=True,
+            compression_ratio=0.5,
+            message_count=8,
+            source="pytest",
+            tokens_saved=50,
+            skip_reasons='{"msgs_total":8,"applied_medium":3,"loop_detected":true}',
+        )
+        row = store.conn.execute(
+            "SELECT skip_reasons FROM metrics WHERE request_id = ?",
+            ("req-skip-1",),
+        ).fetchone()
+        assert row["skip_reasons"] == (
+            '{"msgs_total":8,"applied_medium":3,"loop_detected":true}'
+        )
+
+        summary = store.get_compression_summary(days=30)
+        assert summary["skip_reasons"]["msgs_total"] == 8
+        assert summary["skip_reasons"]["applied_medium"] == 3
+        assert summary["skip_reasons"]["loop_detected"] == 1
+    finally:
+        store.close()

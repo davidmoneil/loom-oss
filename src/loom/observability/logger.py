@@ -71,6 +71,7 @@ class AuditLogger:
         status_code: int = 200,
         ratelimit: Optional[dict] = None,
         session_id: Optional[str] = None,
+        skip_reasons: Optional[str] = None,
     ) -> None:
         record = {
             "ts": _utc_iso(),
@@ -94,6 +95,8 @@ class AuditLogger:
         }
         if ratelimit:
             record["ratelimit"] = ratelimit
+        if skip_reasons:
+            record["skip_reasons"] = skip_reasons
         self._write(self.audit_path, record)
 
     def log_metrics(
