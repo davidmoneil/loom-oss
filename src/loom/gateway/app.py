@@ -2331,23 +2331,7 @@ def create_app() -> FastAPI:
     )
     async def api_models():
         gw = state()
-        models = []
-        for provider in gw.config.providers:
-            for model in provider.models:
-                models.append(
-                    {
-                        "id": model.model_id,
-                        "display_name": model.display_name,
-                        "provider": provider.name,
-                        "tier": model.tier,
-                        "supports_tools": model.supports_tools,
-                        "supports_json_mode": model.supports_json_mode,
-                        "max_context_tokens": model.max_context_tokens,
-                        "cost_per_1k_input": model.cost_per_1k_input,
-                        "cost_per_1k_output": model.cost_per_1k_output,
-                    }
-                )
-        return {"object": "list", "data": models}
+        return _models_list_payload(gw.config)
 
     # ------------------------------------------------------------------ metrics
     @app.get(
@@ -2621,6 +2605,93 @@ def create_app() -> FastAPI:
             return JSONResponse({"error": "source not found"}, status_code=404)
         del gw.config.sources[source_name]
         return _sanitized_config(gw.config)
+
+    # --------------------------------------------------------------- models
+    MODEL_ALLOWED_FIELDS = {
+        "display_name", "tier", "supports_tools", "supports_json_mode",
+        "max_context_tokens", "cost_per_1k_input", "cost_per_1k_output",
+    }
+    MODEL_VALID_TIERS = {"economy", "standard", "premium"}
+
+    def _find_provider(gw, provider_name: str):
+        for p in gw.config.providers:
+            if p.name == provider_name:
+                return p
+        return None
+
+    @app.post(
+        "/api/config/providers/{provider}/models/{model_id}",
+        response_model=ModelListResponse,
+        tags=["observability"],
+        summary="Add a model to a provider (returns full model list)",
+    )
+    async def api_create_model(provider: str, model_id: str, request: Request):
+        gw = state()
+        try:
+            body = await request.json()
+        except Exception:
+            return JSONResponse({"error": "invalid JSON"}, status_code=400)
+        prov = _find_provider(gw, provider)
+        if prov is None:
+            return JSONResponse({"error": f"provider '{provider}' not found"}, status_code=404)
+        if prov.get_model(model_id) is not None:
+            return JSONResponse({"error": f"model '{model_id}' already exists"}, status_code=409)
+        fields = {k: v for k, v in body.items() if k in MODEL_ALLOWED_FIELDS}
+        if "tier" in fields and fields["tier"] not in MODEL_VALID_TIERS:
+            return JSONResponse({"error": f"invalid tier '{fields['tier']}'"}, status_code=400)
+        try:
+            model = ModelConfig(model_id=model_id, **fields)
+        except Exception as exc:
+            return JSONResponse({"error": str(exc)}, status_code=400)
+        prov.models.append(model)
+        gw.index_models()
+        return _models_list_payload(gw.config)
+
+    @app.put(
+        "/api/config/providers/{provider}/models/{model_id}",
+        response_model=ModelListResponse,
+        tags=["observability"],
+        summary="Update a model's capabilities/pricing (returns full model list)",
+    )
+    async def api_update_model(provider: str, model_id: str, request: Request):
+        gw = state()
+        try:
+            body = await request.json()
+        except Exception:
+            return JSONResponse({"error": "invalid JSON"}, status_code=400)
+        prov = _find_provider(gw, provider)
+        if prov is None:
+            return JSONResponse({"error": f"provider '{provider}' not found"}, status_code=404)
+        model = prov.get_model(model_id)
+        if model is None:
+            return JSONResponse({"error": f"model '{model_id}' not found"}, status_code=404)
+        updates = {k: v for k, v in body.items() if k in MODEL_ALLOWED_FIELDS}
+        if not updates:
+            return JSONResponse({"error": "no valid fields"}, status_code=400)
+        if "tier" in updates and updates["tier"] not in MODEL_VALID_TIERS:
+            return JSONResponse({"error": f"invalid tier '{updates['tier']}'"}, status_code=400)
+        for k, v in updates.items():
+            setattr(model, k, v)
+        gw.index_models()
+        return _models_list_payload(gw.config)
+
+    @app.delete(
+        "/api/config/providers/{provider}/models/{model_id}",
+        response_model=ModelListResponse,
+        tags=["observability"],
+        summary="Delete a model from a provider (returns full model list)",
+    )
+    async def api_delete_model(provider: str, model_id: str):
+        gw = state()
+        prov = _find_provider(gw, provider)
+        if prov is None:
+            return JSONResponse({"error": f"provider '{provider}' not found"}, status_code=404)
+        model = prov.get_model(model_id)
+        if model is None:
+            return JSONResponse({"error": f"model '{model_id}' not found"}, status_code=404)
+        prov.models.remove(model)
+        gw.index_models()
+        return _models_list_payload(gw.config)
 
     # -------------------------------------------------------- gateway key management
     @app.post(
@@ -3563,6 +3634,28 @@ def _jsonable(obj: Any) -> Any:
     if hasattr(obj, "__dict__"):
         return {k: _jsonable(v) for k, v in vars(obj).items() if not k.startswith("_")}
     return str(obj)
+
+
+def _model_payload(provider_name: str, model: ModelConfig) -> dict:
+    return {
+        "id": model.model_id,
+        "display_name": model.display_name,
+        "provider": provider_name,
+        "tier": model.tier,
+        "supports_tools": model.supports_tools,
+        "supports_json_mode": model.supports_json_mode,
+        "max_context_tokens": model.max_context_tokens,
+        "cost_per_1k_input": model.cost_per_1k_input,
+        "cost_per_1k_output": model.cost_per_1k_output,
+    }
+
+
+def _models_list_payload(config: LoomConfig) -> dict:
+    models = []
+    for provider in config.providers:
+        for model in provider.models:
+            models.append(_model_payload(provider.name, model))
+    return {"object": "list", "data": models}
 
 
 def _sanitized_config(config: LoomConfig) -> dict:

@@ -110,6 +110,20 @@ export const api = {
     putJSON(`/api/config/sources/${encodeURIComponent(name)}`, fields),
   deleteSourcePolicy: (name) =>
     deleteJSON(`/api/config/sources/${encodeURIComponent(name)}`),
+  createModel: (provider, modelId, fields) =>
+    postJSON(
+      `/api/config/providers/${encodeURIComponent(provider)}/models/${encodeURIComponent(modelId)}`,
+      fields
+    ),
+  updateModel: (provider, modelId, updates) =>
+    putJSON(
+      `/api/config/providers/${encodeURIComponent(provider)}/models/${encodeURIComponent(modelId)}`,
+      updates
+    ),
+  deleteModel: (provider, modelId) =>
+    deleteJSON(
+      `/api/config/providers/${encodeURIComponent(provider)}/models/${encodeURIComponent(modelId)}`
+    ),
   gatewayKeys: () => getJSON("/api/config/gateway-keys"),
   createGatewayKey: (name) => postJSON("/api/config/gateway-keys", { name }),
   toggleGatewayKey: (id, enabled) =>
