@@ -377,6 +377,7 @@ def _record_request(
                 cost_estimate=cost,
                 routing_reason=routing_reason,
                 status_code=status_code,
+                session_id=session_id,
             )
             if ratelimit:
                 audit_kwargs["ratelimit"] = ratelimit
@@ -559,7 +560,7 @@ def _model_cost(model_cfg: Optional[ModelConfig], usage: Any) -> float:
     input_cost = (
         (base_input / 1000.0) * model_cfg.cost_per_1k_input
         + (cache_read / 1000.0) * model_cfg.cost_per_1k_input * 0.1
-        + (cache_creation / 1000.0) * model_cfg.cost_per_1k_input * 1.25
+        + (cache_creation / 1000.0) * model_cfg.cost_per_1k_input * 2.0
     )
     return input_cost + (tokens_out / 1000.0) * model_cfg.cost_per_1k_output
 
@@ -946,6 +947,40 @@ def _extract_stream_usage(lines: list[str]) -> tuple[dict | None, list[str]]:
     return (usage if usage else None), text_parts
 
 
+_STREAM_IDLE_TIMEOUT_SECONDS = 180.0
+_COMPRESSION_TIMEOUT_SECONDS = 60.0
+_UPSTREAM_TIMEOUT_SECONDS = 300.0
+
+
+async def _iter_with_idle_timeout(
+    aiter: AsyncIterator[bytes], timeout: float, request_id: str
+) -> AsyncIterator[bytes]:
+    """Wrap an async byte iterator so a stalled upstream raises instead of hanging.
+
+    httpx's own read timeout only fires when a single read waits past its
+    threshold; an upstream that keeps trickling bytes (e.g. SSE keepalive
+    pings) without making real progress never trips it, so this adds an
+    explicit per-chunk idle ceiling.
+    """
+    log = get_logger("loom.gateway")
+    it = aiter.__aiter__()
+    while True:
+        try:
+            chunk = await asyncio.wait_for(it.__anext__(), timeout=timeout)
+        except StopAsyncIteration:
+            return
+        except asyncio.TimeoutError:
+            log.error(
+                "stream idle timeout: no chunk from upstream in %.0fs (request_id=%s)",
+                timeout, request_id,
+            )
+            raise ProviderError(
+                f"upstream stream idle for {timeout:.0f}s — aborting",
+                status_code=504,
+            ) from None
+        yield chunk
+
+
 async def _wrapped_stream(
     state: GatewayState,
     upstream: AsyncIterator[bytes],
@@ -962,6 +997,8 @@ async def _wrapped_stream(
     Otherwise passes through directly with zero overhead.
     """
     status = 200
+    request_id = meta.get("request_id", "?")
+    upstream = _iter_with_idle_timeout(upstream, _STREAM_IDLE_TIMEOUT_SECONDS, request_id)
     scan_enabled = (
         state.scanner is not None
         and state.scanner.enabled
@@ -977,6 +1014,15 @@ async def _wrapped_stream(
         except ProviderError as exc:
             status = exc.status_code
             chunks.append(b"data: " + json.dumps(exc.payload).encode("utf-8") + b"\n\n")
+        except Exception as exc:
+            status = 502
+            get_logger("loom.gateway").error(
+                "unhandled exception mid-stream (scan mode): exc_type=%s exc=%s "
+                "(request_id=%s)",
+                type(exc).__name__, exc, request_id,
+            )
+            payload = {"error": {"message": str(exc), "type": "provider_error"}}
+            chunks.append(b"data: " + json.dumps(payload).encode("utf-8") + b"\n\n")
 
         full_body = b"".join(chunks)
         was_gzip = full_body[:2] == b"\x1f\x8b"
@@ -1050,6 +1096,19 @@ async def _wrapped_stream(
             status = exc.status_code
             body = json.dumps(exc.payload).encode("utf-8")
             yield b"data: " + body + b"\n\n"
+        except Exception as exc:
+            # Anything unanticipated (not a ProviderError the backend already
+            # classified) still degrades to a well-formed SSE error event
+            # instead of a bare connection close with zero bytes sent — the
+            # latter surfaces to clients as "stream ended before any complete
+            # data was received" with no diagnosable detail on either side.
+            status = 502
+            get_logger("loom.gateway").error(
+                "unhandled exception mid-stream: exc_type=%s exc=%s (request_id=%s)",
+                type(exc).__name__, exc, request_id,
+            )
+            payload = {"error": {"message": str(exc), "type": "provider_error"}}
+            yield b"data: " + json.dumps(payload).encode("utf-8") + b"\n\n"
         raw_body = b"".join(raw_chunks)
         if raw_body[:2] == b"\x1f\x8b":
             try:
@@ -1614,31 +1673,67 @@ def create_app() -> FastAPI:
                 # Off the event loop: compression is CPU-bound and, with
                 # llm_prose enabled, makes blocking HTTP calls to the local
                 # model — inline it would freeze every request incl. /health.
-                messages, comp_before, comp_after, comp_by_type, _comp_loop = (
-                    await asyncio.to_thread(
-                        _compress_messages_inline,
-                        gw.compression,
-                        messages,
-                        gw.storage,
-                        compress_tool_results=gw.config.compression.tool_results,
-                        variants=gw.variants,
-                        tier_name=tier_name,
-                        config=gw.config,
+                # Bounded with wait_for: under concurrent load this can queue
+                # behind other requests' compression work on the shared thread
+                # pool indefinitely, which previously showed up as a request
+                # that hangs forever with no error (e.g. a large /compact).
+                comp_t0 = time.monotonic()
+                _log = get_logger("loom.gateway")
+                try:
+                    messages, comp_before, comp_after, comp_by_type, _comp_loop = (
+                        await asyncio.wait_for(
+                            asyncio.to_thread(
+                                _compress_messages_inline,
+                                gw.compression,
+                                messages,
+                                gw.storage,
+                                compress_tool_results=gw.config.compression.tool_results,
+                                variants=gw.variants,
+                                tier_name=tier_name,
+                                config=gw.config,
+                            ),
+                            timeout=_COMPRESSION_TIMEOUT_SECONDS,
+                        )
                     )
+                except asyncio.TimeoutError:
+                    _log.error(
+                        "compression phase exceeded %.0fs (request_id=%s, messages=%d)",
+                        _COMPRESSION_TIMEOUT_SECONDS, request_id, len(messages),
+                    )
+                    raise ProviderError(
+                        f"compression phase exceeded {_COMPRESSION_TIMEOUT_SECONDS:.0f}s timeout",
+                        status_code=504,
+                    ) from None
+                _log.info(
+                    "compression phase completed in %.1fs (request_id=%s)",
+                    time.monotonic() - comp_t0, request_id,
                 )
                 gw.comp_tokens_before += comp_before
                 gw.comp_tokens_after += comp_after
                 for k, v in comp_by_type.items():
                     _tally(gw.comp_by_type, k, v["before"], v["after"])
-            result = await backend.chat_completion(
-                model=actual_model,
-                messages=messages,
-                api_key=api_key,
-                stream=stream,
-                inbound_headers=inbound_hdrs,
-                query_string=request.url.query or "",
-                raw_body=body,
-            )
+            try:
+                result = await asyncio.wait_for(
+                    backend.chat_completion(
+                        model=actual_model,
+                        messages=messages,
+                        api_key=api_key,
+                        stream=stream,
+                        inbound_headers=inbound_hdrs,
+                        query_string=request.url.query or "",
+                        raw_body=body,
+                    ),
+                    timeout=_UPSTREAM_TIMEOUT_SECONDS,
+                )
+            except asyncio.TimeoutError:
+                get_logger("loom.gateway").error(
+                    "upstream request exceeded %.0fs (request_id=%s)",
+                    _UPSTREAM_TIMEOUT_SECONDS, request_id,
+                )
+                raise ProviderError(
+                    f"upstream request exceeded {_UPSTREAM_TIMEOUT_SECONDS:.0f}s timeout",
+                    status_code=504,
+                ) from None
 
             meta = {
                 "request_id": request_id,
@@ -1717,7 +1812,7 @@ def create_app() -> FastAPI:
         # Programmatic search — skip LLM if search-shaped
         if get_search_tier is not None and gw.config.routing.programmatic_search_enabled:
             try:
-                search = get_search_tier(gw.config.routing.search_sources).search(prompt)
+                search = await get_search_tier(gw.config.routing.search_sources).search(prompt)
                 if search.tier == "zero-inference" and search.hits:
                     lines = [f"{h.file}:{h.line_number}: {h.line}" for h in search.hits]
                     result_text = f"Found {len(search.hits)} results:\n" + "\n".join(lines)
@@ -2236,23 +2331,7 @@ def create_app() -> FastAPI:
     )
     async def api_models():
         gw = state()
-        models = []
-        for provider in gw.config.providers:
-            for model in provider.models:
-                models.append(
-                    {
-                        "id": model.model_id,
-                        "display_name": model.display_name,
-                        "provider": provider.name,
-                        "tier": model.tier,
-                        "supports_tools": model.supports_tools,
-                        "supports_json_mode": model.supports_json_mode,
-                        "max_context_tokens": model.max_context_tokens,
-                        "cost_per_1k_input": model.cost_per_1k_input,
-                        "cost_per_1k_output": model.cost_per_1k_output,
-                    }
-                )
-        return {"object": "list", "data": models}
+        return _models_list_payload(gw.config)
 
     # ------------------------------------------------------------------ metrics
     @app.get(
@@ -2526,6 +2605,93 @@ def create_app() -> FastAPI:
             return JSONResponse({"error": "source not found"}, status_code=404)
         del gw.config.sources[source_name]
         return _sanitized_config(gw.config)
+
+    # --------------------------------------------------------------- models
+    MODEL_ALLOWED_FIELDS = {
+        "display_name", "tier", "supports_tools", "supports_json_mode",
+        "max_context_tokens", "cost_per_1k_input", "cost_per_1k_output",
+    }
+    MODEL_VALID_TIERS = {"economy", "standard", "premium"}
+
+    def _find_provider(gw, provider_name: str):
+        for p in gw.config.providers:
+            if p.name == provider_name:
+                return p
+        return None
+
+    @app.post(
+        "/api/config/providers/{provider}/models/{model_id}",
+        response_model=ModelListResponse,
+        tags=["observability"],
+        summary="Add a model to a provider (returns full model list)",
+    )
+    async def api_create_model(provider: str, model_id: str, request: Request):
+        gw = state()
+        try:
+            body = await request.json()
+        except Exception:
+            return JSONResponse({"error": "invalid JSON"}, status_code=400)
+        prov = _find_provider(gw, provider)
+        if prov is None:
+            return JSONResponse({"error": f"provider '{provider}' not found"}, status_code=404)
+        if prov.get_model(model_id) is not None:
+            return JSONResponse({"error": f"model '{model_id}' already exists"}, status_code=409)
+        fields = {k: v for k, v in body.items() if k in MODEL_ALLOWED_FIELDS}
+        if "tier" in fields and fields["tier"] not in MODEL_VALID_TIERS:
+            return JSONResponse({"error": f"invalid tier '{fields['tier']}'"}, status_code=400)
+        try:
+            model = ModelConfig(model_id=model_id, **fields)
+        except Exception as exc:
+            return JSONResponse({"error": str(exc)}, status_code=400)
+        prov.models.append(model)
+        gw.index_models()
+        return _models_list_payload(gw.config)
+
+    @app.put(
+        "/api/config/providers/{provider}/models/{model_id}",
+        response_model=ModelListResponse,
+        tags=["observability"],
+        summary="Update a model's capabilities/pricing (returns full model list)",
+    )
+    async def api_update_model(provider: str, model_id: str, request: Request):
+        gw = state()
+        try:
+            body = await request.json()
+        except Exception:
+            return JSONResponse({"error": "invalid JSON"}, status_code=400)
+        prov = _find_provider(gw, provider)
+        if prov is None:
+            return JSONResponse({"error": f"provider '{provider}' not found"}, status_code=404)
+        model = prov.get_model(model_id)
+        if model is None:
+            return JSONResponse({"error": f"model '{model_id}' not found"}, status_code=404)
+        updates = {k: v for k, v in body.items() if k in MODEL_ALLOWED_FIELDS}
+        if not updates:
+            return JSONResponse({"error": "no valid fields"}, status_code=400)
+        if "tier" in updates and updates["tier"] not in MODEL_VALID_TIERS:
+            return JSONResponse({"error": f"invalid tier '{updates['tier']}'"}, status_code=400)
+        for k, v in updates.items():
+            setattr(model, k, v)
+        gw.index_models()
+        return _models_list_payload(gw.config)
+
+    @app.delete(
+        "/api/config/providers/{provider}/models/{model_id}",
+        response_model=ModelListResponse,
+        tags=["observability"],
+        summary="Delete a model from a provider (returns full model list)",
+    )
+    async def api_delete_model(provider: str, model_id: str):
+        gw = state()
+        prov = _find_provider(gw, provider)
+        if prov is None:
+            return JSONResponse({"error": f"provider '{provider}' not found"}, status_code=404)
+        model = prov.get_model(model_id)
+        if model is None:
+            return JSONResponse({"error": f"model '{model_id}' not found"}, status_code=404)
+        prov.models.remove(model)
+        gw.index_models()
+        return _models_list_payload(gw.config)
 
     # -------------------------------------------------------- gateway key management
     @app.post(
@@ -3244,21 +3410,31 @@ def _score_messages_by_relevance(
     loop lowers its effective age so it is compressed less aggressively.
     Ported from the internal proxy's Neo4j/embeddings scoring; returns an
     empty dict (pure age-ratio mode) when no store is configured.
+
+    Uses a single batched ``is_indexed_batch()`` call instead of one
+    ``is_indexed()`` round trip per message — the latter was the N+1 query
+    pattern behind the 6-8s compression stalls (see
+    docs/investigations/compression-relevance-nplus1.md).
     """
     if variants is None or not getattr(variants, "enabled", False):
         return {}
-    scores: dict[int, float] = {}
+    hashes_by_idx: dict[int, str] = {}
     for idx, msg in enumerate(messages):
         text = _relevance_text(msg.get("content", ""))
         if not text:
             continue
-        h = hashlib.sha256(text[:512].encode()).hexdigest()[:16]
-        try:
-            if variants.is_indexed(h):
-                scores[idx] = 0.85  # curated Loom content — preserve
-        except Exception:
-            return scores
-    return scores
+        hashes_by_idx[idx] = hashlib.sha256(text[:512].encode()).hexdigest()[:16]
+    if not hashes_by_idx:
+        return {}
+    try:
+        indexed = variants.is_indexed_batch(list(hashes_by_idx.values()))
+    except Exception:
+        return {}
+    return {
+        idx: 0.85  # curated Loom content — preserve
+        for idx, h in hashes_by_idx.items()
+        if h in indexed
+    }
 
 
 # High-relevance content gets its effective age reduced by this much
@@ -3458,6 +3634,28 @@ def _jsonable(obj: Any) -> Any:
     if hasattr(obj, "__dict__"):
         return {k: _jsonable(v) for k, v in vars(obj).items() if not k.startswith("_")}
     return str(obj)
+
+
+def _model_payload(provider_name: str, model: ModelConfig) -> dict:
+    return {
+        "id": model.model_id,
+        "display_name": model.display_name,
+        "provider": provider_name,
+        "tier": model.tier,
+        "supports_tools": model.supports_tools,
+        "supports_json_mode": model.supports_json_mode,
+        "max_context_tokens": model.max_context_tokens,
+        "cost_per_1k_input": model.cost_per_1k_input,
+        "cost_per_1k_output": model.cost_per_1k_output,
+    }
+
+
+def _models_list_payload(config: LoomConfig) -> dict:
+    models = []
+    for provider in config.providers:
+        for model in provider.models:
+            models.append(_model_payload(provider.name, model))
+    return {"object": "list", "data": models}
 
 
 def _sanitized_config(config: LoomConfig) -> dict:
