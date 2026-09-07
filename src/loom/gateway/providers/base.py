@@ -41,6 +41,12 @@ class ProviderBackend(ABC):
         self._client: httpx.AsyncClient | None = None
 
     async def get_client(self) -> httpx.AsyncClient:
+        """Lazily create (or replace a closed) per-provider HTTP client.
+
+        REPO_META capability=gateway.provider.connect
+        REPO_META purpose="Lazily creates or replaces a closed per-provider HTTP client with a long fixed timeout tuned for slow upstream completions and streams."
+        REPO_META role=adapter
+        """
         if self._client is None or self._client.is_closed:
             self._client = httpx.AsyncClient(
                 base_url=self.api_base,
@@ -65,10 +71,19 @@ class ProviderBackend(ABC):
 
         Returns a parsed response dict when ``stream`` is False, or an async
         iterator yielding raw upstream bytes when ``stream`` is True.
+
+        REPO_META capability=gateway.provider.chat-completion
+        REPO_META purpose="Defines the contract every provider backend implements to send a chat completion request in streaming or non-streaming mode."
+        REPO_META role=entrypoint
         """
         ...
 
     @abstractmethod
     async def list_models(self) -> list[str]:
-        """List available model IDs from this provider."""
+        """List available model IDs from this provider.
+
+        REPO_META capability=gateway.provider.list-models
+        REPO_META purpose="Defines the contract every provider backend implements to report which model IDs it can serve."
+        REPO_META role=entrypoint
+        """
         ...

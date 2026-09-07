@@ -4,9 +4,9 @@ The homelab deployment is `main` + two overlay files — no separate branch.
 
 | File | Tracked? | Purpose |
 |------|----------|---------|
-| `loom.homelab.yaml` | yes (secret-free) | model registry (fable/opus/sonnet/haiku, gpt-4o, qwen3 family), source policies incl. `headless`, Postgres backend selection, DLP scanner config |
+| `loom.homelab.yaml` | no — untracked local, in `.gitignore` (secret-free, but reveals internal topology) | model registry (fable/opus/sonnet/haiku, gpt-4o, qwen3 family), source policies incl. `headless`, Postgres backend selection, DLP scanner config |
 | `.env.homelab` | no — copy from `.env.homelab.example` | `LOOM_POSTGRES_DSN` (the deployment's only secret) |
-| `docker-compose.homelab.yml` | yes | binds `loom.homelab.yaml`, joins the n8n Postgres network, installs the `postgres` extras |
+| `docker-compose.homelab.yml` | no — untracked local, in `.gitignore` | binds `loom.homelab.yaml`, joins the n8n Postgres network, installs the `postgres` extras |
 
 ## Deploy / update
 
@@ -22,11 +22,41 @@ The gateway serves the observability API (`docs/observability-api.md`) on
 
 ## Reproducing on a new machine
 
-Clone the repo, create `.env.homelab` with a DSN pointing at your Postgres
-(tables are created automatically on first connect), and run the compose
-command above. If there is no external Postgres, use `./setup.sh` instead and
-pick the bundled-Postgres option (that path uses the default
-`docker-compose.yml`, not the homelab overlay).
+`loom.homelab.yaml` and `docker-compose.homelab.yml` are gitignored (not
+shipped in the public repo — see the table above) — copy them in from a
+private backup of this machine before running the steps below. Then create
+`.env.homelab` with a DSN pointing at your Postgres (tables are created
+automatically on first connect), and run the compose command above. If there
+is no external Postgres, use `./setup.sh` instead and pick the
+bundled-Postgres option (that path uses the default `docker-compose.yml`, not
+the homelab overlay).
+
+## Why Loom has its own database (`loom` on postgres-unified)
+
+postgres-unified hosts one database per service (`n8n`, `pulse`,
+`monday_sync`, `voice_jobs`, `google_token_vault`, …). Loom originally landed
+in `pgvector_db` — a shared grab-bag database holding pgvector embeddings,
+n8n chat histories, Alfred memories, and the legacy proxy's tables. The
+dedicated `loom` database was created during the 2026-07-09 incident fix
+(commit `e035d54`) and is the canonical target because:
+
+1. **Loom's migration system assumes it owns the database.** It keeps a
+   `schema_version` table and auto-applies versioned migrations on startup.
+   While mispointed at `pgvector_db` (Aug–Sep 2026), it migrated that shared
+   database's schema to v13 — mutating a schema other services sit on.
+2. **Generic table names collide.** `metrics`, `sessions`, `requests`,
+   `gateway_keys`, `schema_version` are exactly the names another service
+   would also pick.
+3. **AGE graph objects.** The variant store creates an Apache AGE graph and
+   extension schemas; keeping those out of shared databases limits blast
+   radius.
+4. **Per-service backup/retention.** `pg_dump loom` captures exactly Loom's
+   state; restore or retention policy changes can't touch other tenants.
+
+`pgvector_db` still contains stale pre-2026-09-06 copies of Loom tables from
+the split-brain periods — they are historical residue, not live data. The
+legacy internal proxy (:8711) keeps its own separate tables and is unrelated
+to the `loom` database.
 
 ## Storage DSN: single source of truth
 

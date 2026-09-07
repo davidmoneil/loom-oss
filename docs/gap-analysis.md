@@ -11,6 +11,13 @@
   CRUD API endpoints for each config domain; the dashboard consumes them. Code
   should accept dynamic values from the API, not hardcode fixed sets. YAML files
   provide initial defaults; the dashboard provides runtime overrides.
+- **FastAPI is the single execution path** (2026-08-09): all retrieval, tiering,
+  and routing logic lives behind the gateway's FastAPI process. The homelab MCP
+  server, `executor.sh`, the dashboard UI, and any CLI are HTTP clients only —
+  zero local logic. Decision + rationale: `knowledge/projects/loom.md` (AIProjects
+  repo) → "Retrieval Cascade & Execution-Path Architecture Decisions (2026-08-09)".
+  Known violation: internal loom's `executor.sh` calls `python -m determinism
+  nexus-route` directly (local logic, not HTTP) — predates this decision.
 
 ## Status Legend
 - **PORTED** — Already in loom-oss
@@ -37,6 +44,22 @@
 | Detection engine (tier recommendation) | `gateway/detection_engine.py` (266 LOC) | `detection/engine.py` (198 LOC) | **PORTED** | OSS version is cleaner |
 
 ## 2. Routing Engine (EQRT)
+
+**✅ Resolved (2026-08-10)**: Pulse project `loom-model-routing-engine`'s
+constraint — *"the Loom determinism router IS the model routing engine, all
+enhancements go there, not in a parallel system"* — conflicted with EQRT,
+provider registry, and programmatic/zero-inference search already being
+**PORTED** to loom-oss (landed 2026-07-02), and with the 2026-08-09 decision
+that all retrieval/tiering/routing logic runs behind loom-oss's FastAPI
+gateway. David's call: consolidate entirely into loom-oss — not a split by
+concern. `~/Code/loom/determinism/` is retired as the routing home in full,
+including fleet/provider-cost routing. Active Phase 4 ("Loom Integration —
+Neo4j Ingestion & Relevance Engine") and the planned zero-inference
+search-tier item move with it (the latter is bookkeeping — already ported).
+The Pulse project's constraint field itself still needs a manual update
+(project-level metadata isn't reachable via task-mutation tooling). Full
+writeup: `knowledge/projects/loom.md` (AIProjects repo) → "Routing Engine
+Placement — Resolved: Consolidate to loom-oss (2026-08-10)".
 
 | Feature | Internal | OSS | Status | Notes |
 |---------|----------|-----|--------|-------|

@@ -65,6 +65,15 @@ across image rebuilds and `docker compose down`. See
 [docs/storage.md](docs/storage.md) for the full persistence story, volume
 layout, environment variable overrides, and backup guidance.
 
+**Give Loom a dedicated database.** When using Postgres, point the DSN at a
+database used by nothing else. Loom's migration system assumes it owns the
+database — it maintains a `schema_version` table and applies versioned
+migrations to it on startup, and the AGE variant store creates a graph plus
+extension objects. Sharing a database with other services risks table-name
+collisions (`metrics`, `sessions`, `schema_version` are generic names) and
+means Loom's migrations mutate a schema other tenants depend on. A dedicated
+database also gives you clean per-service backup, retention, and restore.
+
 ## Key Endpoints
 
 | Method | Path                       | Purpose                                       |
@@ -102,7 +111,7 @@ routes through a single `logging.config.dictConfig` set up at process start
 `uvicorn`/`uvicorn.access`/`uvicorn.error` loggers are configured the same way, so
 gateway and access logs share one level, format, and destination.
 
-Configure it under `server:` in `loom.yaml` (or `loom.homelab.yaml`):
+Configure it under `server:` in `loom.yaml`:
 
 ```yaml
 server:
