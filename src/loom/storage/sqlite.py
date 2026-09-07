@@ -22,7 +22,7 @@ from typing import Any, Optional
 
 from loom.storage.base import _summarize_compression
 
-SCHEMA_VERSION = 13
+SCHEMA_VERSION = 14
 
 # Compression-cache entries live this long, matching the Postgres backend's
 # "NOW() + INTERVAL '7 days'".
@@ -384,6 +384,14 @@ class LoomStorage:
             except sqlite3.OperationalError:
                 pass
 
+        if current < 14:
+            # Compression observability: per-stage skip/apply reason counters
+            # (JSON text), attributed per request.
+            try:
+                c.execute("ALTER TABLE metrics ADD COLUMN skip_reasons TEXT")
+            except sqlite3.OperationalError:
+                pass
+
         if current < SCHEMA_VERSION:
             c.execute(
                 "INSERT OR REPLACE INTO schema_version (version, applied_at) VALUES (?, ?)",
@@ -448,6 +456,7 @@ class LoomStorage:
         cache_creation_tokens: int = 0,
         skill: Optional[str] = None,
         tier: Optional[str] = None,
+        skip_reasons: Optional[str] = None,
     ) -> None:
         with self._write_lock:
             self.conn.execute(
@@ -458,8 +467,8 @@ class LoomStorage:
                     latency_ms, cost_estimate, compressed, compression_ratio,
                     message_count, source, tokens_saved, session_id,
                     status_code, cache_read_tokens, cache_creation_tokens, skill,
-                    tier
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    tier, skip_reasons
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     time.time(),
@@ -483,6 +492,7 @@ class LoomStorage:
                     cache_creation_tokens,
                     skill,
                     tier,
+                    skip_reasons,
                 ),
             )
             self._schedule_flush()
@@ -1052,7 +1062,7 @@ class LoomStorage:
         rows = self.conn.execute(
             """
             SELECT compressed, compression_ratio, tokens_saved, tier,
-                   model, source, timestamp
+                   model, source, timestamp, skip_reasons
             FROM metrics WHERE timestamp >= ?
             """,
             (since,),
@@ -1066,6 +1076,7 @@ class LoomStorage:
                 "model": r["model"] or "unknown",
                 "source": r["source"] or "unknown",
                 "timestamp": r["timestamp"],
+                "skip_reasons": r["skip_reasons"],
             }
             for r in rows
         ]
