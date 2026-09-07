@@ -15,10 +15,37 @@ cd ~/Code/loom-oss
 cp .env.homelab.example .env.homelab   # first time only — fill in the DSN
 docker compose -f docker-compose.homelab.yml up -d --build
 curl -s localhost:4444/health | jq .status
+
+# Verify both networks survived the recreate (see incident below)
+docker inspect loom-oss-loom-1 --format '{{json .NetworkSettings.Networks}}' | jq 'keys'
+# expect: ["loom-oss_default", "n8n_n8n-network"] — if n8n_n8n-network is
+# missing, Postgres is unreachable even though the container is "healthy":
+docker network connect n8n_n8n-network loom-oss-loom-1 && docker restart loom-oss-loom-1
 ```
 
 The gateway serves the observability API (`docs/observability-api.md`) on
 :4444; the Nexus dashboard consumes it via `LOOM_API_URL`.
+
+### Incident: 2026-09-07 network drop on rebuild → gateway-key auth failures
+
+A `docker compose -f docker-compose.homelab.yml build && up -d` recreate cycle
+dropped the container's `n8n_n8n-network` attachment even though the compose
+file correctly declares both networks (`default` + external
+`n8n_n8n-network`) — a known Compose gotcha where a full container recreate
+doesn't always reliably reattach a secondary *external* network on the first
+pass. The container came up "healthy" on its primary network but lost
+Postgres connectivity, which surfaced as gateway-key/auth failures (401
+"invalid gateway key") for anything routing through the gateway, including
+`/compact` in this very session.
+
+This was initially (incorrectly) attributed to the code in PR #87
+(compression-observability instrumentation) and that PR was reverted as a
+precaution. Post-incident review of the revert's diff confirmed it touched
+only `app.py`, `logger.py`, `storage/{base,postgres,sqlite}.py`, and a test
+file — no networking or Compose config — so the PR was not the cause. The
+verification step above (added as the permanent fix) catches this class of
+failure immediately after any rebuild instead of relying on a live auth
+failure to surface it.
 
 ## Reproducing on a new machine
 
