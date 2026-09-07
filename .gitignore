@@ -27,12 +27,15 @@ dashboard/.vite/
 data/
 logs/
 
-# Local config (keep the example; loom.homelab.yaml is tracked — it holds no
-# secrets, the Postgres DSN comes from .env.homelab / LOOM_POSTGRES_DSN)
+# Local config (keep the example)
 loom.yaml
 
-# Homelab/local environment files (keep *.example)
+# Homelab/local environment + deploy files (keep *.example) — these carry
+# internal topology (hostnames, network names) even though they hold no
+# credentials; the public repo ships only the generic compose/config path
 .env
 .env.*
 !.env.homelab.example
+docker-compose.homelab.yml
+loom.homelab.yaml
 graphify-out/
