@@ -61,6 +61,9 @@ class MemoryVariantStore:
     def is_indexed(self, content_hash):
         return content_hash in self.indexed
 
+    def is_indexed_batch(self, content_hashes):
+        return {h for h in content_hashes if h in self.indexed}
+
     def close(self):
         pass
 
@@ -146,6 +149,9 @@ def test_store_errors_never_break_compression():
             raise RuntimeError("graph down")
 
         def is_indexed(self, content_hash):
+            raise RuntimeError("graph down")
+
+        def is_indexed_batch(self, content_hashes):
             raise RuntimeError("graph down")
 
     msgs = _messages(8)

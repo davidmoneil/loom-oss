@@ -1,7 +1,7 @@
 """Zero-inference routing tier — programmatic search before any LLM call.
 
-Detects search-shaped prompts (find/where/locate patterns) and executes
-ripgrep against registered source locations. High-confidence hits return
+Detects search-shaped prompts (find/where/locate patterns) and delegates
+search to the homelab-mcp API. High-confidence hits return
 tier="zero-inference" so callers can skip the LLM entirely.
 
 Escalation policy:
@@ -14,16 +14,23 @@ Escalation policy:
 from __future__ import annotations
 
 import re
-import subprocess
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Optional
 
+import httpx
+
 SEARCH_INTENT_THRESHOLD = 75
 MIN_HITS = 1
 MAX_HITS_ZERO_INFERENCE = 20
-RIPGREP_MAX_MATCHES = 50
-RIPGREP_TIMEOUT_S = 3.0
+
+HOMELAB_MCP_URL = "http://localhost:3847"
+SEARCH_TIMEOUT_S = 5.0
+
+SOURCE_NAME_MAP = {
+    "aiprojects_context": "aiprojects",
+    "aiprojects_knowledge": "knowledge",
+}
 
 _SEARCH_VERBS = frozenset([
     "find", "where", "locate", "search", "which", "grep",
@@ -127,7 +134,7 @@ class SearchIntentClassifier:
 
 
 class ProgrammaticSearchTier:
-    """Executes ripgrep against registered sources and returns a SearchResult."""
+    """Delegates search to homelab-mcp API and returns a SearchResult."""
 
     def __init__(self, sources: Optional[dict[str, str]] = None):
         self._sources = sources or {}
@@ -156,53 +163,42 @@ class ProgrammaticSearchTier:
 
         return text or prompt.strip()
 
-    def _run_ripgrep(self, keyword: str, path: str, source_name: str) -> list[SearchHit]:
-        try:
-            result = subprocess.run(
-                [
-                    "rg",
-                    "--no-heading",
-                    "--line-number",
-                    "--max-count", "5",
-                    "--max-filesize", "500K",
-                    "--type-add", "docs:*.{md,yaml,yml,json,txt,toml}",
-                    "--type", "docs",
-                    "-i",
-                    "--",
-                    keyword,
-                    path,
-                ],
-                capture_output=True,
-                text=True,
-                timeout=RIPGREP_TIMEOUT_S,
-            )
-        except (subprocess.TimeoutExpired, FileNotFoundError):
-            return []
-
+    async def _search_via_homelab(
+        self,
+        keywords: str,
+        sources: dict[str, str],
+    ) -> list[SearchHit]:
+        """Search via homelab-mcp REST API."""
         hits: list[SearchHit] = []
-        base = Path(path)
-        for line in result.stdout.splitlines()[:RIPGREP_MAX_MATCHES]:
-            parts = line.split(":", 2)
-            if len(parts) < 3:
-                continue
-            file_path, lineno_str, content = parts[0], parts[1], parts[2]
-            try:
-                lineno = int(lineno_str)
-            except ValueError:
-                continue
-            try:
-                rel = Path(file_path).relative_to(base)
-            except ValueError:
-                rel = Path(file_path)
-            hits.append(SearchHit(
-                source=source_name,
-                file=str(rel),
-                line_number=lineno,
-                line=content.strip()[:200],
-            ))
+        try:
+            async with httpx.AsyncClient(timeout=SEARCH_TIMEOUT_S) as client:
+                for source_name, source_path in sources.items():
+                    mapped_name = SOURCE_NAME_MAP.get(source_name, source_name)
+                    resp = await client.post(
+                        f"{HOMELAB_MCP_URL}/api/search",
+                        json={
+                            "query": keywords,
+                            "source": mapped_name,
+                            "max_results": 5,
+                        },
+                    )
+                    if resp.status_code != 200:
+                        continue
+                    data = resp.json()
+                    for r in data.get("results", []):
+                        hits.append(
+                            SearchHit(
+                                source=r.get("source", source_name),
+                                file=r.get("file", ""),
+                                line_number=r.get("line", 0),
+                                line=r.get("content", ""),
+                            )
+                        )
+        except (httpx.RequestError, httpx.TimeoutException):
+            pass
         return hits
 
-    def search(self, prompt: str) -> SearchResult:
+    async def search(self, prompt: str) -> SearchResult:
         intent = self._classifier.classify(prompt)
 
         if not intent.should_search:
@@ -231,11 +227,7 @@ class ProgrammaticSearchTier:
                 reason="no search sources available on disk",
             )
 
-        all_hits: list[SearchHit] = []
-        for source_name, source_path in available.items():
-            all_hits.extend(self._run_ripgrep(keyword, source_path, source_name))
-            if len(all_hits) >= RIPGREP_MAX_MATCHES:
-                break
+        all_hits = await self._search_via_homelab(keyword, available)
 
         if len(all_hits) == 0:
             return SearchResult(

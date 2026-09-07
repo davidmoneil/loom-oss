@@ -28,6 +28,33 @@ command above. If there is no external Postgres, use `./setup.sh` instead and
 pick the bundled-Postgres option (that path uses the default
 `docker-compose.yml`, not the homelab overlay).
 
+## Why Loom has its own database (`loom` on postgres-unified)
+
+postgres-unified hosts one database per service (`n8n`, `pulse`,
+`monday_sync`, `voice_jobs`, `google_token_vault`, …). Loom originally landed
+in `pgvector_db` — a shared grab-bag database holding pgvector embeddings,
+n8n chat histories, Alfred memories, and the legacy proxy's tables. The
+dedicated `loom` database was created during the 2026-07-09 incident fix
+(commit `e035d54`) and is the canonical target because:
+
+1. **Loom's migration system assumes it owns the database.** It keeps a
+   `schema_version` table and auto-applies versioned migrations on startup.
+   While mispointed at `pgvector_db` (Aug–Sep 2026), it migrated that shared
+   database's schema to v13 — mutating a schema other services sit on.
+2. **Generic table names collide.** `metrics`, `sessions`, `requests`,
+   `gateway_keys`, `schema_version` are exactly the names another service
+   would also pick.
+3. **AGE graph objects.** The variant store creates an Apache AGE graph and
+   extension schemas; keeping those out of shared databases limits blast
+   radius.
+4. **Per-service backup/retention.** `pg_dump loom` captures exactly Loom's
+   state; restore or retention policy changes can't touch other tenants.
+
+`pgvector_db` still contains stale pre-2026-09-06 copies of Loom tables from
+the split-brain periods — they are historical residue, not live data. The
+legacy internal proxy (:8711) keeps its own separate tables and is unrelated
+to the `loom` database.
+
 ## Storage DSN: single source of truth
 
 **The DSN must live in exactly one place: `.env.homelab`.** Do not set
