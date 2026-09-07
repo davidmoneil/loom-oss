@@ -20,7 +20,7 @@ logger = get_logger("loom.storage.postgres")
 import hashlib
 import secrets
 
-SCHEMA_VERSION = 13
+SCHEMA_VERSION = 14
 
 
 class PostgresStorage:
@@ -314,6 +314,11 @@ class PostgresStorage:
             # (v12 was SQLite-only cache-column parity; skipped here.)
             conn.execute("ALTER TABLE metrics ADD COLUMN IF NOT EXISTS tier TEXT")
 
+        if current < 14:
+            # Compression observability: per-stage skip/apply reason counters
+            # (JSON text), attributed per request.
+            conn.execute("ALTER TABLE metrics ADD COLUMN IF NOT EXISTS skip_reasons TEXT")
+
         if current < SCHEMA_VERSION:
             conn.execute(
                 "INSERT INTO schema_version (version, applied_at) VALUES (%s, %s) "
@@ -376,6 +381,7 @@ class PostgresStorage:
         cache_creation_tokens: int = 0,
         skill: Optional[str] = None,
         tier: Optional[str] = None,
+        skip_reasons: Optional[str] = None,
     ) -> None:
         self.conn.execute(
             """
@@ -385,8 +391,8 @@ class PostgresStorage:
                 latency_ms, cost_estimate, compressed, compression_ratio,
                 message_count, source, tokens_saved, session_id,
                 status_code, cache_read_tokens, cache_creation_tokens, skill,
-                tier
-            ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                tier, skip_reasons
+            ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
             """,
             (
                 time.time(),
@@ -410,6 +416,7 @@ class PostgresStorage:
                 cache_creation_tokens,
                 skill,
                 tier,
+                skip_reasons,
             ),
         )
 
@@ -515,7 +522,7 @@ class PostgresStorage:
         rows = self.conn.execute(
             """
             SELECT compressed, compression_ratio, tokens_saved, tier,
-                   model, source, timestamp
+                   model, source, timestamp, skip_reasons
             FROM metrics WHERE timestamp >= %s
             """,
             (since,),
@@ -529,6 +536,7 @@ class PostgresStorage:
                 "model": r[4] or "unknown",
                 "source": r[5] or "unknown",
                 "timestamp": r[6],
+                "skip_reasons": r[7],
             }
             for r in rows
         ]

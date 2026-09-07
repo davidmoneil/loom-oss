@@ -29,6 +29,7 @@ import pathlib
 import re
 import threading
 import time
+import urllib.parse
 import uuid
 from contextlib import asynccontextmanager
 from typing import Any, AsyncIterator, Optional
@@ -145,6 +146,8 @@ class GatewayState:
         self.comp_tokens_after: int = 0
         # Per-block-type rollup: {"tool_result": {"before": n, "after": n}, ...}
         self.comp_by_type: dict = {}
+        # Cumulative skip/apply-reason rollup for /health (see _fold_skip_stats).
+        self.comp_skip_stats: dict[str, int] = {}
         self.config: LoomConfig = LoomConfig()
         self.backends: dict[str, ProviderBackend] = {}
         # model id / display name -> (provider_name, ModelConfig)
@@ -308,10 +311,14 @@ def _record_request(
     tier: Optional[str] = None,
     ratelimit: Optional[dict] = None,
     session_id: Optional[str] = None,
+    skip_reasons: Optional[dict] = None,
 ) -> None:
     """Persist + audit a completed request. Never raises into the request path."""
     tokens_in, tokens_out, cache_read, cache_creation = _extract_tokens(usage)
     skill = _extract_skill(messages)
+    skip_reasons_json = (
+        json.dumps(skip_reasons, separators=(",", ":")) if skip_reasons else None
+    )
 
     if state.storage is not None:
         try:
@@ -335,6 +342,7 @@ def _record_request(
                 cache_read_tokens=cache_read,
                 cache_creation_tokens=cache_creation,
                 skill=skill,
+                skip_reasons=skip_reasons_json,
             )
         except Exception:
             pass
@@ -381,6 +389,8 @@ def _record_request(
             )
             if ratelimit:
                 audit_kwargs["ratelimit"] = ratelimit
+            if skip_reasons_json:
+                audit_kwargs["skip_reasons"] = skip_reasons_json
             if usage and isinstance(usage, dict):
                 cache_read = usage.get("cache_read_input_tokens", 0) or 0
                 cache_creation = usage.get("cache_creation_input_tokens", 0) or 0
@@ -989,6 +999,7 @@ async def _wrapped_stream(
     backend: Any = None,
     messages: list | None = None,
     model_cfg: Any = None,
+    skip_reasons: dict | None = None,
 ) -> AsyncIterator[bytes]:
     """Forward upstream bytes, scanning for sensitive data when buffering is enabled.
 
@@ -1141,6 +1152,7 @@ async def _wrapped_stream(
         ratelimit=rl,
         messages=messages,
         response_text=response_text,
+        skip_reasons=skip_reasons,
         **meta,
     )
 
@@ -1185,6 +1197,20 @@ async def lifespan(app: FastAPI):
         state.storage.connect()
     except Exception:
         state.storage = None
+
+    if state.storage is not None:
+        # Split-brain guard: the live deployment once silently wrote metrics
+        # to the wrong Postgres database for a month because the resolved
+        # DSN was never surfaced anywhere. Log host+db (never credentials).
+        if state.config.storage.backend == "postgres":
+            host, db = _dsn_host_db(state.config.storage.postgres_dsn)
+            get_logger("loom.gateway").info(
+                "storage backend: postgres host=%s db=%s", host, db,
+            )
+        else:
+            get_logger("loom.gateway").info(
+                "storage backend: sqlite path=%s", state.config.storage.database_path,
+            )
 
     # Auth posture at a glance. Without keys the whole API is open — that's
     # intended for first-run setup, but it must never be a silent state.
@@ -1248,6 +1274,20 @@ async def lifespan(app: FastAPI):
         state.variants = create_variant_store(state.config.compression)
     except Exception:
         state.variants = None
+
+    if state.variants is not None:
+        backend_name = state.config.compression.variant_store
+        if backend_name == "age":
+            host, db = _dsn_host_db(state.config.compression.age_dsn)
+            get_logger("loom.gateway").info(
+                "variant store: age host=%s db=%s", host, db,
+            )
+        elif backend_name == "neo4j":
+            host, _ = _dsn_host_db(state.config.compression.neo4j_uri)
+            db = getattr(state.config.compression, "neo4j_database", "") or "neo4j"
+            get_logger("loom.gateway").info(
+                "variant store: neo4j host=%s db=%s", host, db,
+            )
 
     async def _cache_janitor() -> None:
         # Expired compression-cache rows previously accumulated forever —
@@ -1452,6 +1492,7 @@ def create_app() -> FastAPI:
             # Inline compression: compress older messages before forwarding.
             comp_before = comp_after = 0
             tier_name = None
+            comp_stats: dict = {}
             if gw.compression is not None and len(messages) > 2:
                 tier_name = _resolve_request_tier(gw, request, source)
                 # Off the event loop: compression is CPU-bound and, with
@@ -1467,12 +1508,14 @@ def create_app() -> FastAPI:
                         variants=gw.variants,
                         tier_name=tier_name,
                         config=gw.config,
+                        stats=comp_stats,
                     )
                 )
                 gw.comp_tokens_before += comp_before
                 gw.comp_tokens_after += comp_after
                 for k, v in comp_by_type.items():
                     _tally(gw.comp_by_type, k, v["before"], v["after"])
+                _fold_skip_stats(gw.comp_skip_stats, comp_stats)
 
             result = await backend.chat_completion(
                 model=model_cfg.model_id,
@@ -1503,7 +1546,7 @@ def create_app() -> FastAPI:
 
             if stream:
                 return StreamingResponse(
-                    _wrapped_stream(gw, result, meta, t0, backend=backend, messages=messages, model_cfg=model_cfg),  # type: ignore[arg-type]
+                    _wrapped_stream(gw, result, meta, t0, backend=backend, messages=messages, model_cfg=model_cfg, skip_reasons=comp_stats),  # type: ignore[arg-type]
                     media_type="text/event-stream",
                     headers={"X-Loom-Request-Id": request_id},
                 )
@@ -1521,6 +1564,7 @@ def create_app() -> FastAPI:
                 messages=messages,
                 response_text=resp_text,
                 ratelimit=rl,
+                skip_reasons=comp_stats,
                 **meta,
             )
             normalized = _scan_response(gw, normalized, provider_name, model_cfg.model_id, source)
@@ -1668,6 +1712,7 @@ def create_app() -> FastAPI:
             # Inline compression: compress older messages before forwarding.
             comp_before = comp_after = 0
             tier_name = None
+            comp_stats: dict = {}
             if gw.compression is not None and len(messages) > 2:
                 tier_name = _resolve_request_tier(gw, request, source)
                 # Off the event loop: compression is CPU-bound and, with
@@ -1691,11 +1736,14 @@ def create_app() -> FastAPI:
                                 variants=gw.variants,
                                 tier_name=tier_name,
                                 config=gw.config,
+                                stats=comp_stats,
                             ),
                             timeout=_COMPRESSION_TIMEOUT_SECONDS,
                         )
                     )
                 except asyncio.TimeoutError:
+                    comp_stats["timeout_abort"] = True
+                    _fold_skip_stats(gw.comp_skip_stats, comp_stats)
                     _log.error(
                         "compression phase exceeded %.0fs (request_id=%s, messages=%d)",
                         _COMPRESSION_TIMEOUT_SECONDS, request_id, len(messages),
@@ -1712,6 +1760,7 @@ def create_app() -> FastAPI:
                 gw.comp_tokens_after += comp_after
                 for k, v in comp_by_type.items():
                     _tally(gw.comp_by_type, k, v["before"], v["after"])
+                _fold_skip_stats(gw.comp_skip_stats, comp_stats)
             try:
                 result = await asyncio.wait_for(
                     backend.chat_completion(
@@ -1756,7 +1805,7 @@ def create_app() -> FastAPI:
 
             if stream:
                 return StreamingResponse(
-                    _wrapped_stream(gw, result, meta, t0, backend=backend, messages=messages, model_cfg=model_cfg),  # type: ignore[arg-type]
+                    _wrapped_stream(gw, result, meta, t0, backend=backend, messages=messages, model_cfg=model_cfg, skip_reasons=comp_stats),  # type: ignore[arg-type]
                     media_type="text/event-stream",
                     headers={"X-Loom-Request-Id": request_id},
                 )
@@ -1773,6 +1822,7 @@ def create_app() -> FastAPI:
                 messages=messages,
                 response_text=resp_text,
                 ratelimit=rl,
+                skip_reasons=comp_stats,
                 **meta,
             )
             result = _scan_response(gw, result, provider_name, model, source)
@@ -2200,6 +2250,7 @@ def create_app() -> FastAPI:
                     }
                     for k, v in sorted(gw.comp_by_type.items())
                 },
+                "skip_stats": gw.comp_skip_stats,
             },
             "sessions": _session_stats_block(gw),
         }
@@ -3099,6 +3150,7 @@ def _compress_text_payload(
     source_hint: str = "",
     variants: Any = None,
     tier_name: str = "medium",
+    stats: dict | None = None,
 ) -> tuple[str, int, int]:
     """Compress a single text payload (message string or block text).
 
@@ -3119,6 +3171,8 @@ def _compress_text_payload(
     if existing_tier is not None:
         # Compressed on a previous turn — don't recompress (originals are
         # gone); counts as already-saved.
+        if stats is not None:
+            stats["already_compressed"] = stats.get("already_compressed", 0) + 1
         return text, tb, tb
 
     age_ratio = _tier_age_ratio(age_ratio, tier_name)
@@ -3132,7 +3186,9 @@ def _compress_text_payload(
         if light != text and len(light) < len(text):
             h = hashlib.sha256(text.encode()).hexdigest()[:16]
             light = f"{light}\n<!--loom:compressed:light:{h}-->"
+            _bump_tier_outcome(stats, "light")
             return light, tb, _estimate_tokens_safe(light)
+        _bump_tier_outcome(stats, "full")
         return text, tb, tb
 
     content_hash = hashlib.sha256(text.encode()).hexdigest()[:16]
@@ -3141,6 +3197,8 @@ def _compress_text_payload(
             hit = storage.get_compression_cached(content_hash, age_ratio)
             if hit:
                 cached = hit["compressed_text"]
+                if stats is not None:
+                    stats["cache_hit"] = stats.get("cache_hit", 0) + 1
                 return cached, tb, _estimate_tokens_safe(cached)
         except Exception:
             pass
@@ -3157,6 +3215,7 @@ def _compress_text_payload(
         # Graduated pass declined but the ModeB pre-pass still saved tokens.
         new_text, tier = working, "medium"
     if new_text != text and len(new_text) < len(text):
+        _bump_tier_outcome(stats, tier)
         new_text = f"{new_text}\n<!--loom:compressed:{tier}:{content_hash}-->"
         ta = _estimate_tokens_safe(new_text)
         if storage is not None:
@@ -3185,9 +3244,17 @@ def _compress_text_payload(
             except Exception:
                 pass
     else:
+        _bump_tier_outcome(stats, "full")
         new_text = text
 
     return new_text, tb, _estimate_tokens_safe(new_text)
+
+
+def _bump_tier_outcome(stats: dict | None, tier: str) -> None:
+    if stats is None:
+        return
+    key = "unchanged" if tier == "full" else f"applied_{tier}"
+    stats[key] = stats.get(key, 0) + 1
 
 
 def _block_tokens(block: Any) -> int:
@@ -3205,6 +3272,35 @@ def _tally(by_type: dict, key: str, before: int, after: int) -> None:
     slot["after"] += after
 
 
+def _dsn_host_db(dsn: str | None) -> tuple[str, str]:
+    """Parse ``host`` and ``db`` out of a DSN/URI for logging, never
+    including credentials. Best-effort — returns ("unknown", "unknown")
+    for anything unparseable or empty."""
+    if not dsn:
+        return "unknown", "unknown"
+    try:
+        parsed = urllib.parse.urlparse(dsn)
+        host = parsed.hostname or "unknown"
+        if parsed.port:
+            host = f"{host}:{parsed.port}"
+        db = parsed.path.lstrip("/") or "unknown"
+        return host, db
+    except Exception:
+        return "unknown", "unknown"
+
+
+def _fold_skip_stats(cumulative: dict[str, int], stats: dict) -> None:
+    """Fold one request's compression skip/apply stats into the cumulative
+    rollup used by /health. Booleans (e.g. loop_detected, timeout_abort)
+    count as +1 per request where True; numeric counters sum."""
+    for key, value in stats.items():
+        if isinstance(value, bool):
+            if value:
+                cumulative[key] = cumulative.get(key, 0) + 1
+        elif isinstance(value, (int, float)):
+            cumulative[key] = cumulative.get(key, 0) + value
+
+
 def _compress_tool_result_block(
     processor: Any,
     block: dict,
@@ -3213,6 +3309,7 @@ def _compress_tool_result_block(
     mode_b: Any,
     variants: Any = None,
     tier_name: str = "medium",
+    stats: dict | None = None,
 ) -> tuple[dict, int, int]:
     """Compress the text inside a tool_result block, preserving structure.
 
@@ -3233,9 +3330,13 @@ def _compress_tool_result_block(
         raw = inner if isinstance(inner, str) else json.dumps(inner)
         tb = _block_tokens(block)
         if len(raw) < _MIN_BLOCK_COMPRESS_CHARS:
+            if stats is not None:
+                stats["below_min_size"] = stats.get("below_min_size", 0) + 1
             return block, tb, tb
         _, existing_tier = _strip_loom_tag(raw)
         if existing_tier is not None:
+            if stats is not None:
+                stats["already_compressed"] = stats.get("already_compressed", 0) + 1
             return block, tb, tb
         raw_tokens = _estimate_tokens_safe(raw)
         h = hashlib.sha256(raw.encode()).hexdigest()[:16]
@@ -3263,10 +3364,12 @@ def _compress_tool_result_block(
     if isinstance(inner, str):
         tb = _block_tokens(block)
         if len(inner) < _MIN_BLOCK_COMPRESS_CHARS:
+            if stats is not None:
+                stats["below_min_size"] = stats.get("below_min_size", 0) + 1
             return block, tb, tb
         new_text, _, _ = _compress_text_payload(
             processor, inner, age_ratio, storage, mode_b, "tool_result",
-            variants, tier_name,
+            variants, tier_name, stats,
         )
         if new_text == inner:
             return block, tb, tb
@@ -3283,11 +3386,15 @@ def _compress_tool_result_block(
                 isinstance(sub, dict)
                 and sub.get("type") == "text"
                 and isinstance(sub.get("text"), str)
-                and len(sub["text"]) >= _MIN_BLOCK_COMPRESS_CHARS
             ):
+                if len(sub["text"]) < _MIN_BLOCK_COMPRESS_CHARS:
+                    if stats is not None:
+                        stats["below_min_size"] = stats.get("below_min_size", 0) + 1
+                    new_inner.append(sub)
+                    continue
                 new_text, _, _ = _compress_text_payload(
                     processor, sub["text"], age_ratio, storage, mode_b,
-                    "tool_result", variants, tier_name,
+                    "tool_result", variants, tier_name, stats,
                 )
                 if new_text != sub["text"]:
                     new_sub = dict(sub)
@@ -3316,6 +3423,7 @@ def _compress_content_blocks(
     by_type: dict,
     variants: Any = None,
     tier_name: str = "medium",
+    stats: dict | None = None,
 ) -> tuple[list, int, int]:
     """Compress text within a content-block list, never changing its shape.
 
@@ -3348,7 +3456,7 @@ def _compress_content_blocks(
             if len(text) >= _MIN_BLOCK_COMPRESS_CHARS:
                 new_text, _, _ = _compress_text_payload(
                     processor, text, age_ratio, storage, None, "text",
-                    variants, tier_name,
+                    variants, tier_name, stats,
                 )
                 if new_text != text:
                     out = dict(block)
@@ -3359,6 +3467,8 @@ def _compress_content_blocks(
                     _tally(by_type, "text", tb, ta)
                     out_blocks.append(out)
                     continue
+            elif stats is not None:
+                stats["below_min_size"] = stats.get("below_min_size", 0) + 1
             tokens_before += tb
             tokens_after += tb
             _tally(by_type, "text", tb, tb)
@@ -3366,7 +3476,7 @@ def _compress_content_blocks(
         elif btype == "tool_result" and compress_tool_results:
             new_block, tb, ta = _compress_tool_result_block(
                 processor, block, age_ratio, storage, mode_b, variants,
-                tier_name,
+                tier_name, stats,
             )
             tokens_before += tb
             tokens_after += ta
@@ -3485,6 +3595,7 @@ def _compress_messages_inline(
     variants: Any = None,
     tier_name: str = "medium",
     config: Any = None,
+    stats: dict | None = None,
 ) -> tuple[list[dict], int, int, dict, bool]:
     """Compress older messages before forwarding to the provider.
 
@@ -3494,6 +3605,10 @@ def _compress_messages_inline(
     ``compression.tool_result_protect_window``), or 2 for backward compat
     when called without config.  When repeated identical tool calls are
     detected the window is widened further to break the loop.
+
+    When *stats* is a dict, per-stage skip/apply counters are recorded into
+    it for observability (see ``/api/metrics/compression``); leaving it
+    ``None`` is a no-op and preserves prior behavior exactly.
 
     Returns (messages, tokens_before, tokens_after, by_type, is_looping).
     """
@@ -3520,6 +3635,11 @@ def _compress_messages_inline(
 
     protect_cutoff = max(n - protect_window, 0)
 
+    if stats is not None:
+        stats["msgs_total"] = n
+        stats["protected_recency"] = n - protect_cutoff
+        stats["loop_detected"] = is_looping
+
     mode_b = None
     if compress_tool_results:
         try:
@@ -3540,6 +3660,8 @@ def _compress_messages_inline(
             continue
 
         if _has_cache_control(msg):
+            if stats is not None:
+                stats["protected_cache_control"] = stats.get("protected_cache_control", 0) + 1
             compressed.append(msg)
             continue
 
@@ -3547,6 +3669,8 @@ def _compress_messages_inline(
         age_ratio = idx / max(n - 1, 1)
         if relevance.get(idx, 0.0) >= 0.7:
             age_ratio = max(0.0, age_ratio - _RELEVANCE_AGE_DISCOUNT)
+            if stats is not None:
+                stats["relevance_discounted"] = stats.get("relevance_discounted", 0) + 1
 
         if isinstance(content, list):
             new_blocks, tb, ta = _compress_content_blocks(
@@ -3559,6 +3683,7 @@ def _compress_messages_inline(
                 by_type,
                 variants,
                 tier_name,
+                stats,
             )
             tokens_before += tb
             tokens_after += ta
@@ -3573,7 +3698,7 @@ def _compress_messages_inline(
         text = content if isinstance(content, str) else json.dumps(content)
         new_text, tb, ta = _compress_text_payload(
             processor, text, age_ratio, storage, None, "message", variants,
-            tier_name,
+            tier_name, stats,
         )
         tokens_before += tb
         tokens_after += ta
