@@ -39,3 +39,4 @@ loom.yaml
 docker-compose.homelab.yml
 loom.homelab.yaml
 graphify-out/
+.deploy-log.jsonl
