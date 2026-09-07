@@ -259,3 +259,53 @@ Remaining before cutover (wmhx):
 - Persona system (maps to source policies but needs profile port)
 - 48h dual-run comparison (`/api/costs` on both ports)
 - Point `settings.json` + guard hooks at :4444, decommission :8711
+
+## Status Update — 2026-08-10 (internal loom retirement audit, AIProjects-rrwy)
+
+Cutover completed 2026-07-16 (see `knowledge/projects/loom.md`): all interactive
+and headless traffic now routes through loom-oss (:4444). This audit re-verified
+every PORT/PORT-HOMELAB row above against current code on both sides. Several
+rows were stale — landed since 2026-07-10 without this ledger being updated:
+
+- **Fernet encryption action** (PORT, row 74) — done. `scanner/crypto.py` ported,
+  Postgres-backed (`loom_dlp_keys` table) with in-memory fallback.
+- **Postgres pseudonymization** (PORT-HOMELAB, row 75/91) — done.
+  `scanner/pseudonymizer.py` ported, Postgres-backed (`loom_pseudonym_map`
+  table, 24h TTL) with in-memory fallback.
+- **Postgres encryption keys** (PORT-HOMELAB, row 92) — done, same as crypto.py
+  above.
+- **Postgres compression cache** (PORT-HOMELAB, row 89) — done. Folded into the
+  shared storage contract: `storage/postgres.py` and `storage/sqlite.py` both
+  implement `get_compression_cached` / `put_compression_cached` /
+  `cleanup_expired_cache` / `cache_stats`.
+- **Ollama GPU-aware model check** (PORT, priority #5) — done.
+  `gateway/providers/ollama.py` → `providers/ollama.py`, `get_loaded_models()`.
+
+**Genuinely still missing** — all three are Nexus/homelab integration points,
+none exist anywhere in loom-oss (verified via grep for `/learn`,
+`/session-context`, `/session-summary`, `persona`, `_enqueue_pulse`):
+
+1. **Persona system** (rows 45-46, 135) — `gateway/persona_profiles.yaml` (419
+   lines) + `gateway/persona_routing.yaml` (local eligibility gates) + the
+   gateway code that reads the `x-loom-persona` request header. No equivalent
+   exists in loom-oss; `config.py` `SourcePolicy` covers per-source routing but
+   not per-persona eligibility/profile logic.
+2. **Pulse dual-write** (row 101) — `proxy/server.py` `_enqueue_pulse_event`.
+   Nothing in loom-oss writes to Pulse.
+3. **Session/learn endpoints** (rows 103, 137-138) — `gateway/app.py`
+   `/session-summary`, `/session-context`, `/learn`. None ported.
+
+**Live risk found during this audit**: `executor.sh:2177` still hardcodes
+`LOOM_PROXY_URL="${LOOM_PROXY_URL:-http://localhost:8711}"` and sends
+`x-loom-persona` — gated behind the `loom_proxy` feature flag (default
+disabled), so currently dead code, but if ever enabled it targets the
+about-to-be-retired internal proxy and a persona header loom-oss can't
+interpret. Tracked separately as AIProjects-vx2m (companion task, not part of
+this audit).
+
+**Recommendation**: none of the three remaining items block decommissioning
+internal loom — nothing live depends on them today (persona routing traffic
+is gated off, Pulse dual-write already happens via loom-oss's own
+`/api/audit` + `/api/costs` consumed by the Nexus dashboard, session/learn
+endpoints have no current caller). Port on-demand if/when a concrete
+consumer needs them, rather than blocking retirement on a speculative port.
