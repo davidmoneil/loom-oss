@@ -70,6 +70,7 @@ class AuditLogger:
         routing_reason: Optional[str] = None,
         status_code: int = 200,
         ratelimit: Optional[dict] = None,
+        session_id: Optional[str] = None,
     ) -> None:
         record = {
             "ts": _utc_iso(),
@@ -89,6 +90,7 @@ class AuditLogger:
             "compression_ratio": compression_ratio,
             "routing_reason": routing_reason,
             "status_code": status_code,
+            "session_id": session_id,
         }
         if ratelimit:
             record["ratelimit"] = ratelimit

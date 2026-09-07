@@ -20,6 +20,14 @@ class OpenAIBackend(ProviderBackend):
     name = "openai"
 
     def _headers(self, api_key: str) -> dict[str, str]:
+        """Build the bearer-token Authorization header OpenAI-compatible endpoints expect.
+
+        REPO_META capability=gateway.provider.auth-headers
+        REPO_META purpose="Builds the bearer-token Authorization header OpenAI-compatible endpoints expect."
+        REPO_META external=service.openai
+        REPO_META sensitivity=credential
+        REPO_META role=adapter
+        """
         headers = {"Content-Type": "application/json"}
         if api_key:
             headers["Authorization"] = f"Bearer {api_key}"
@@ -33,6 +41,13 @@ class OpenAIBackend(ProviderBackend):
         stream: bool = False,
         **kwargs,
     ) -> dict | AsyncIterator[bytes]:
+        """Normalize a chat completion request into the OpenAI Chat Completions body shape.
+
+        REPO_META capability=gateway.provider.chat-completion
+        REPO_META purpose="Normalizes a chat completion request into the OpenAI Chat Completions body shape and dispatches to the streaming or non-streaming code path."
+        REPO_META external=service.openai
+        REPO_META role=orchestrator
+        """
         body: dict = {"model": model, "messages": messages}
         for key, value in kwargs.items():
             if value is not None:
@@ -44,6 +59,14 @@ class OpenAIBackend(ProviderBackend):
         return await self._complete(body, api_key)
 
     async def _complete(self, body: dict, api_key: str) -> dict:
+        """Send a non-streaming request to the OpenAI-compatible /chat/completions endpoint.
+
+        REPO_META capability=gateway.provider.chat-completion
+        REPO_META purpose="Sends a non-streaming request to the OpenAI-compatible /chat/completions endpoint and raises a provider error on a non-2xx response."
+        REPO_META external=service.openai
+        REPO_META sensitivity=credential
+        REPO_META role=adapter
+        """
         client = await self.get_client()
         try:
             resp = await client.post(
@@ -60,6 +83,14 @@ class OpenAIBackend(ProviderBackend):
         return resp.json()
 
     async def _stream(self, body: dict, api_key: str) -> AsyncIterator[bytes]:
+        """Stream a Chat Completions response chunk-by-chunk from an OpenAI-compatible endpoint.
+
+        REPO_META capability=gateway.provider.chat-completion
+        REPO_META purpose="Streams a Chat Completions response chunk-by-chunk from an OpenAI-compatible endpoint."
+        REPO_META external=service.openai
+        REPO_META sensitivity=credential
+        REPO_META role=adapter
+        """
         client = await self.get_client()
         async with client.stream(
             "POST", "/chat/completions", json=body, headers=self._headers(api_key)
@@ -76,6 +107,13 @@ class OpenAIBackend(ProviderBackend):
                     yield chunk
 
     async def list_models(self) -> list[str]:
+        """Query the provider's /models endpoint and return the reported model IDs.
+
+        REPO_META capability=gateway.provider.list-models
+        REPO_META purpose="Queries the provider's /models endpoint and returns the reported model IDs, or an empty list if the endpoint call fails."
+        REPO_META external=service.openai
+        REPO_META role=adapter
+        """
         client = await self.get_client()
         try:
             resp = await client.get("/models")
