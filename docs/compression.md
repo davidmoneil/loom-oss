@@ -10,7 +10,7 @@ an opt-in LLM-assisted path for prose.
 
 On every `/v1/chat/completions` and `/v1/messages` request, messages are
 evaluated for compression. Each eligible message is assigned an **age ratio**
-— 0.0 for the oldest message, approaching 1.0 for the most recent eligible
+— 0.0 for the most recent eligible message, approaching 1.0 for the oldest
 one — and compressed proportionally to its age: older content is compressed
 harder. Content already carrying a `<!--loom:compressed:TIER:HASH-->` tag is
 skipped (double-compression prevention across turns), and a storage-backed
@@ -35,7 +35,8 @@ Request in
   ├─ 2. Recency protection — skip the last N messages entirely
   │     (N = tool_result_protect_window, default 6; tripled when loop detected)
   │
-  ├─ 3. Age ratio calculation — idx / max(n-1, 1) for each eligible message
+  ├─ 3. Age ratio calculation — 1 - idx / max(n-1, 1) for each eligible
+  │     message (idx=0 is the oldest message, so it gets the highest ratio)
   │
   ├─ 4. Relevance scoring (optional) — if variant store is enabled, content
   │     indexed by an external context engine gets its age discounted by 0.25

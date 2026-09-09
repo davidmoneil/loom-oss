@@ -39,7 +39,8 @@ def test_savings_measured_and_tagged():
     assert before > after > 0
     # Last 2 messages untouched
     assert out[-1] == msgs[-1] and out[-2] == msgs[-2]
-    # An old message (age_ratio >= 0.3) got compressed and tagged
+    # Index 4 of 8 (age_ratio 1-4/7 ~= 0.43) is old enough to compress, even
+    # though it's close to the protected recency tail (idx 6,7).
     _, tier = _strip_loom_tag(out[4]["content"])
     assert tier == "medium"
 
@@ -92,7 +93,7 @@ def test_derive_session_id_stable():
 
 def test_block_content_messages():
     msgs = _messages(6)
-    # Index 2 of 6 -> age_ratio 0.4, old enough to compress.
+    # Index 2 of 6 -> age_ratio 1-2/5 = 0.6, old enough to compress.
     msgs[2]["content"] = [{"type": "text", "text": FILLER}]
     out, before, after, by_type, _loop = _compress_messages_inline(FakeProcessor(), msgs)
     assert before > after
@@ -107,7 +108,7 @@ def test_block_content_messages():
 def _tool_conversation() -> list[dict]:
     """8-message conversation with tool_use/tool_result on old-enough turns.
 
-    Indices 3 and 4 of 8 give age_ratios 0.43 and 0.57 — past the 0.3
+    Indices 3 and 4 of 8 give age_ratios 0.57 and 0.43 — past the 0.3
     graduated-compression threshold.
     """
     msgs = _messages(8)
@@ -248,12 +249,16 @@ def test_protect_window_distinguishes_6_from_2():
     out2, *_ = _compress_messages_inline(
         FakeProcessor(), msgs, config=_config_stub(protect_window=2),
     )
-    # Indices n-6..n-3 (6,7,8,9): protected under window=6, compressed
+    # Indices n-6..n-3 (6,7,8,9): protected under window=6, newly eligible
     # under window=2 — this is the exact gap test_recent_tool_results_
     # untouched above cannot see (it only checks indices window=2 already
-    # protects).
-    for idx in range(6, 10):
+    # protects). Age ratio grows toward the *older* end of the eligible
+    # range (idx=0 is oldest), so only 6,7 (age_ratio 0.45/0.36) clear the
+    # 0.3 threshold; 8,9 (0.27/0.18) are still recent enough to stay full.
+    for idx in (6, 7):
         assert out2[idx] != msgs[idx]
+    for idx in (8, 9):
+        assert out2[idx] == msgs[idx]
 
 
 def test_loop_detection_widens_protect_window():
@@ -282,7 +287,7 @@ def test_loop_detection_widens_protect_window():
     )
     assert is_looping is True
     assert stats["loop_detected"] is True
-    # Index 5 (age_ratio 5/11 ~= 0.45) is old enough to compress and sits
+    # Index 5 (age_ratio 1-5/11 ~= 0.55) is old enough to compress and sits
     # inside a plain window=6 (protect_cutoff=6), but the loop-widened
     # window (6*3=18 > n=12) protects the entire conversation instead.
     assert out[5] == msgs[5]
@@ -302,9 +307,11 @@ def test_stats_plumbing_keys_present():
     assert stats["msgs_total"] == 8
     assert stats["protected_recency"] == 2
     assert stats["loop_detected"] is False
-    # Indices 3,4,5 (age_ratio >= 0.3) compress to "medium"; 0,1,2 don't.
-    assert stats["applied_medium"] == 3
-    assert stats["unchanged"] == 3
+    # Age ratio grows toward idx=0 (the oldest message). Indices 0-4
+    # (age_ratio >= 0.3) compress to "medium"; index 5, closest to the
+    # protected/recent tail, doesn't.
+    assert stats["applied_medium"] == 5
+    assert stats["unchanged"] == 1
 
     # No stats dict passed -> no crash, no behavior change.
     out_nostats, before2, after2, _, _ = _compress_messages_inline(FakeProcessor(), msgs)
