@@ -2141,7 +2141,7 @@ def create_app() -> FastAPI:
                 content = msg.get("content", "")
                 text = content if isinstance(content, str) else json.dumps(content)
                 chars_in += len(text)
-                age_ratio = idx / max(n - 1, 1) if n > 1 else 0.0
+                age_ratio = 1 - idx / max(n - 1, 1) if n > 1 else 0.0
                 if mode == "audit":
                     new_text = text
                 else:
@@ -3666,7 +3666,7 @@ def _compress_messages_inline(
             continue
 
         content = msg.get("content", "")
-        age_ratio = idx / max(n - 1, 1)
+        age_ratio = 1 - idx / max(n - 1, 1)
         if relevance.get(idx, 0.0) >= 0.7:
             age_ratio = max(0.0, age_ratio - _RELEVANCE_AGE_DISCOUNT)
             if stats is not None:

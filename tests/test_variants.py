@@ -94,11 +94,10 @@ def test_relevance_skips_indexed_content():
     out, _, _, _, _ = _compress_messages_inline(
         FakeProcessor(), msgs, variants=store
     )
-    # Indexed message: age 4/7 = 0.57 -> discounted to 0.32... still >= 0.3?
-    # 0.571 - 0.25 = 0.321 -> compressed but less aggressively is not
-    # observable with the fake processor's binary tiers, so instead verify
-    # scoring directly and that an earlier indexed message (age 0.43) is
-    # pushed below the 0.3 threshold and left uncompressed.
+    # Indexed message: age 1-4/7 = 0.43 -> discounted to 0.18, below the 0.3
+    # floor, so it isn't compressed at all — not observable via tier here
+    # with the fake processor's binary tiers (see below for that check), so
+    # first verify scoring directly.
     scores = _score_messages_by_relevance(msgs, store)
     assert scores.get(4) == 0.85
 
@@ -107,11 +106,13 @@ def test_relevance_skips_indexed_content():
     out2, _, _, _, _ = _compress_messages_inline(
         FakeProcessor(), msgs, variants=store2
     )
-    # age 3/7 = 0.43 -> 0.18 after discount -> below 0.3 -> untouched
-    assert out2[3]["content"] == msgs[3]["content"]
-    # Non-indexed neighbor at the same age band still compresses.
-    _, tier = _strip_loom_tag(out2[4]["content"])
+    # age 1-3/7 = 0.57 -> 0.32 after discount -> still >= 0.3 -> compresses,
+    # just less aggressively than an unindexed message at the same age band.
+    _, tier = _strip_loom_tag(out2[3]["content"])
     assert tier == "medium"
+    # The indexed message at idx=4 (age 0.43, discounted to 0.18) stays
+    # below threshold and untouched, confirming the discount above.
+    assert out[4]["content"] == msgs[4]["content"]
 
 
 def test_no_store_means_no_scores():
