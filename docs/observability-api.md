@@ -145,6 +145,7 @@ Swagger `/docs` — this section is a map of what exists, not a full spec.
 | `GET /api/models` | Models known to the router with tier/cost metadata |
 | `GET /api/metrics` | Point-in-time gateway metrics snapshot |
 | `GET /api/metrics/timeseries?hours=&interval_minutes=` | Metrics as a time-bucketed series |
+| `GET /api/metrics/compression?days=30` | Windowed compression analytics: `totals` (requests, tokens_before/after/saved, compression_ratio, savings_pct stats), `ratio_histogram`, `by_tier`/`by_model`/`by_source`/`by_day`, `by_block_type` |
 | `GET /api/audit/{request_id}/content` | Full logged prompt/response for one audit entry (shape is whatever was captured at request time) |
 | `GET /api/config` | Secret-scrubbed view of the active `GatewayConfig` |
 | `PATCH /api/config/server` | Update server-level config fields — returns the full sanitized config |
@@ -164,7 +165,10 @@ Swagger `/docs` — this section is a map of what exists, not a full spec.
 | loom-oss gateway (this repo) | storage backend (SQLite/Postgres) — `src/loom/gateway/app.py` |
 | internal loom proxy (legacy) | `requests.jsonl` + session store + model-pricing.yaml — thin adapter in `proxy/server.py` |
 
-Known loom-oss gaps (tracked in `docs/gap-analysis.md`): per-request
-compression savings and session tracking are not yet recorded, so `tokens_saved`,
-`savings_usd`, `by_tier` and `/api/sessions` report zeros/unsupported until that
-parity work lands.
+Known loom-oss gaps (tracked in `docs/gap-analysis.md`): per-request session
+tracking is not yet fully recorded, so `/api/sessions` can report
+zeros/unsupported until that parity work lands. Per-request compression
+savings (`tokens_saved`, `by_tier`) and, as of schema version 15,
+`tokens_before`/`tokens_after`/`by_block_type` are recorded and available
+windowed via `GET /api/metrics/compression`; rows written before that
+migration report `0`/absent for the new fields.

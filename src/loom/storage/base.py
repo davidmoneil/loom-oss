@@ -83,7 +83,11 @@ def _summarize_compression(records: list[dict], days: int) -> dict:
     ``records``: dicts with compressed, compression_ratio (after/before),
     tokens_saved, tier, model, source, timestamp, and optionally
     skip_reasons (a JSON text blob of per-stage skip/apply counters — see
-    ``_compress_messages_inline``'s ``stats`` param).
+    ``_compress_messages_inline``'s ``stats`` param), tokens_before,
+    tokens_after, and by_block_type (a JSON text blob of
+    ``{block_type: {"before": int, "after": int}}``). The token/block-type
+    fields are optional for backward compatibility with rows recorded
+    before those columns existed; missing values are treated as 0/absent.
 
     Savings percentages are reported as (1 - after/before) * 100 — "what
     fraction of the context was removed" — over compressed requests only.
@@ -112,6 +116,30 @@ def _summarize_compression(records: list[dict], days: int) -> dict:
                 skip_reasons_totals[key] = skip_reasons_totals.get(key, 0) + value
     savings = [max(0.0, 1.0 - r["compression_ratio"]) for r in compressed]
     tokens_saved_total = sum(r["tokens_saved"] for r in records)
+    tokens_before_total = sum(r.get("tokens_before") or 0 for r in records)
+    tokens_after_total = sum(r.get("tokens_after") or 0 for r in records)
+
+    by_block_type: dict[str, dict] = {}
+    for r in records:
+        raw = r.get("by_block_type")
+        if not raw:
+            continue
+        try:
+            parsed = json.loads(raw)
+        except (TypeError, ValueError):
+            continue
+        if not isinstance(parsed, dict):
+            continue
+        for block_type, counts in parsed.items():
+            if not isinstance(counts, dict):
+                continue
+            g = by_block_type.setdefault(
+                block_type, {"tokens_before": 0, "tokens_after": 0}
+            )
+            g["tokens_before"] += counts.get("before", 0) or 0
+            g["tokens_after"] += counts.get("after", 0) or 0
+    for g in by_block_type.values():
+        g["tokens_saved"] = g["tokens_before"] - g["tokens_after"]
 
     histogram = [
         {"range": f"{b * 100 // HISTOGRAM_BUCKETS}-{(b + 1) * 100 // HISTOGRAM_BUCKETS}%", "count": 0}
@@ -162,6 +190,13 @@ def _summarize_compression(records: list[dict], days: int) -> dict:
             "requests": len(records),
             "compressed_requests": len(compressed),
             "tokens_saved": tokens_saved_total,
+            "tokens_before": tokens_before_total,
+            "tokens_after": tokens_after_total,
+            "compression_ratio": (
+                round(1.0 - tokens_after_total / tokens_before_total, 3)
+                if tokens_before_total > 0
+                else 0.0
+            ),
             "mean_savings_pct": round(statistics.mean(savings) * 100, 2) if savings else 0.0,
             "median_savings_pct": round(statistics.median(savings) * 100, 2) if savings else 0.0,
             "stdev_savings_pct": (
@@ -173,5 +208,6 @@ def _summarize_compression(records: list[dict], days: int) -> dict:
         "by_model": _breakdown("model"),
         "by_source": _breakdown("source"),
         "by_day": sorted(by_day.values(), key=lambda d: d["day"]),
+        "by_block_type": dict(sorted(by_block_type.items())),
         "skip_reasons": skip_reasons_totals,
     }

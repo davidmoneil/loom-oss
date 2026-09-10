@@ -312,6 +312,9 @@ def _record_request(
     ratelimit: Optional[dict] = None,
     session_id: Optional[str] = None,
     skip_reasons: Optional[dict] = None,
+    tokens_before: int = 0,
+    tokens_after: int = 0,
+    by_block_type: Optional[str] = None,
 ) -> None:
     """Persist + audit a completed request. Never raises into the request path."""
     tokens_in, tokens_out, cache_read, cache_creation = _extract_tokens(usage)
@@ -343,6 +346,9 @@ def _record_request(
                 cache_creation_tokens=cache_creation,
                 skill=skill,
                 skip_reasons=skip_reasons_json,
+                tokens_before=tokens_before,
+                tokens_after=tokens_after,
+                by_block_type=by_block_type,
             )
         except Exception:
             pass
@@ -1493,6 +1499,7 @@ def create_app() -> FastAPI:
             comp_before = comp_after = 0
             tier_name = None
             comp_stats: dict = {}
+            comp_by_type: dict = {}
             if gw.compression is not None and len(messages) > 2:
                 tier_name = _resolve_request_tier(gw, request, source)
                 # Off the event loop: compression is CPU-bound and, with
@@ -1542,6 +1549,11 @@ def create_app() -> FastAPI:
                 "tokens_saved": max(comp_before - comp_after, 0),
                 "tier": tier_name if comp_before > 0 else None,
                 "session_id": session_id if session_id != "unknown" else None,
+                "tokens_before": comp_before,
+                "tokens_after": comp_after,
+                "by_block_type": (
+                    json.dumps(comp_by_type, separators=(",", ":")) if comp_by_type else None
+                ),
             }
 
             if stream:
@@ -1713,6 +1725,7 @@ def create_app() -> FastAPI:
             comp_before = comp_after = 0
             tier_name = None
             comp_stats: dict = {}
+            comp_by_type: dict = {}
             if gw.compression is not None and len(messages) > 2:
                 tier_name = _resolve_request_tier(gw, request, source)
                 # Off the event loop: compression is CPU-bound and, with
@@ -1801,6 +1814,11 @@ def create_app() -> FastAPI:
                 "tokens_saved": max(comp_before - comp_after, 0),
                 "tier": tier_name if comp_before > 0 else None,
                 "session_id": session_id if session_id != "unknown" else None,
+                "tokens_before": comp_before,
+                "tokens_after": comp_after,
+                "by_block_type": (
+                    json.dumps(comp_by_type, separators=(",", ":")) if comp_by_type else None
+                ),
             }
 
             if stream:

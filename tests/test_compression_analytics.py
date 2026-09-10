@@ -1,12 +1,14 @@
 """Compression analytics: storage aggregation (both backends) + endpoint."""
 
+import json
 import uuid
 
 from fastapi.testclient import TestClient
 
 
 def _record(storage, *, compressed=True, ratio=0.4, saved=600, tier="medium",
-            model="haiku", source="pytest"):
+            model="haiku", source="pytest", before=None, after=None,
+            by_block_type=None):
     storage.record_metrics(
         request_id=uuid.uuid4().hex[:12],
         model=model,
@@ -20,6 +22,9 @@ def _record(storage, *, compressed=True, ratio=0.4, saved=600, tier="medium",
         tokens_saved=saved if compressed else 0,
         tier=tier if compressed else None,
         source=source,
+        tokens_before=before or 0,
+        tokens_after=after or 0,
+        by_block_type=json.dumps(by_block_type) if by_block_type else None,
     )
 
 
@@ -58,11 +63,46 @@ def test_compression_summary_shape_and_math(storage):
     assert out["by_day"][-1]["requests"] == 4
 
 
+def test_compression_summary_tokens_before_after_and_block_type(storage):
+    # Two compressed requests with token counts + per-block-type breakdown,
+    # plus one legacy-shaped row (no tokens_before/after/by_block_type,
+    # mirroring rows written before schema version 15) that must not break
+    # aggregation.
+    _record(
+        storage, ratio=0.4, saved=600, before=1000, after=400,
+        by_block_type={"tool_result": {"before": 700, "after": 200},
+                        "text": {"before": 300, "after": 200}},
+    )
+    _record(
+        storage, ratio=0.5, saved=300, before=600, after=300,
+        by_block_type={"tool_result": {"before": 600, "after": 300}},
+    )
+    _record(storage, compressed=False)  # legacy shape: no before/after/block_type
+
+    out = storage.get_compression_summary(days=1)
+    t = out["totals"]
+    assert t["requests"] == 3
+    assert t["tokens_before"] == 1600
+    assert t["tokens_after"] == 700
+    assert t["compression_ratio"] == round(1.0 - 700 / 1600, 3)
+
+    by_type = out["by_block_type"]
+    assert by_type["tool_result"]["tokens_before"] == 1300
+    assert by_type["tool_result"]["tokens_after"] == 500
+    assert by_type["tool_result"]["tokens_saved"] == 800
+    assert by_type["text"]["tokens_before"] == 300
+    assert by_type["text"]["tokens_after"] == 200
+
+
 def test_compression_summary_empty_window(storage):
     out = storage.get_compression_summary(days=1)
     assert out["totals"]["requests"] == 0
     assert out["totals"]["mean_savings_pct"] == 0.0
+    assert out["totals"]["tokens_before"] == 0
+    assert out["totals"]["tokens_after"] == 0
+    assert out["totals"]["compression_ratio"] == 0.0
     assert out["by_tier"] == []
+    assert out["by_block_type"] == {}
     assert sum(b["count"] for b in out["ratio_histogram"]) == 0
 
 

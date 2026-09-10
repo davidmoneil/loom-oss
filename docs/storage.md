@@ -60,6 +60,39 @@ The `docker-compose.yml` defines three named volumes:
 independently of the source code. The only command that removes them is
 `docker compose down -v` (or `docker volume rm` directly).
 
+## Schema changes touch both backends by hand
+
+The two backends do **not** share a schema-migration engine — SQL syntax
+differs enough (`ALTER TABLE ... ADD COLUMN IF NOT EXISTS` on Postgres vs.
+try/except `OperationalError` on SQLite, parameter placeholders, etc.) that
+each backend's `if current < N:` migration block in
+`src/loom/storage/sqlite.py` / `postgres.py` is written out separately. This
+has caused real incidents: the two backends' `SCHEMA_VERSION` drifted apart
+in production once (one database stuck at v11 while another had migrated to
+v13, discovered only because their compression stats told different
+stories — see the DSN split-brain incident in the changelog/PR history).
+
+What **is** centralized, and should stay that way: `StorageBackend` in
+`src/loom/storage/base.py` is the single contract both backends must
+implement (`tests/test_storage_contract.py` checks this statically), and
+any aggregation/business logic over the raw rows (e.g.
+`_summarize_compression`) lives once in `base.py` and is called by both
+backends' read methods, rather than being reimplemented per backend.
+
+**Checklist for a schema change:**
+1. Bump `SCHEMA_VERSION` identically in both `sqlite.py` and `postgres.py`,
+   in the same commit/PR.
+2. Add the `if current < N:` migration block to both files.
+3. Extend `record_metrics` (and any other write method touched) identically
+   in both backends — `test_storage_contract.py` only checks method
+   *names* line up, not that both implementations accept the same
+   parameters, so this step is on the author.
+4. Put any read-side aggregation in `base.py`, not duplicated per backend.
+5. Verify the migration path manually against a simulated pre-migration
+   database (or a saved copy of a real one) before relying on
+   auto-migration in production — there is no automated test that runs the
+   migration chain end-to-end.
+
 ## Backend-specific notes
 
 ### SQLite
