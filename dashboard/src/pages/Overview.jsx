@@ -32,19 +32,23 @@ export default function Overview() {
   const [error, setError] = useState(null);
 
   const [sessions, setSessions] = useState(null);
+  const [compressionStats, setCompressionStats] = useState(null);
 
   const load = useCallback(async () => {
     try {
-      const [m, ts, h, s] = await Promise.all([
+      const days = Math.max(1, Math.ceil(range.hours / 24));
+      const [m, ts, h, s, cs] = await Promise.all([
         api.metrics(range.hours),
         api.timeseries(range.hours, range.bucket),
         api.health().catch(() => null),
         api.sessions(range.hours).catch(() => null),
+        api.compressionMetrics(days).catch(() => null),
       ]);
       setMetrics(m?.metrics ?? {});
       setSeries(ts);
       setHealth(h);
       setSessions(s);
+      setCompressionStats(cs);
       setUpdatedAt(new Date());
       setError(null);
     } catch (e) {
@@ -189,7 +193,12 @@ export default function Overview() {
       </div>
 
       <ProviderHealth health={health} loading={loading} />
-      <CompressionPanel compression={health?.compression} loading={loading} />
+      <CompressionPanel
+        compression={health?.compression}
+        stats={compressionStats}
+        rangeLabel={range.label}
+        loading={loading}
+      />
     </div>
   );
 }
@@ -213,7 +222,7 @@ function fmtPct(ratio) {
   return `${(ratio * 100).toFixed(1)}%`;
 }
 
-function CompressionPanel({ compression, loading }) {
+function CompressionPanel({ compression, stats, rangeLabel, loading }) {
   if (loading) {
     return (
       <div className="mt-6 rounded-lg border border-border bg-card p-4">
@@ -223,69 +232,85 @@ function CompressionPanel({ compression, loading }) {
     );
   }
 
-  if (!compression) {
+  // `compression` (from /health) carries config-level state (enabled flag,
+  // default tier) that isn't time-windowed. `stats` (from
+  // /api/metrics/compression?days=) carries the actual numbers for the
+  // selected range. Both are optional capabilities.
+  if (!compression && !stats?.available) {
     return null;
   }
 
-  const byBlockType = Object.entries(compression.by_block_type || {});
+  const totals = stats?.totals || {};
+  const hasWindowData = (totals.requests || 0) > 0;
+  const byBlockType = Object.entries(stats?.by_block_type || {});
 
   return (
     <div className="mt-6 rounded-lg border border-border bg-card p-4">
       <div className="mb-3 flex flex-wrap items-center justify-between gap-2">
-        <h3 className="text-sm font-semibold text-gray-200">Compression</h3>
-        <div className="flex items-center gap-2">
-          <span
-            className={`inline-flex items-center gap-1.5 rounded border px-2 py-0.5 text-xs font-medium ${
-              COMPRESSION_TIER_COLORS[compression.default_tier] ||
-              "bg-gray-700/50 text-gray-400 border-border"
-            }`}
-          >
+        <h3 className="text-sm font-semibold text-gray-200">
+          Compression{rangeLabel ? ` (${rangeLabel})` : ""}
+        </h3>
+        {compression && (
+          <div className="flex items-center gap-2">
             <span
-              className={`h-2 w-2 rounded-full ${compression.enabled ? "bg-green-400" : "bg-gray-500"}`}
-            />
-            {compression.default_tier || "unknown"}
-          </span>
-        </div>
+              className={`inline-flex items-center gap-1.5 rounded border px-2 py-0.5 text-xs font-medium ${
+                COMPRESSION_TIER_COLORS[compression.default_tier] ||
+                "bg-gray-700/50 text-gray-400 border-border"
+              }`}
+            >
+              <span
+                className={`h-2 w-2 rounded-full ${compression.enabled ? "bg-green-400" : "bg-gray-500"}`}
+              />
+              {compression.default_tier || "unknown"}
+            </span>
+          </div>
+        )}
       </div>
 
-      <div className="grid grid-cols-2 gap-4 lg:grid-cols-4">
-        <StatCard label="Tokens Before" value={fmtNumber(compression.tokens_before)} />
-        <StatCard label="Tokens After" value={fmtNumber(compression.tokens_after)} />
-        <StatCard label="Tokens Saved" value={fmtNumber(compression.tokens_saved)} />
-        <StatCard label="Compression Ratio" value={fmtPct(compression.compression_ratio)} />
-      </div>
+      {!hasWindowData ? (
+        <p className="text-sm text-gray-400">No compressed requests in this range yet.</p>
+      ) : (
+        <>
+          <div className="grid grid-cols-2 gap-4 lg:grid-cols-4">
+            <StatCard label="Tokens Before" value={fmtNumber(totals.tokens_before)} />
+            <StatCard label="Tokens After" value={fmtNumber(totals.tokens_after)} />
+            <StatCard label="Tokens Saved" value={fmtNumber(totals.tokens_saved)} />
+            <StatCard label="Compression Ratio" value={fmtPct(totals.compression_ratio)} />
+          </div>
 
-      {byBlockType.length > 0 && (
-        <div className="mt-4 overflow-x-auto rounded-lg border border-border">
-          <table className="w-full text-left text-sm">
-            <thead className="bg-card text-xs uppercase tracking-wide text-gray-400">
-              <tr>
-                <th className="px-3 py-2 font-medium">Block Type</th>
-                <th className="px-3 py-2 text-right font-medium">Before</th>
-                <th className="px-3 py-2 text-right font-medium">After</th>
-                <th className="px-3 py-2 text-right font-medium">Saved</th>
-              </tr>
-            </thead>
-            <tbody className="divide-y divide-border">
-              {byBlockType.map(([type, v]) => (
-                <tr key={type} className="bg-base hover:bg-gray-800/40">
-                  <td className="px-3 py-2 text-gray-300">
-                    {BLOCK_TYPE_LABELS[type] || type}
-                  </td>
-                  <td className="px-3 py-2 text-right tabular-nums text-gray-400">
-                    {fmtNumber(v.tokens_before)}
-                  </td>
-                  <td className="px-3 py-2 text-right tabular-nums text-gray-400">
-                    {fmtNumber(v.tokens_after)}
-                  </td>
-                  <td className="px-3 py-2 text-right tabular-nums text-gray-200">
-                    {fmtNumber(v.tokens_saved)}
-                  </td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
-        </div>
+          {byBlockType.length > 0 && (
+            <div className="mt-4 overflow-x-auto rounded-lg border border-border">
+              <table className="w-full text-left text-sm">
+                <thead className="bg-card text-xs uppercase tracking-wide text-gray-400">
+                  <tr>
+                    <th className="px-3 py-2 font-medium">Block Type</th>
+                    <th className="px-3 py-2 text-right font-medium">Before</th>
+                    <th className="px-3 py-2 text-right font-medium">After</th>
+                    <th className="px-3 py-2 text-right font-medium">Saved</th>
+                  </tr>
+                </thead>
+                <tbody className="divide-y divide-border">
+                  {byBlockType.map(([type, v]) => (
+                    <tr key={type} className="bg-base hover:bg-gray-800/40">
+                      <td className="px-3 py-2 text-gray-300">
+                        {BLOCK_TYPE_LABELS[type] || type}
+                      </td>
+                      <td className="px-3 py-2 text-right tabular-nums text-gray-400">
+                        {fmtNumber(v.tokens_before)}
+                      </td>
+                      <td className="px-3 py-2 text-right tabular-nums text-gray-400">
+                        {fmtNumber(v.tokens_after)}
+                      </td>
+                      <td className="px-3 py-2 text-right tabular-nums text-gray-200">
+                        {fmtNumber(v.tokens_saved)}
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          )}
+        </>
       )}
     </div>
   );

@@ -22,7 +22,7 @@ from typing import Any, Optional
 
 from loom.storage.base import _summarize_compression
 
-SCHEMA_VERSION = 14
+SCHEMA_VERSION = 15
 
 # Compression-cache entries live this long, matching the Postgres backend's
 # "NOW() + INTERVAL '7 days'".
@@ -392,6 +392,22 @@ class LoomStorage:
             except sqlite3.OperationalError:
                 pass
 
+        if current < 15:
+            # Compression analytics: persist per-request token counts and a
+            # per-block-type breakdown so windowed analytics (/api/metrics/
+            # compression) can reproduce what the in-process health rollup
+            # shows, instead of that data only existing for the gateway's
+            # current process lifetime.
+            for col, typ in (
+                ("tokens_before", "INTEGER DEFAULT 0"),
+                ("tokens_after", "INTEGER DEFAULT 0"),
+                ("by_block_type", "TEXT"),
+            ):
+                try:
+                    c.execute(f"ALTER TABLE metrics ADD COLUMN {col} {typ}")
+                except sqlite3.OperationalError:
+                    pass
+
         if current < SCHEMA_VERSION:
             c.execute(
                 "INSERT OR REPLACE INTO schema_version (version, applied_at) VALUES (?, ?)",
@@ -457,6 +473,9 @@ class LoomStorage:
         skill: Optional[str] = None,
         tier: Optional[str] = None,
         skip_reasons: Optional[str] = None,
+        tokens_before: int = 0,
+        tokens_after: int = 0,
+        by_block_type: Optional[str] = None,
     ) -> None:
         with self._write_lock:
             self.conn.execute(
@@ -467,8 +486,8 @@ class LoomStorage:
                     latency_ms, cost_estimate, compressed, compression_ratio,
                     message_count, source, tokens_saved, session_id,
                     status_code, cache_read_tokens, cache_creation_tokens, skill,
-                    tier, skip_reasons
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    tier, skip_reasons, tokens_before, tokens_after, by_block_type
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     time.time(),
@@ -493,6 +512,9 @@ class LoomStorage:
                     skill,
                     tier,
                     skip_reasons,
+                    tokens_before,
+                    tokens_after,
+                    by_block_type,
                 ),
             )
             self._schedule_flush()
@@ -1062,7 +1084,8 @@ class LoomStorage:
         rows = self.conn.execute(
             """
             SELECT compressed, compression_ratio, tokens_saved, tier,
-                   model, source, timestamp, skip_reasons
+                   model, source, timestamp, skip_reasons,
+                   tokens_before, tokens_after, by_block_type
             FROM metrics WHERE timestamp >= ?
             """,
             (since,),
@@ -1077,6 +1100,9 @@ class LoomStorage:
                 "source": r["source"] or "unknown",
                 "timestamp": r["timestamp"],
                 "skip_reasons": r["skip_reasons"],
+                "tokens_before": r["tokens_before"] or 0,
+                "tokens_after": r["tokens_after"] or 0,
+                "by_block_type": r["by_block_type"],
             }
             for r in rows
         ]

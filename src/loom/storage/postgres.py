@@ -20,7 +20,7 @@ logger = get_logger("loom.storage.postgres")
 import hashlib
 import secrets
 
-SCHEMA_VERSION = 14
+SCHEMA_VERSION = 15
 
 
 class PostgresStorage:
@@ -319,6 +319,16 @@ class PostgresStorage:
             # (JSON text), attributed per request.
             conn.execute("ALTER TABLE metrics ADD COLUMN IF NOT EXISTS skip_reasons TEXT")
 
+        if current < 15:
+            # Compression analytics: persist per-request token counts and a
+            # per-block-type breakdown so windowed analytics (/api/metrics/
+            # compression) can reproduce what the in-process health rollup
+            # shows, instead of that data only existing for the gateway's
+            # current process lifetime.
+            conn.execute("ALTER TABLE metrics ADD COLUMN IF NOT EXISTS tokens_before INTEGER DEFAULT 0")
+            conn.execute("ALTER TABLE metrics ADD COLUMN IF NOT EXISTS tokens_after INTEGER DEFAULT 0")
+            conn.execute("ALTER TABLE metrics ADD COLUMN IF NOT EXISTS by_block_type TEXT")
+
         if current < SCHEMA_VERSION:
             conn.execute(
                 "INSERT INTO schema_version (version, applied_at) VALUES (%s, %s) "
@@ -382,6 +392,9 @@ class PostgresStorage:
         skill: Optional[str] = None,
         tier: Optional[str] = None,
         skip_reasons: Optional[str] = None,
+        tokens_before: int = 0,
+        tokens_after: int = 0,
+        by_block_type: Optional[str] = None,
     ) -> None:
         self.conn.execute(
             """
@@ -391,8 +404,8 @@ class PostgresStorage:
                 latency_ms, cost_estimate, compressed, compression_ratio,
                 message_count, source, tokens_saved, session_id,
                 status_code, cache_read_tokens, cache_creation_tokens, skill,
-                tier, skip_reasons
-            ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                tier, skip_reasons, tokens_before, tokens_after, by_block_type
+            ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
             """,
             (
                 time.time(),
@@ -417,6 +430,9 @@ class PostgresStorage:
                 skill,
                 tier,
                 skip_reasons,
+                tokens_before,
+                tokens_after,
+                by_block_type,
             ),
         )
 
@@ -522,7 +538,8 @@ class PostgresStorage:
         rows = self.conn.execute(
             """
             SELECT compressed, compression_ratio, tokens_saved, tier,
-                   model, source, timestamp, skip_reasons
+                   model, source, timestamp, skip_reasons,
+                   tokens_before, tokens_after, by_block_type
             FROM metrics WHERE timestamp >= %s
             """,
             (since,),
@@ -537,6 +554,9 @@ class PostgresStorage:
                 "source": r[5] or "unknown",
                 "timestamp": r[6],
                 "skip_reasons": r[7],
+                "tokens_before": r[8] or 0,
+                "tokens_after": r[9] or 0,
+                "by_block_type": r[10],
             }
             for r in rows
         ]
