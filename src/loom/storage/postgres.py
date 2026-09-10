@@ -20,7 +20,7 @@ logger = get_logger("loom.storage.postgres")
 import hashlib
 import secrets
 
-SCHEMA_VERSION = 15
+SCHEMA_VERSION = 16
 
 
 class PostgresStorage:
@@ -328,6 +328,11 @@ class PostgresStorage:
             conn.execute("ALTER TABLE metrics ADD COLUMN IF NOT EXISTS tokens_before INTEGER DEFAULT 0")
             conn.execute("ALTER TABLE metrics ADD COLUMN IF NOT EXISTS tokens_after INTEGER DEFAULT 0")
             conn.execute("ALTER TABLE metrics ADD COLUMN IF NOT EXISTS by_block_type TEXT")
+
+        if current < 16:
+            # Human-readable session name, derived from the first user message.
+            # Set once at session creation and never overwritten (see touch_session).
+            conn.execute("ALTER TABLE sessions ADD COLUMN IF NOT EXISTS session_name TEXT")
 
         if current < SCHEMA_VERSION:
             conn.execute(
@@ -676,12 +681,16 @@ class PostgresStorage:
         user_id: str = "",
         api_key_suffix: str = "",
         system_hash: str = "",
+        session_name: str = "",
     ) -> int:
         """Upsert a session row and increment its turn counter.
 
         Returns the turn number after the update (1 for a new session).
         ended_at doubles as last_seen; request_count is the turn counter.
         Optional keyword args store session metadata for dashboard display.
+        session_name is set once from the first request and never overwritten,
+        so later turns (which may lack the original first-message context)
+        can't clobber it.
         """
         now = time.time()
         row = self.conn.execute(
@@ -689,8 +698,8 @@ class PostgresStorage:
             INSERT INTO sessions
                 (session_id, source, started_at, ended_at,
                  request_count, total_tokens, total_cost,
-                 client_type, user_id, api_key_suffix, system_hash)
-            VALUES (%s, %s, %s, %s, 1, %s, %s, %s, %s, %s, %s)
+                 client_type, user_id, api_key_suffix, system_hash, session_name)
+            VALUES (%s, %s, %s, %s, 1, %s, %s, %s, %s, %s, %s, %s)
             ON CONFLICT (session_id) DO UPDATE SET
                 ended_at = EXCLUDED.ended_at,
                 source = COALESCE(EXCLUDED.source, sessions.source),
@@ -700,12 +709,13 @@ class PostgresStorage:
                 client_type = COALESCE(EXCLUDED.client_type, sessions.client_type),
                 user_id = COALESCE(EXCLUDED.user_id, sessions.user_id),
                 api_key_suffix = COALESCE(EXCLUDED.api_key_suffix, sessions.api_key_suffix),
-                system_hash = COALESCE(EXCLUDED.system_hash, sessions.system_hash)
+                system_hash = COALESCE(EXCLUDED.system_hash, sessions.system_hash),
+                session_name = COALESCE(sessions.session_name, EXCLUDED.session_name)
             RETURNING request_count
             """,
             (session_id, source, now, now, tokens, cost,
              client_type or None, user_id or None,
-             api_key_suffix or None, system_hash or None),
+             api_key_suffix or None, system_hash or None, session_name or None),
         ).fetchone()
         return int(row[0]) if row else 1
 
@@ -724,7 +734,7 @@ class PostgresStorage:
             """
             SELECT session_id, COALESCE(source, 'unknown'),
                    request_count, ended_at,
-                   client_type, user_id, api_key_suffix, system_hash
+                   client_type, user_id, api_key_suffix, system_hash, session_name
             FROM sessions WHERE ended_at >= %s
             ORDER BY ended_at DESC LIMIT %s
             """,
@@ -740,6 +750,7 @@ class PostgresStorage:
                 "user_id": r[5],
                 "api_key_suffix": r[6],
                 "system_hash": r[7],
+                "session_name": r[8],
             }
             for r in rows
         ]
@@ -1004,9 +1015,11 @@ class PostgresStorage:
                 m.status_code,
                 m.cache_read_tokens,
                 m.cache_creation_tokens,
-                m.skill
+                m.skill,
+                s.session_name
             FROM metrics m
             LEFT JOIN routing_decisions r ON m.request_id = r.request_id
+            LEFT JOIN sessions s ON m.session_id = s.session_id
             {clause}
             ORDER BY m.timestamp DESC
             LIMIT %s OFFSET %s
@@ -1035,6 +1048,7 @@ class PostgresStorage:
                 "cache_read_tokens": r[16] or 0,
                 "cache_creation_tokens": r[17] or 0,
                 "skill": r[18] if r[18] else None,
+                "session_name": r[19] if r[19] else None,
             }
             for r in rows
         ]

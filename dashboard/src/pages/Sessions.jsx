@@ -163,7 +163,13 @@ export default function Sessions() {
               entries.map((e) => (
                 <tr key={e.session_id} className="bg-base hover:bg-gray-800/40">
                   <Td>
-                    <code className="text-xs text-gray-300">{e.session_id}</code>
+                    {e.session_name ? (
+                      <span className="text-gray-200" title={e.session_id}>
+                        {e.session_name}
+                      </span>
+                    ) : (
+                      <code className="text-xs text-gray-300">{e.session_id}</code>
+                    )}
                   </Td>
                   <Td>
                     <SourceBadge source={e.source} />

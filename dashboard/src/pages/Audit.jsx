@@ -216,8 +216,16 @@ export default function Audit() {
                     </button>
                   </Td>
                   <Td>{e.source}</Td>
-                  <Td className="text-gray-300 font-mono text-xs">
-                    {e.session_id ? e.session_id.slice(0, 12) : "—"}
+                  <Td className="text-gray-300 text-xs">
+                    {e.session_name ? (
+                      <span title={e.session_id}>{e.session_name}</span>
+                    ) : e.session_id ? (
+                      <span className="font-mono" title={e.session_id}>
+                        {e.session_id.slice(0, 12)}
+                      </span>
+                    ) : (
+                      "—"
+                    )}
                   </Td>
                   <Td className="text-gray-400">{e.requested_model}</Td>
                   <Td className="font-medium text-gray-100">{e.model_used}</Td>

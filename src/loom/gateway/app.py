@@ -1491,6 +1491,7 @@ def create_app() -> FastAPI:
                         user_id=signals["user_id"],
                         api_key_suffix=signals["api_key_suffix"],
                         system_hash=signals["system_hash"],
+                        session_name=signals["session_name"],
                     )
                 except Exception:
                     pass
@@ -1717,6 +1718,7 @@ def create_app() -> FastAPI:
                         user_id=signals["user_id"],
                         api_key_suffix=signals["api_key_suffix"],
                         system_hash=signals["system_hash"],
+                        session_name=signals["session_name"],
                     )
                 except Exception:
                     pass
@@ -3118,6 +3120,7 @@ def _extract_session_signals(
         "user_id": user_id,
         "api_key_suffix": api_key_suffix,
         "system_hash": system_hash,
+        "session_name": msg_prefix.strip()[:80] if msg_prefix else "",
     }
 
 

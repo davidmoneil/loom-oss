@@ -22,7 +22,7 @@ from typing import Any, Optional
 
 from loom.storage.base import _summarize_compression
 
-SCHEMA_VERSION = 15
+SCHEMA_VERSION = 16
 
 # Compression-cache entries live this long, matching the Postgres backend's
 # "NOW() + INTERVAL '7 days'".
@@ -408,6 +408,14 @@ class LoomStorage:
                 except sqlite3.OperationalError:
                     pass
 
+        if current < 16:
+            # Human-readable session name, derived from the first user message.
+            # Set once at session creation and never overwritten (see touch_session).
+            try:
+                c.execute("ALTER TABLE sessions ADD COLUMN session_name TEXT")
+            except sqlite3.OperationalError:
+                pass
+
         if current < SCHEMA_VERSION:
             c.execute(
                 "INSERT OR REPLACE INTO schema_version (version, applied_at) VALUES (?, ?)",
@@ -667,12 +675,16 @@ class LoomStorage:
         user_id: str = "",
         api_key_suffix: str = "",
         system_hash: str = "",
+        session_name: str = "",
     ) -> int:
         """Upsert a session row and increment its turn counter.
 
         Returns the turn number after the update (1 for a new session).
         ended_at doubles as last_seen; request_count is the turn counter.
         Optional keyword args store session metadata for dashboard display.
+        session_name is set once from the first request and never overwritten,
+        so later turns (which may lack the original first-message context)
+        can't clobber it.
         """
         now = time.time()
         with self._write_lock:
@@ -681,8 +693,8 @@ class LoomStorage:
                 INSERT INTO sessions
                     (session_id, source, started_at, ended_at,
                      request_count, total_tokens, total_cost,
-                     client_type, user_id, api_key_suffix, system_hash)
-                VALUES (?, ?, ?, ?, 1, ?, ?, ?, ?, ?, ?)
+                     client_type, user_id, api_key_suffix, system_hash, session_name)
+                VALUES (?, ?, ?, ?, 1, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(session_id) DO UPDATE SET
                     ended_at = excluded.ended_at,
                     source = COALESCE(excluded.source, sessions.source),
@@ -692,12 +704,13 @@ class LoomStorage:
                     client_type = COALESCE(excluded.client_type, sessions.client_type),
                     user_id = COALESCE(excluded.user_id, sessions.user_id),
                     api_key_suffix = COALESCE(excluded.api_key_suffix, sessions.api_key_suffix),
-                    system_hash = COALESCE(excluded.system_hash, sessions.system_hash)
+                    system_hash = COALESCE(excluded.system_hash, sessions.system_hash),
+                    session_name = COALESCE(sessions.session_name, excluded.session_name)
                 RETURNING request_count
                 """,
                 (session_id, source, now, now, tokens, cost,
                  client_type or None, user_id or None,
-                 api_key_suffix or None, system_hash or None),
+                 api_key_suffix or None, system_hash or None, session_name or None),
             ).fetchone()
             self._schedule_flush()
         return int(row[0]) if row else 1
@@ -720,7 +733,7 @@ class LoomStorage:
             """
             SELECT session_id, COALESCE(source, 'unknown') AS source,
                    request_count AS turns, ended_at AS last_seen,
-                   client_type, user_id, api_key_suffix, system_hash
+                   client_type, user_id, api_key_suffix, system_hash, session_name
             FROM sessions WHERE ended_at >= ?
             ORDER BY ended_at DESC LIMIT ?
             """,
@@ -1034,9 +1047,11 @@ class LoomStorage:
                 m.status_code      AS status_code,
                 m.cache_read_tokens AS cache_read_tokens,
                 m.cache_creation_tokens AS cache_creation_tokens,
-                m.skill            AS skill
+                m.skill            AS skill,
+                s.session_name     AS session_name
             FROM metrics m
             LEFT JOIN routing_decisions r ON m.request_id = r.request_id
+            LEFT JOIN sessions s ON m.session_id = s.session_id
             {clause}
             ORDER BY m.timestamp DESC
             LIMIT ? OFFSET ?
@@ -1067,6 +1082,7 @@ class LoomStorage:
                 "cache_read_tokens": r["cache_read_tokens"] or 0,
                 "cache_creation_tokens": r["cache_creation_tokens"] or 0,
                 "skill": r["skill"] if r["skill"] else None,
+                "session_name": r["session_name"] if r["session_name"] else None,
             }
             for r in rows
         ]
