@@ -13,27 +13,28 @@ import {
 } from "recharts";
 import StatCard from "../components/StatCard.jsx";
 import Chart, { CHART_COLORS, axisProps, tooltipStyle } from "../components/Chart.jsx";
-import { api, fmtNumber, fmtCost, fmtLatency, fmtBucketLabel } from "../api.js";
+import { api, fmtNumber, fmtCost, fmtLatency, fmtBucketLabel, pickBucket } from "../api.js";
 
 const REFRESH_MS = 30000;
-// bucketSeconds must match the server's _BUCKET_SIZES (gateway/app.py) for
-// the corresponding `bucket` string, so chart labels agree with what the
-// API actually aggregated. Bucket choice targets roughly 15-70 points per
-// chart: fine enough to see shape, coarse enough not to be a wall of ticks.
-const RANGES = [
-  { label: "1h", fullLabel: "Last 1 hour", hours: 1, bucket: "5m", bucketSeconds: 300 },
-  { label: "24h", fullLabel: "Last 24 hours", hours: 24, bucket: "1h", bucketSeconds: 3600 },
-  { label: "3d", fullLabel: "Last 3 days", hours: 72, bucket: "1h", bucketSeconds: 3600 },
-  { label: "7d", fullLabel: "Last 7 days", hours: 168, bucket: "6h", bucketSeconds: 21600 },
-  { label: "14d", fullLabel: "Last 14 days", hours: 336, bucket: "6h", bucketSeconds: 21600 },
-  { label: "30d", fullLabel: "Last 30 days", hours: 720, bucket: "1d", bucketSeconds: 86400 },
-  { label: "90d", fullLabel: "Last 90 days", hours: 2160, bucket: "1d", bucketSeconds: 86400 },
+// Cap how far back a single relative window can reach — generous enough
+// for any real use (1 year in either unit), just guards against a typo
+// like an extra zero turning into a multi-year query.
+const MAX_HOURS = 8760;
+const MAX_DAYS = 365;
+
+// One-click shortcuts for the common cases; the number+unit input next to
+// them accepts any relative window (e.g. "8 hours"), not just these.
+const QUICK_PICKS = [
+  { label: "1h", amount: 1, unit: "hours" },
+  { label: "24h", amount: 24, unit: "hours" },
+  { label: "7d", amount: 7, unit: "days" },
+  { label: "30d", amount: 30, unit: "days" },
 ];
 
-const DEFAULT_RANGE = RANGES.find((r) => r.label === "24h") || RANGES[0];
-
 export default function Overview() {
-  const [range, setRange] = useState(DEFAULT_RANGE);
+  const [amount, setAmount] = useState(24);
+  const [amountInput, setAmountInput] = useState("24");
+  const [unit, setUnit] = useState("hours");
   const [metrics, setMetrics] = useState(null);
   const [series, setSeries] = useState(null);
   const [health, setHealth] = useState(null);
@@ -44,14 +45,26 @@ export default function Overview() {
   const [sessions, setSessions] = useState(null);
   const [compressionStats, setCompressionStats] = useState(null);
 
+  const commitAmount = useCallback(() => {
+    const max = unit === "days" ? MAX_DAYS : MAX_HOURS;
+    const parsed = Math.round(Number(amountInput));
+    const clamped = Number.isFinite(parsed) ? Math.min(Math.max(parsed, 1), max) : amount;
+    setAmount(clamped);
+    setAmountInput(String(clamped));
+  }, [amountInput, amount, unit]);
+
+  const hours = unit === "days" ? amount * 24 : amount;
+  const { bucket, bucketSeconds } = pickBucket(hours);
+  const rangeLabel = `${amount}${unit === "days" ? "d" : "h"}`;
+
   const load = useCallback(async () => {
     try {
-      const days = Math.max(1, Math.ceil(range.hours / 24));
+      const days = Math.max(1, Math.ceil(hours / 24));
       const [m, ts, h, s, cs] = await Promise.all([
-        api.metrics(range.hours),
-        api.timeseries(range.hours, range.bucket),
+        api.metrics(hours),
+        api.timeseries(hours, bucket),
         api.health().catch(() => null),
-        api.sessions(range.hours).catch(() => null),
+        api.sessions(hours).catch(() => null),
         api.compressionMetrics(days).catch(() => null),
       ]);
       setMetrics(m?.metrics ?? {});
@@ -66,7 +79,7 @@ export default function Overview() {
     } finally {
       setLoading(false);
     }
-  }, [range]);
+  }, [hours, bucket]);
 
   useEffect(() => {
     load();
@@ -76,7 +89,7 @@ export default function Overview() {
 
   const m = metrics || {};
   const volume = (series?.buckets || []).map((b) => ({
-    label: fmtBucketLabel(b.ts, range.bucketSeconds),
+    label: fmtBucketLabel(b.ts, bucketSeconds),
     requests: b.requests,
   }));
   const byModel = Object.entries(series?.by_model || {}).map(([name, v]) => ({
@@ -92,26 +105,54 @@ export default function Overview() {
         error={error}
         onRefresh={load}
       >
-        <select
-          aria-label="Time range"
-          value={range.label}
-          onChange={(e) => {
-            const next = RANGES.find((r) => r.label === e.target.value);
-            if (next) setRange(next);
-          }}
-          className="rounded-md border border-border bg-card px-3 py-1.5 text-sm text-gray-300 hover:bg-gray-700/50 focus:outline-none focus:ring-1 focus:ring-accent"
-        >
-          {RANGES.map((r) => (
-            <option key={r.label} value={r.label}>
-              {r.fullLabel}
-            </option>
-          ))}
-        </select>
+        <div className="flex items-center gap-2">
+          <span className="text-sm text-gray-400">Last</span>
+          <input
+            type="number"
+            inputMode="numeric"
+            min={1}
+            max={unit === "days" ? MAX_DAYS : MAX_HOURS}
+            aria-label="Time range amount"
+            value={amountInput}
+            onChange={(e) => setAmountInput(e.target.value)}
+            onBlur={commitAmount}
+            onKeyDown={(e) => e.key === "Enter" && commitAmount()}
+            className="w-16 rounded-md border border-border bg-card px-2 py-1.5 text-sm text-gray-200 focus:outline-none focus:ring-1 focus:ring-accent"
+          />
+          <select
+            aria-label="Time range unit"
+            value={unit}
+            onChange={(e) => setUnit(e.target.value)}
+            className="rounded-md border border-border bg-card px-2 py-1.5 text-sm text-gray-300 hover:bg-gray-700/50 focus:outline-none focus:ring-1 focus:ring-accent"
+          >
+            <option value="hours">Hours</option>
+            <option value="days">Days</option>
+          </select>
+          <div className="flex overflow-hidden rounded-md border border-border">
+            {QUICK_PICKS.map((qp) => (
+              <button
+                key={qp.label}
+                onClick={() => {
+                  setAmount(qp.amount);
+                  setAmountInput(String(qp.amount));
+                  setUnit(qp.unit);
+                }}
+                className={`px-2.5 py-1.5 text-xs ${
+                  amount === qp.amount && unit === qp.unit
+                    ? "bg-accent text-white"
+                    : "bg-card text-gray-400 hover:bg-gray-700/50"
+                }`}
+              >
+                {qp.label}
+              </button>
+            ))}
+          </div>
+        </div>
       </Header>
 
       <div className="mt-6 grid grid-cols-2 gap-4 lg:grid-cols-4">
         <StatCard
-          label={`Requests (${range.label})`}
+          label={`Requests (${rangeLabel})`}
           value={fmtNumber(m.request_count)}
           loading={loading}
         />
@@ -135,12 +176,12 @@ export default function Overview() {
       {sessions?.supported && (
         <div className="mt-4 grid grid-cols-2 gap-4 lg:grid-cols-4">
           <StatCard
-            label={`Active Sessions (${range.label})`}
+            label={`Active Sessions (${rangeLabel})`}
             value={fmtNumber(sessions.sessions)}
             loading={loading}
           />
           <StatCard
-            label={`Total Turns (${range.label})`}
+            label={`Total Turns (${rangeLabel})`}
             value={fmtNumber(sessions.total_turns)}
             loading={loading}
           />
@@ -150,7 +191,7 @@ export default function Overview() {
       <div className="mt-6 grid grid-cols-1 gap-4 lg:grid-cols-3">
         <div className="lg:col-span-2">
           <Chart
-            title={`Request volume (${range.label})`}
+            title={`Request volume (${rangeLabel})`}
             loading={loading}
             empty={volume.length === 0}
           >
@@ -206,7 +247,7 @@ export default function Overview() {
       <CompressionPanel
         compression={health?.compression}
         stats={compressionStats}
-        rangeLabel={range.label}
+        rangeLabel={rangeLabel}
         loading={loading}
       />
     </div>

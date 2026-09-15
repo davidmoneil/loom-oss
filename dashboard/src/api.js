@@ -216,3 +216,22 @@ export function fmtBucketLabel(epochSeconds, bucketSeconds) {
   if (bucketSeconds <= ONE_HOUR) return fmtTimeShort(epochSeconds);
   return `${fmtDateShort(epochSeconds)} ${fmtTimeShort(epochSeconds)}`;
 }
+
+// Bucket sizes the server accepts for /api/metrics/timeseries (_BUCKET_SIZES
+// in gateway/app.py), smallest first.
+const BUCKET_SECONDS = [300, 900, 3600, 21600, 86400];
+const BUCKET_PARAM_BY_SECONDS = { 300: "5m", 900: "15m", 3600: "1h", 21600: "6h", 86400: "1d" };
+
+// Picks a bucket size for an arbitrary "last N hours" window: the smallest
+// available bucket that keeps the chart under ~50 points, falling back to
+// the coarsest bucket (1d) once even that's too fine-grained for the
+// window. Lets the time-range control accept any relative window (e.g.
+// "last 8 hours") instead of only a fixed list of presets, while keeping
+// charts readable and requests cheap at any window size.
+export function pickBucket(hours) {
+  const totalSeconds = Math.max(Number(hours) || 0, 0) * 3600;
+  const seconds =
+    BUCKET_SECONDS.find((b) => totalSeconds / b <= 50) ||
+    BUCKET_SECONDS[BUCKET_SECONDS.length - 1];
+  return { bucket: BUCKET_PARAM_BY_SECONDS[seconds], bucketSeconds: seconds };
+}
