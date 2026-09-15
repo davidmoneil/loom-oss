@@ -10,16 +10,18 @@ import {
 import StatCard from "../components/StatCard.jsx";
 import Chart, { axisProps, tooltipStyle } from "../components/Chart.jsx";
 import { Header } from "./Overview.jsx";
+import TimeRangeControl, { useTimeRange } from "../components/TimeRangeControl.jsx";
 import { api, fmtNumber, fmtCost, fmtTime } from "../api.js";
 
-const RANGES = [
-  { label: "24h", hours: 24 },
-  { label: "48h", hours: 48 },
-  { label: "7d", hours: 168 },
+const QUICK_PICKS = [
+  { label: "24h", amount: 24, unit: "hours" },
+  { label: "48h", amount: 48, unit: "hours" },
+  { label: "7d", amount: 7, unit: "days" },
 ];
 
 export default function Sessions() {
-  const [range, setRange] = useState(RANGES[0]);
+  const range = useTimeRange({ defaultAmount: 24, defaultUnit: "hours" });
+  const { hours, days } = range;
   const [data, setData] = useState(null);
   const [costs, setCosts] = useState(null);
   const [loading, setLoading] = useState(true);
@@ -30,8 +32,8 @@ export default function Sessions() {
     setLoading(true);
     try {
       const [sessions, costData] = await Promise.all([
-        api.sessions(range.hours),
-        api.costs(Math.max(1, Math.ceil(range.hours / 24))),
+        api.sessions(hours),
+        api.costs(days),
       ]);
       setData(sessions);
       setCosts(costData);
@@ -42,7 +44,7 @@ export default function Sessions() {
     } finally {
       setLoading(false);
     }
-  }, [range]);
+  }, [hours, days]);
 
   useEffect(() => {
     load();
@@ -71,21 +73,7 @@ export default function Sessions() {
   return (
     <div className="p-6">
       <Header title="Sessions" updatedAt={updatedAt} error={error} onRefresh={load}>
-        <div className="flex overflow-hidden rounded-md border border-border">
-          {RANGES.map((r) => (
-            <button
-              key={r.label}
-              onClick={() => setRange(r)}
-              className={`px-3 py-1.5 text-sm ${
-                r.label === range.label
-                  ? "bg-accent text-white"
-                  : "bg-card text-gray-400 hover:bg-gray-700/50"
-              }`}
-            >
-              {r.label}
-            </button>
-          ))}
-        </div>
+        <TimeRangeControl range={range} quickPicks={QUICK_PICKS} />
       </Header>
 
       <div className="mt-6 grid grid-cols-2 gap-4 lg:grid-cols-4">

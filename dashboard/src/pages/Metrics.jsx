@@ -15,16 +15,19 @@ import {
 } from "recharts";
 import Chart, { CHART_COLORS, axisProps, tooltipStyle } from "../components/Chart.jsx";
 import { Header } from "./Overview.jsx";
-import { api, fmtTimeShort, fmtDateShort } from "../api.js";
+import TimeRangeControl, { useTimeRange } from "../components/TimeRangeControl.jsx";
+import { api, fmtBucketLabel, pickBucket } from "../api.js";
 
-const RANGES = [
-  { label: "24h", hours: 24, bucket: "1h" },
-  { label: "7d", hours: 168, bucket: "1d" },
-  { label: "30d", hours: 720, bucket: "1d" },
+const QUICK_PICKS = [
+  { label: "24h", amount: 24, unit: "hours" },
+  { label: "7d", amount: 7, unit: "days" },
+  { label: "30d", amount: 30, unit: "days" },
 ];
 
 export default function Metrics() {
-  const [range, setRange] = useState(RANGES[1]);
+  const range = useTimeRange({ defaultAmount: 7, defaultUnit: "days" });
+  const { hours, rangeLabel } = range;
+  const { bucket, bucketSeconds } = pickBucket(hours);
   const [series, setSeries] = useState(null);
   const [loading, setLoading] = useState(true);
   const [updatedAt, setUpdatedAt] = useState(null);
@@ -33,7 +36,7 @@ export default function Metrics() {
   const load = useCallback(async () => {
     setLoading(true);
     try {
-      const ts = await api.timeseries(range.hours, range.bucket);
+      const ts = await api.timeseries(hours, bucket);
       setSeries(ts);
       setUpdatedAt(new Date());
       setError(null);
@@ -42,26 +45,19 @@ export default function Metrics() {
     } finally {
       setLoading(false);
     }
-  }, [range]);
+  }, [hours, bucket]);
 
   useEffect(() => {
     load();
   }, [load]);
 
-  const fmtBucket = useCallback(
-    (ts) => {
-      return range.bucket === "1d" ? fmtDateShort(ts) : fmtTimeShort(ts);
-    },
-    [range]
-  );
-
   const buckets = series?.buckets || [];
   const costByTime = buckets.map((b) => ({
-    label: fmtBucket(b.ts),
+    label: fmtBucketLabel(b.ts, bucketSeconds),
     cost: b.cost,
   }));
   const tokensOverTime = buckets.map((b) => ({
-    label: fmtBucket(b.ts),
+    label: fmtBucketLabel(b.ts, bucketSeconds),
     tokens_in: b.tokens_in,
     tokens_out: b.tokens_out,
   }));
@@ -79,26 +75,12 @@ export default function Metrics() {
   return (
     <div className="p-6">
       <Header title="Metrics" updatedAt={updatedAt} error={error} onRefresh={load}>
-        <div className="flex overflow-hidden rounded-md border border-border">
-          {RANGES.map((r) => (
-            <button
-              key={r.label}
-              onClick={() => setRange(r)}
-              className={`px-3 py-1.5 text-sm ${
-                r.label === range.label
-                  ? "bg-accent text-white"
-                  : "bg-card text-gray-400 hover:bg-gray-700/50"
-              }`}
-            >
-              {r.label}
-            </button>
-          ))}
-        </div>
+        <TimeRangeControl range={range} quickPicks={QUICK_PICKS} />
       </Header>
 
       <div className="mt-6 grid grid-cols-1 gap-4 lg:grid-cols-2">
         <Chart
-          title={`Cost over time (${costMetric ? range.label : "no paid usage"})`}
+          title={`Cost over time (${costMetric ? rangeLabel : "no paid usage"})`}
           loading={loading}
           empty={costByTime.length === 0}
         >

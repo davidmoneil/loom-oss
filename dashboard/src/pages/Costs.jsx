@@ -16,16 +16,18 @@ import {
 import StatCard from "../components/StatCard.jsx";
 import Chart, { CHART_COLORS, axisProps, tooltipStyle } from "../components/Chart.jsx";
 import { Header } from "./Overview.jsx";
+import TimeRangeControl, { useTimeRange } from "../components/TimeRangeControl.jsx";
 import { api, fmtNumber, fmtCost } from "../api.js";
 
-const RANGES = [
-  { label: "24h", days: 1 },
-  { label: "7d", days: 7 },
-  { label: "30d", days: 30 },
+const QUICK_PICKS = [
+  { label: "24h", amount: 1, unit: "days" },
+  { label: "7d", amount: 7, unit: "days" },
+  { label: "30d", amount: 30, unit: "days" },
 ];
 
 export default function Costs() {
-  const [range, setRange] = useState(RANGES[0]);
+  const range = useTimeRange({ defaultAmount: 1, defaultUnit: "days" });
+  const { days } = range;
   const [data, setData] = useState(null);
   const [loading, setLoading] = useState(true);
   const [updatedAt, setUpdatedAt] = useState(null);
@@ -34,7 +36,7 @@ export default function Costs() {
   const load = useCallback(async () => {
     setLoading(true);
     try {
-      const costs = await api.costs(range.days);
+      const costs = await api.costs(days);
       setData(costs);
       setUpdatedAt(new Date());
       setError(null);
@@ -43,7 +45,7 @@ export default function Costs() {
     } finally {
       setLoading(false);
     }
-  }, [range]);
+  }, [days]);
 
   useEffect(() => {
     load();
@@ -74,21 +76,7 @@ export default function Costs() {
   return (
     <div className="p-6">
       <Header title="Costs" updatedAt={updatedAt} error={error} onRefresh={load}>
-        <div className="flex overflow-hidden rounded-md border border-border">
-          {RANGES.map((r) => (
-            <button
-              key={r.label}
-              onClick={() => setRange(r)}
-              className={`px-3 py-1.5 text-sm ${
-                r.label === range.label
-                  ? "bg-accent text-white"
-                  : "bg-card text-gray-400 hover:bg-gray-700/50"
-              }`}
-            >
-              {r.label}
-            </button>
-          ))}
-        </div>
+        <TimeRangeControl range={range} quickPicks={QUICK_PICKS} />
       </Header>
 
       <div className="mt-6 grid grid-cols-2 gap-4 lg:grid-cols-4">
