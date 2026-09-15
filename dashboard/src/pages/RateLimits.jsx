@@ -10,12 +10,13 @@ import {
 import StatCard from "../components/StatCard.jsx";
 import Chart, { axisProps, tooltipStyle } from "../components/Chart.jsx";
 import { Header } from "./Overview.jsx";
+import TimeRangeControl, { useTimeRange } from "../components/TimeRangeControl.jsx";
 import { api, fmtTime, fmtTimeShort, fmtDateShort } from "../api.js";
 
-const RANGES = [
-  { label: "24h", hours: 24 },
-  { label: "48h", hours: 48 },
-  { label: "7d", hours: 168 },
+const QUICK_PICKS = [
+  { label: "24h", amount: 24, unit: "hours" },
+  { label: "48h", amount: 48, unit: "hours" },
+  { label: "7d", amount: 7, unit: "days" },
 ];
 
 const STATUS_COLORS = {
@@ -54,7 +55,8 @@ function pctBar(value, label, color = "#3b82f6") {
 }
 
 export default function RateLimits() {
-  const [range, setRange] = useState(RANGES[1]);
+  const range = useTimeRange({ defaultAmount: 48, defaultUnit: "hours" });
+  const { hours, rangeLabel } = range;
   const [data, setData] = useState(null);
   const [loading, setLoading] = useState(true);
   const [updatedAt, setUpdatedAt] = useState(null);
@@ -63,7 +65,7 @@ export default function RateLimits() {
   const load = useCallback(async () => {
     setLoading(true);
     try {
-      const d = await api.rateLimits(range.hours);
+      const d = await api.rateLimits(hours);
       setData(d);
       setUpdatedAt(new Date());
       setError(null);
@@ -72,7 +74,7 @@ export default function RateLimits() {
     } finally {
       setLoading(false);
     }
-  }, [range]);
+  }, [hours]);
 
   useEffect(() => {
     load();
@@ -82,7 +84,7 @@ export default function RateLimits() {
 
   const current = data?.current;
   const trend = (data?.trend || []).map((t) => ({
-    label: range.hours <= 48 ? fmtTimeShort(new Date(t.hour).getTime() / 1000) : fmtDateShort(new Date(t.hour).getTime() / 1000),
+    label: hours <= 48 ? fmtTimeShort(new Date(t.hour).getTime() / 1000) : fmtDateShort(new Date(t.hour).getTime() / 1000),
     avg_5h: t.avg_5h != null ? +(t.avg_5h * 100).toFixed(1) : null,
     avg_7d: t.avg_7d != null ? +(t.avg_7d * 100).toFixed(1) : null,
     max_5h: t.max_5h != null ? +(t.max_5h * 100).toFixed(1) : null,
@@ -92,21 +94,7 @@ export default function RateLimits() {
   return (
     <div className="p-6">
       <Header title="Rate Limits" updatedAt={updatedAt} error={error} onRefresh={load}>
-        <div className="flex gap-1 rounded-md border border-border bg-card p-0.5">
-          {RANGES.map((r) => (
-            <button
-              key={r.label}
-              onClick={() => setRange(r)}
-              className={`rounded px-3 py-1 text-xs font-medium transition-colors ${
-                r.label === range.label
-                  ? "bg-accent text-white"
-                  : "text-gray-400 hover:text-white"
-              }`}
-            >
-              {r.label}
-            </button>
-          ))}
-        </div>
+        <TimeRangeControl range={range} quickPicks={QUICK_PICKS} />
       </Header>
 
       {!loading && !current && !error && (
@@ -175,7 +163,7 @@ export default function RateLimits() {
       )}
 
       <div className="mt-6">
-        <Chart title={`Utilization trend (${range.label})`} loading={loading} empty={trend.length === 0}>
+        <Chart title={`Utilization trend (${rangeLabel})`} loading={loading} empty={trend.length === 0}>
           <AreaChart data={trend}>
             <defs>
               <linearGradient id="rl5h" x1="0" y1="0" x2="0" y2="1">

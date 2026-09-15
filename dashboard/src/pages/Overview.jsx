@@ -17,14 +17,10 @@ import {
 } from "recharts";
 import StatCard from "../components/StatCard.jsx";
 import Chart, { CHART_COLORS, axisProps, tooltipStyle } from "../components/Chart.jsx";
+import TimeRangeControl, { useTimeRange } from "../components/TimeRangeControl.jsx";
 import { api, fmtNumber, fmtCost, fmtLatency, fmtBucketLabel, pickBucket } from "../api.js";
 
 const REFRESH_MS = 30000;
-// Cap how far back a single relative window can reach — generous enough
-// for any real use (1 year in either unit), just guards against a typo
-// like an extra zero turning into a multi-year query.
-const MAX_HOURS = 8760;
-const MAX_DAYS = 365;
 
 // One-click shortcuts for the common cases; the number+unit input next to
 // them accepts any relative window (e.g. "8 hours"), not just these.
@@ -36,9 +32,8 @@ const QUICK_PICKS = [
 ];
 
 export default function Overview() {
-  const [amount, setAmount] = useState(24);
-  const [amountInput, setAmountInput] = useState("24");
-  const [unit, setUnit] = useState("hours");
+  const range = useTimeRange({ defaultAmount: 24, defaultUnit: "hours" });
+  const { hours, rangeLabel } = range;
   const [metrics, setMetrics] = useState(null);
   const [series, setSeries] = useState(null);
   const [health, setHealth] = useState(null);
@@ -49,17 +44,7 @@ export default function Overview() {
   const [sessions, setSessions] = useState(null);
   const [compressionStats, setCompressionStats] = useState(null);
 
-  const commitAmount = useCallback(() => {
-    const max = unit === "days" ? MAX_DAYS : MAX_HOURS;
-    const parsed = Math.round(Number(amountInput));
-    const clamped = Number.isFinite(parsed) ? Math.min(Math.max(parsed, 1), max) : amount;
-    setAmount(clamped);
-    setAmountInput(String(clamped));
-  }, [amountInput, amount, unit]);
-
-  const hours = unit === "days" ? amount * 24 : amount;
   const { bucket, bucketSeconds } = pickBucket(hours);
-  const rangeLabel = `${amount}${unit === "days" ? "d" : "h"}`;
 
   const load = useCallback(async () => {
     try {
@@ -124,49 +109,7 @@ export default function Overview() {
         error={error}
         onRefresh={load}
       >
-        <div className="flex items-center gap-2">
-          <span className="text-sm text-gray-400">Last</span>
-          <input
-            type="number"
-            inputMode="numeric"
-            min={1}
-            max={unit === "days" ? MAX_DAYS : MAX_HOURS}
-            aria-label="Time range amount"
-            value={amountInput}
-            onChange={(e) => setAmountInput(e.target.value)}
-            onBlur={commitAmount}
-            onKeyDown={(e) => e.key === "Enter" && commitAmount()}
-            className="w-16 rounded-md border border-border bg-card px-2 py-1.5 text-sm text-gray-200 focus:outline-none focus:ring-1 focus:ring-accent"
-          />
-          <select
-            aria-label="Time range unit"
-            value={unit}
-            onChange={(e) => setUnit(e.target.value)}
-            className="rounded-md border border-border bg-card px-2 py-1.5 text-sm text-gray-300 hover:bg-gray-700/50 focus:outline-none focus:ring-1 focus:ring-accent"
-          >
-            <option value="hours">Hours</option>
-            <option value="days">Days</option>
-          </select>
-          <div className="flex overflow-hidden rounded-md border border-border">
-            {QUICK_PICKS.map((qp) => (
-              <button
-                key={qp.label}
-                onClick={() => {
-                  setAmount(qp.amount);
-                  setAmountInput(String(qp.amount));
-                  setUnit(qp.unit);
-                }}
-                className={`px-2.5 py-1.5 text-xs ${
-                  amount === qp.amount && unit === qp.unit
-                    ? "bg-accent text-white"
-                    : "bg-card text-gray-400 hover:bg-gray-700/50"
-                }`}
-              >
-                {qp.label}
-              </button>
-            ))}
-          </div>
-        </div>
+        <TimeRangeControl range={range} quickPicks={QUICK_PICKS} />
       </Header>
 
       <div className="mt-6 grid grid-cols-2 gap-4 lg:grid-cols-4">

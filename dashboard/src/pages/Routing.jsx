@@ -14,16 +14,18 @@ import {
 import StatCard from "../components/StatCard.jsx";
 import Chart, { CHART_COLORS, axisProps, tooltipStyle } from "../components/Chart.jsx";
 import { Header } from "./Overview.jsx";
+import TimeRangeControl, { useTimeRange } from "../components/TimeRangeControl.jsx";
 import { api, fmtNumber, fmtTime } from "../api.js";
 
-const RANGES = [
-  { label: "1h", hours: 1 },
-  { label: "6h", hours: 6 },
-  { label: "24h", hours: 24 },
+const QUICK_PICKS = [
+  { label: "1h", amount: 1, unit: "hours" },
+  { label: "6h", amount: 6, unit: "hours" },
+  { label: "24h", amount: 24, unit: "hours" },
 ];
 
 export default function Routing() {
-  const [range, setRange] = useState(RANGES[2]);
+  const range = useTimeRange({ defaultAmount: 24, defaultUnit: "hours" });
+  const { hours } = range;
   const [data, setData] = useState(null);
   const [loading, setLoading] = useState(true);
   const [updatedAt, setUpdatedAt] = useState(null);
@@ -32,7 +34,7 @@ export default function Routing() {
   const load = useCallback(async () => {
     setLoading(true);
     try {
-      const d = await api.routing(range.hours);
+      const d = await api.routing(hours);
       setData(d);
       setUpdatedAt(new Date());
       setError(null);
@@ -41,7 +43,7 @@ export default function Routing() {
     } finally {
       setLoading(false);
     }
-  }, [range]);
+  }, [hours]);
 
   useEffect(() => {
     load();
@@ -72,21 +74,7 @@ export default function Routing() {
   return (
     <div className="p-6">
       <Header title="Routing Decisions" updatedAt={updatedAt} error={error} onRefresh={load}>
-        <div className="flex gap-1 rounded-md border border-border bg-card p-0.5">
-          {RANGES.map((r) => (
-            <button
-              key={r.label}
-              onClick={() => setRange(r)}
-              className={`rounded px-3 py-1 text-xs font-medium transition-colors ${
-                r.label === range.label
-                  ? "bg-accent text-white"
-                  : "text-gray-400 hover:text-white"
-              }`}
-            >
-              {r.label}
-            </button>
-          ))}
-        </div>
+        <TimeRangeControl range={range} quickPicks={QUICK_PICKS} />
       </Header>
 
       {!data?.available && !loading && (
