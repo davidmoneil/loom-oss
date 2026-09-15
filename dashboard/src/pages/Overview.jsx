@@ -5,6 +5,10 @@ import {
   PieChart,
   Pie,
   Cell,
+  LineChart,
+  Line,
+  BarChart,
+  Bar,
   XAxis,
   YAxis,
   CartesianGrid,
@@ -95,6 +99,21 @@ export default function Overview() {
   const byModel = Object.entries(series?.by_model || {}).map(([name, v]) => ({
     name,
     value: v.requests,
+  }));
+  const tokenFlow = (series?.buckets || []).map((b) => ({
+    label: fmtBucketLabel(b.ts, bucketSeconds),
+    requested: b.tokens_in,
+    // tokens_compressed is post-compression size — "what actually got
+    // sent" — not literally b.tokens_in - saved, since it also covers
+    // requests compression skipped (see the backend comment on
+    // get_metrics_timeseries for why that's still a fair comparison).
+    compressed: b.tokens_compressed,
+    out: b.tokens_out,
+  }));
+  const cacheByModel = Object.entries(series?.by_model || {}).map(([name, v]) => ({
+    name,
+    cached: v.cache_hit_requests || 0,
+    uncached: v.cache_miss_requests || 0,
   }));
 
   return (
@@ -240,6 +259,64 @@ export default function Overview() {
             <Tooltip {...tooltipStyle} />
             <Legend wrapperStyle={{ fontSize: 12, color: "#9ca3af" }} />
           </PieChart>
+        </Chart>
+      </div>
+
+      <div className="mt-6 grid grid-cols-1 gap-4 lg:grid-cols-3">
+        <div className="lg:col-span-2">
+          <Chart
+            title={`Token flow (${rangeLabel})`}
+            loading={loading}
+            empty={tokenFlow.length === 0}
+          >
+            <LineChart data={tokenFlow}>
+              <CartesianGrid strokeDasharray="3 3" stroke="#374151" />
+              <XAxis dataKey="label" {...axisProps} />
+              <YAxis allowDecimals={false} {...axisProps} />
+              <Tooltip {...tooltipStyle} />
+              <Legend wrapperStyle={{ fontSize: 12, color: "#9ca3af" }} />
+              <Line
+                type="monotone"
+                dataKey="requested"
+                name="Requested"
+                stroke="#3b82f6"
+                strokeWidth={2}
+                dot={false}
+              />
+              <Line
+                type="monotone"
+                dataKey="compressed"
+                name="Compressed"
+                stroke="#22c55e"
+                strokeWidth={2}
+                dot={false}
+              />
+              <Line
+                type="monotone"
+                dataKey="out"
+                name="Out"
+                stroke="#f59e0b"
+                strokeWidth={2}
+                dot={false}
+              />
+            </LineChart>
+          </Chart>
+        </div>
+
+        <Chart
+          title="Cache hits by model"
+          loading={loading}
+          empty={cacheByModel.length === 0}
+        >
+          <BarChart data={cacheByModel}>
+            <CartesianGrid strokeDasharray="3 3" stroke="#374151" />
+            <XAxis dataKey="name" {...axisProps} />
+            <YAxis allowDecimals={false} {...axisProps} />
+            <Tooltip {...tooltipStyle} />
+            <Legend wrapperStyle={{ fontSize: 12, color: "#9ca3af" }} />
+            <Bar dataKey="cached" name="Cached" stackId="cache" fill="#22c55e" />
+            <Bar dataKey="uncached" name="Not cached" stackId="cache" fill="#6b7280" />
+          </BarChart>
         </Chart>
       </div>
 

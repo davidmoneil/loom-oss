@@ -72,6 +72,41 @@ def test_metrics_timeseries_shape(storage):
     assert isinstance(series, dict)
 
 
+def test_metrics_timeseries_cache_and_compression_fields(storage):
+    """by_model cache-hit/miss counts and per-bucket tokens_compressed,
+    added for the Overview dashboard's token-flow and cache-hit-by-model
+    charts, aggregate correctly across a mix of hit/miss requests."""
+    rid_hit = f"req-{uuid.uuid4().hex[:12]}"
+    _record_request(
+        storage,
+        rid_hit,
+        model="sonnet",
+        cache_read_tokens=500,
+        cache_creation_tokens=0,
+        tokens_after=80,
+    )
+    rid_miss = f"req-{uuid.uuid4().hex[:12]}"
+    _record_request(
+        storage,
+        rid_miss,
+        model="sonnet",
+        cache_read_tokens=0,
+        cache_creation_tokens=200,
+        tokens_after=90,
+    )
+
+    series = storage.get_metrics_timeseries(hours=1, bucket_seconds=3600)
+
+    by_model = series["by_model"]["sonnet"]
+    assert by_model["cache_hit_requests"] == 1
+    assert by_model["cache_miss_requests"] == 1
+    assert by_model["cache_read_tokens"] == 500
+    assert by_model["cache_creation_tokens"] == 200
+
+    assert len(series["buckets"]) >= 1
+    assert sum(b["tokens_compressed"] for b in series["buckets"]) == 170
+
+
 def test_compression_cache_roundtrip(storage):
     chash = f"hash-{uuid.uuid4().hex[:12]}"
     storage.put_compression_cached(
