@@ -863,7 +863,8 @@ class PostgresStorage:
                 COALESCE(SUM(tokens_in), 0) AS tokens_in,
                 COALESCE(SUM(tokens_out), 0) AS tokens_out,
                 COALESCE(SUM(cost_estimate), 0.0) AS cost,
-                COALESCE(AVG(latency_ms), 0.0) AS avg_latency_ms
+                COALESCE(AVG(latency_ms), 0.0) AS avg_latency_ms,
+                COALESCE(SUM(tokens_after), 0) AS tokens_compressed
             FROM metrics
             WHERE timestamp >= %s
             GROUP BY bucket
@@ -879,6 +880,10 @@ class PostgresStorage:
                 "tokens_out": r[3],
                 "cost": round(r[4], 6),
                 "avg_latency_ms": round(r[5], 2),
+                # Post-compression size — see the matching comment in
+                # sqlite.py's get_metrics_timeseries for what this means
+                # for requests compression skipped.
+                "tokens_compressed": r[6],
             }
             for r in bucket_rows
         ]
@@ -889,7 +894,13 @@ class PostgresStorage:
                    COUNT(*) AS requests,
                    COALESCE(SUM(tokens_in), 0) AS tokens_in,
                    COALESCE(SUM(tokens_out), 0) AS tokens_out,
-                   COALESCE(SUM(cost_estimate), 0.0) AS cost
+                   COALESCE(SUM(cost_estimate), 0.0) AS cost,
+                   COALESCE(SUM(CASE WHEN cache_read_tokens > 0 THEN 1 ELSE 0 END), 0)
+                       AS cache_hit_requests,
+                   COALESCE(SUM(CASE WHEN cache_read_tokens > 0 THEN 0 ELSE 1 END), 0)
+                       AS cache_miss_requests,
+                   COALESCE(SUM(cache_read_tokens), 0) AS cache_read_tokens,
+                   COALESCE(SUM(cache_creation_tokens), 0) AS cache_creation_tokens
             FROM metrics
             WHERE timestamp >= %s
             GROUP BY model
@@ -903,6 +914,10 @@ class PostgresStorage:
                 "tokens_in": r[2],
                 "tokens_out": r[3],
                 "cost": round(r[4], 6),
+                "cache_hit_requests": r[5],
+                "cache_miss_requests": r[6],
+                "cache_read_tokens": r[7],
+                "cache_creation_tokens": r[8],
             }
             for r in model_rows
         }

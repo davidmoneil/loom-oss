@@ -895,7 +895,8 @@ class LoomStorage:
                 COALESCE(SUM(tokens_in), 0) AS tokens_in,
                 COALESCE(SUM(tokens_out), 0) AS tokens_out,
                 COALESCE(SUM(cost_estimate), 0.0) AS cost,
-                COALESCE(AVG(latency_ms), 0.0) AS avg_latency_ms
+                COALESCE(AVG(latency_ms), 0.0) AS avg_latency_ms,
+                COALESCE(SUM(tokens_after), 0) AS tokens_compressed
             FROM metrics
             WHERE timestamp >= ?
             GROUP BY bucket
@@ -911,6 +912,12 @@ class LoomStorage:
                 "tokens_out": r["tokens_out"],
                 "cost": round(r["cost"], 6),
                 "avg_latency_ms": round(r["avg_latency_ms"], 2),
+                # Post-compression size — only meaningful where compression
+                # ran; for requests it skipped, tokens_after mirrors
+                # tokens_in at write time (see _compress_content_blocks),
+                # so this stays a fair "what actually got sent" line even
+                # in windows with a mix of compressed/uncompressed traffic.
+                "tokens_compressed": r["tokens_compressed"],
             }
             for r in bucket_rows
         ]
@@ -921,7 +928,13 @@ class LoomStorage:
                    COUNT(*) AS requests,
                    COALESCE(SUM(tokens_in), 0) AS tokens_in,
                    COALESCE(SUM(tokens_out), 0) AS tokens_out,
-                   COALESCE(SUM(cost_estimate), 0.0) AS cost
+                   COALESCE(SUM(cost_estimate), 0.0) AS cost,
+                   COALESCE(SUM(CASE WHEN cache_read_tokens > 0 THEN 1 ELSE 0 END), 0)
+                       AS cache_hit_requests,
+                   COALESCE(SUM(CASE WHEN cache_read_tokens > 0 THEN 0 ELSE 1 END), 0)
+                       AS cache_miss_requests,
+                   COALESCE(SUM(cache_read_tokens), 0) AS cache_read_tokens,
+                   COALESCE(SUM(cache_creation_tokens), 0) AS cache_creation_tokens
             FROM metrics
             WHERE timestamp >= ?
             GROUP BY model
@@ -935,6 +948,13 @@ class LoomStorage:
                 "tokens_in": r["tokens_in"],
                 "tokens_out": r["tokens_out"],
                 "cost": round(r["cost"], 6),
+                # A "hit" is a request whose prompt included any cache_read
+                # tokens (Anthropic prompt caching) — populated per request
+                # via _extract_tokens(usage) in gateway/app.py.
+                "cache_hit_requests": r["cache_hit_requests"],
+                "cache_miss_requests": r["cache_miss_requests"],
+                "cache_read_tokens": r["cache_read_tokens"],
+                "cache_creation_tokens": r["cache_creation_tokens"],
             }
             for r in model_rows
         }
