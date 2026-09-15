@@ -10,6 +10,14 @@ The homelab deployment is `main` + two overlay files — no separate branch.
 
 ## Deploy / update
 
+**Always pass `-f docker-compose.homelab.yml` explicitly.** This repo also
+has a plain `docker-compose.yml` (bundled SQLite/local-Postgres, no external
+network) for the public/`setup.sh` path. Running bare `docker compose build`
+or `docker compose up -d` with no `-f` flag silently targets that file
+instead — it builds and starts happily, reports "healthy", but the container
+never joins `n8n_n8n-network` and can't reach `postgres-unified` at all. See
+the 2026-09-15 incident below for what that looks like from the outside.
+
 ```bash
 cd ~/Code/loom-oss
 cp .env.homelab.example .env.homelab   # first time only — fill in the DSN
@@ -46,6 +54,36 @@ file — no networking or Compose config — so the PR was not the cause. The
 verification step above (added as the permanent fix) catches this class of
 failure immediately after any rebuild instead of relying on a live auth
 failure to surface it.
+
+### Incident: 2026-09-15 rebuilt with the wrong compose file → "lost" gateway keys
+
+After merging PR #95 (dashboard time-range filter UI, no backend/infra
+changes), a rebuild was done with plain `docker compose build loom` /
+`docker compose up -d loom` — no `-f docker-compose.homelab.yml` — to pick up
+the new dashboard bundle. That command is valid, targets the *other*,
+default `docker-compose.yml`, and completed without error: image built,
+container recreated, health check green.
+
+But the default file has no `n8n_n8n-network` entry at all, so the recreated
+container landed on `loom-oss_default` only, with zero route to
+`postgres-unified`. Symptoms looked like data loss: the dashboard's Settings
+page showed no gateway keys on both the LAN IP and the public domain, and
+`GET config/gateway-keys` returned 503. Nothing was actually deleted —
+Postgres was simply unreachable, same failure family as the 2026-09-07
+incident, but caused by the wrong compose file rather than a flaky reattach
+of the right one.
+
+Fix: `docker compose -f docker-compose.homelab.yml up -d --build`, then the
+network-verification step above confirmed both `loom-oss_default` and
+`n8n_n8n-network` were attached. Health check came back with
+`auth_enabled: true` and the real session/metrics history, confirming the
+gateway was reading the live `loom` database again.
+
+Takeaway: rebuilding *this* deployment for *any* reason — including a
+frontend-only change — always means the homelab overlay, never the bare
+`docker compose` command. The plain `docker-compose.yml` only exists for the
+public bundled-Postgres/`setup.sh` path (see "Reproducing on a new machine"
+below) and should not be invoked against this host at all.
 
 ## Reproducing on a new machine
 
