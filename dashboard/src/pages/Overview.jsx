@@ -13,13 +13,16 @@ import {
 } from "recharts";
 import StatCard from "../components/StatCard.jsx";
 import Chart, { CHART_COLORS, axisProps, tooltipStyle } from "../components/Chart.jsx";
-import { api, fmtNumber, fmtCost, fmtLatency, fmtTimeShort } from "../api.js";
+import { api, fmtNumber, fmtCost, fmtLatency, fmtBucketLabel } from "../api.js";
 
 const REFRESH_MS = 30000;
+// bucketSeconds must match the server's _BUCKET_SIZES (gateway/app.py) for
+// the corresponding `bucket` string, so chart labels agree with what the
+// API actually aggregated.
 const RANGES = [
-  { label: "24h", hours: 24, bucket: "1h" },
-  { label: "7d", hours: 168, bucket: "6h" },
-  { label: "30d", hours: 720, bucket: "1d" },
+  { label: "24h", hours: 24, bucket: "1h", bucketSeconds: 3600 },
+  { label: "7d", hours: 168, bucket: "6h", bucketSeconds: 21600 },
+  { label: "30d", hours: 720, bucket: "1d", bucketSeconds: 86400 },
 ];
 
 export default function Overview() {
@@ -66,7 +69,7 @@ export default function Overview() {
 
   const m = metrics || {};
   const volume = (series?.buckets || []).map((b) => ({
-    label: fmtTimeShort(b.ts),
+    label: fmtBucketLabel(b.ts, range.bucketSeconds),
     requests: b.requests,
   }));
   const byModel = Object.entries(series?.by_model || {}).map(([name, v]) => ({

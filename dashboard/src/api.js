@@ -202,3 +202,17 @@ export function fmtDateShort(epochSeconds) {
     });
   }
 }
+
+// Chart axis labels for a timeseries bucket. Bucket granularity decides how
+// much of the timestamp is worth showing: a 1-day bucket has one point per
+// day (date only, time is meaningless); a 1-hour bucket only ever spans a
+// single day in practice (time only); anything wider — e.g. the 6h buckets
+// used for a 7-day range — needs both, since ticks land on different days.
+export function fmtBucketLabel(epochSeconds, bucketSeconds) {
+  if (!epochSeconds) return "—";
+  const ONE_HOUR = 3600;
+  const ONE_DAY = 86400;
+  if (bucketSeconds >= ONE_DAY) return fmtDateShort(epochSeconds);
+  if (bucketSeconds <= ONE_HOUR) return fmtTimeShort(epochSeconds);
+  return `${fmtDateShort(epochSeconds)} ${fmtTimeShort(epochSeconds)}`;
+}
