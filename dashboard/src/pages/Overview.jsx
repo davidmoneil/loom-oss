@@ -18,15 +18,22 @@ import { api, fmtNumber, fmtCost, fmtLatency, fmtBucketLabel } from "../api.js";
 const REFRESH_MS = 30000;
 // bucketSeconds must match the server's _BUCKET_SIZES (gateway/app.py) for
 // the corresponding `bucket` string, so chart labels agree with what the
-// API actually aggregated.
+// API actually aggregated. Bucket choice targets roughly 15-70 points per
+// chart: fine enough to see shape, coarse enough not to be a wall of ticks.
 const RANGES = [
-  { label: "24h", hours: 24, bucket: "1h", bucketSeconds: 3600 },
-  { label: "7d", hours: 168, bucket: "6h", bucketSeconds: 21600 },
-  { label: "30d", hours: 720, bucket: "1d", bucketSeconds: 86400 },
+  { label: "1h", fullLabel: "Last 1 hour", hours: 1, bucket: "5m", bucketSeconds: 300 },
+  { label: "24h", fullLabel: "Last 24 hours", hours: 24, bucket: "1h", bucketSeconds: 3600 },
+  { label: "3d", fullLabel: "Last 3 days", hours: 72, bucket: "1h", bucketSeconds: 3600 },
+  { label: "7d", fullLabel: "Last 7 days", hours: 168, bucket: "6h", bucketSeconds: 21600 },
+  { label: "14d", fullLabel: "Last 14 days", hours: 336, bucket: "6h", bucketSeconds: 21600 },
+  { label: "30d", fullLabel: "Last 30 days", hours: 720, bucket: "1d", bucketSeconds: 86400 },
+  { label: "90d", fullLabel: "Last 90 days", hours: 2160, bucket: "1d", bucketSeconds: 86400 },
 ];
 
+const DEFAULT_RANGE = RANGES.find((r) => r.label === "24h") || RANGES[0];
+
 export default function Overview() {
-  const [range, setRange] = useState(RANGES[0]);
+  const [range, setRange] = useState(DEFAULT_RANGE);
   const [metrics, setMetrics] = useState(null);
   const [series, setSeries] = useState(null);
   const [health, setHealth] = useState(null);
@@ -85,21 +92,21 @@ export default function Overview() {
         error={error}
         onRefresh={load}
       >
-        <div className="flex overflow-hidden rounded-md border border-border">
+        <select
+          aria-label="Time range"
+          value={range.label}
+          onChange={(e) => {
+            const next = RANGES.find((r) => r.label === e.target.value);
+            if (next) setRange(next);
+          }}
+          className="rounded-md border border-border bg-card px-3 py-1.5 text-sm text-gray-300 hover:bg-gray-700/50 focus:outline-none focus:ring-1 focus:ring-accent"
+        >
           {RANGES.map((r) => (
-            <button
-              key={r.label}
-              onClick={() => setRange(r)}
-              className={`px-3 py-1.5 text-sm ${
-                r.label === range.label
-                  ? "bg-accent text-white"
-                  : "bg-card text-gray-400 hover:bg-gray-700/50"
-              }`}
-            >
-              {r.label}
-            </button>
+            <option key={r.label} value={r.label}>
+              {r.fullLabel}
+            </option>
           ))}
-        </div>
+        </select>
       </Header>
 
       <div className="mt-6 grid grid-cols-2 gap-4 lg:grid-cols-4">
