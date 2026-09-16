@@ -61,6 +61,15 @@ The Pulse project's constraint field itself still needs a manual update
 writeup: `knowledge/projects/loom.md` (AIProjects repo) → "Routing Engine
 Placement — Resolved: Consolidate to loom-oss (2026-08-10)".
 
+**Split-by-concern note (2026-09-15)**: the 2026-08-10 decision above predates
+the context-engine/knowledge-engine consolidation and is superseded for the
+Neo4j ingestion item specifically. Routing, compression, and observability
+consolidate into loom-oss, as decided above. The knowledge engine — ingestion,
+graph storage, vector retrieval, and the metadata contract, including the
+Neo4j Ingestion & Relevance Engine referenced above — consolidates into
+context-engine instead. This is a split by concern, not a reversal of the
+routing consolidation.
+
 | Feature | Internal | OSS | Status | Notes |
 |---------|----------|-----|--------|-------|
 | EQRT algorithm | `determinism/routing.py` (809 LOC) | `routing/models.py` (496 LOC) + `routing/engine.py` (113 LOC) | **PORTED** | OSS version cleaner |
@@ -114,7 +123,7 @@ Placement — Resolved: Consolidate to loom-oss (2026-08-10)".
 | Postgres (pseudonym maps) | `scanner/pseudonymizer.py` | In-memory | **PORT-HOMELAB** | |
 | Postgres (encryption keys) | `scanner/crypto.py` | — | **PORT-HOMELAB** | |
 | Content importance table | Postgres loom_embeddings | SQLite content_importance | **PORTED** | Different approach, same signal |
-| Neo4j graph | `context/graph.py` (429 LOC) | — | **CUT** | Too heavy for OSS |
+| Neo4j graph | `context/graph.py` (429 LOC) | — | **OWNED BY context-engine** | Ingestion, graph, and retrieval consolidate into context-engine (2026-09-15) |
 
 ## 6. Observability
 
