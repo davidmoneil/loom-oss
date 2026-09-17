@@ -78,6 +78,16 @@ class ModelListResponse(ObservabilityResponse):
     models: list[dict[str, Any]] = []
 
 
+class RoutingTableResponse(ObservabilityResponse):
+    """Empirical routing table entries with EQRT scores, for dashboard inspection."""
+
+    available: bool = True
+    version: int | None = None
+    generated_at: str | None = None
+    generated_from: str | None = None
+    entries: list[dict[str, Any]] = []
+
+
 class MetricsResponse(ObservabilityResponse):
     """Point-in-time gateway metrics snapshot."""
 
