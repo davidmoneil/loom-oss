@@ -80,17 +80,19 @@ export default function Costs() {
       </Header>
 
       <div className="mt-6 grid grid-cols-2 gap-4 lg:grid-cols-4">
-        <StatCard label="Total Cost" value={fmtCost(totals.cost_usd)} loading={loading} />
-        <StatCard label="Requests" value={fmtNumber(totals.requests)} loading={loading} />
+        <StatCard label="Total Cost" value={fmtCost(totals.cost_usd)} loading={loading} infoKey="costs.totalCost" />
+        <StatCard label="Requests" value={fmtNumber(totals.requests)} loading={loading} infoKey="costs.requests" />
         <StatCard
           label="Tokens In"
           value={fmtNumber(totals.tokens_in)}
           loading={loading}
+          infoKey="costs.tokensIn"
         />
         <StatCard
           label="Tokens Out"
           value={fmtNumber(totals.tokens_out)}
           loading={loading}
+          infoKey="costs.tokensOut"
         />
       </div>
 
@@ -99,16 +101,18 @@ export default function Costs() {
           label="Tokens Saved"
           value={fmtNumber(totals.tokens_saved)}
           loading={loading}
+          infoKey="costs.tokensSaved"
         />
         <StatCard
           label="Savings"
           value={fmtCost(totals.savings_usd)}
           loading={loading}
+          infoKey="costs.savings"
         />
       </div>
 
       <div className="mt-6 grid grid-cols-1 gap-4 lg:grid-cols-2">
-        <Chart title="Cost by day" loading={loading} empty={byDay.length === 0}>
+        <Chart title="Cost by day" loading={loading} empty={byDay.length === 0} infoKey="costs.costByDay">
           <BarChart data={byDay}>
             <CartesianGrid strokeDasharray="3 3" stroke="#374151" />
             <XAxis dataKey="date" {...axisProps} />
@@ -121,7 +125,7 @@ export default function Costs() {
           </BarChart>
         </Chart>
 
-        <Chart title="Cost by model" loading={loading} empty={byModel.length === 0}>
+        <Chart title="Cost by model" loading={loading} empty={byModel.length === 0} infoKey="costs.costByModel">
           <BarChart data={byModel} layout="vertical">
             <CartesianGrid strokeDasharray="3 3" stroke="#374151" />
             <XAxis type="number" {...axisProps} />
@@ -140,6 +144,7 @@ export default function Costs() {
           title="Daily request volume"
           loading={loading}
           empty={byDay.length === 0}
+          infoKey="costs.dailyRequestVolume"
         >
           <AreaChart data={byDay}>
             <CartesianGrid strokeDasharray="3 3" stroke="#374151" />
@@ -161,6 +166,7 @@ export default function Costs() {
           title="Distribution by source"
           loading={loading}
           empty={bySource.length === 0}
+          infoKey="costs.distributionBySource"
         >
           <PieChart>
             <Pie

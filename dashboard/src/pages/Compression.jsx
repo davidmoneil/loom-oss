@@ -12,6 +12,8 @@ import {
 } from "recharts";
 import StatCard from "../components/StatCard.jsx";
 import Chart, { CHART_COLORS, axisProps, tooltipStyle } from "../components/Chart.jsx";
+import WidgetInfo from "../components/WidgetInfo.jsx";
+import { WIDGET_DESCRIPTIONS } from "../widgetDescriptions.js";
 import { Header } from "./Overview.jsx";
 import TimeRangeControl, { useTimeRange } from "../components/TimeRangeControl.jsx";
 import { api, fmtNumber, fmtCost } from "../api.js";
@@ -93,11 +95,13 @@ export default function Compression() {
           label="Tokens Saved"
           value={fmtNumber(totals.tokens_saved)}
           loading={loading}
+          infoKey="compression.tokensSaved"
         />
         <StatCard
           label="Est. Savings"
           value={fmtCost(totals.est_savings_usd)}
           loading={loading}
+          infoKey="compression.estSavings"
         />
         <StatCard
           label="Mean Savings"
@@ -110,6 +114,7 @@ export default function Compression() {
               : undefined
           }
           loading={loading}
+          infoKey="compression.meanSavings"
         />
         <StatCard
           label="Requests Compressed"
@@ -120,6 +125,7 @@ export default function Compression() {
               : undefined
           }
           loading={loading}
+          infoKey="compression.requestsCompressed"
         />
       </div>
 
@@ -128,6 +134,7 @@ export default function Compression() {
           title="Tokens saved by day"
           loading={loading}
           empty={byDay.length === 0}
+          infoKey="compression.tokensSavedByDay"
         >
           <AreaChart data={byDay}>
             <CartesianGrid strokeDasharray="3 3" stroke="#374151" />
@@ -149,6 +156,7 @@ export default function Compression() {
           title="Savings distribution (per request)"
           loading={loading}
           empty={!hasHistogram}
+          infoKey="compression.savingsDistribution"
         >
           <BarChart data={histogram}>
             <CartesianGrid strokeDasharray="3 3" stroke="#374151" />
@@ -166,6 +174,7 @@ export default function Compression() {
           title="Tokens saved by model"
           loading={loading}
           empty={byModel.length === 0}
+          infoKey="compression.tokensSavedByModel"
         >
           <BarChart data={byModel} layout="vertical">
             <CartesianGrid strokeDasharray="3 3" stroke="#374151" />
@@ -185,6 +194,7 @@ export default function Compression() {
           title="Compressed vs total requests"
           loading={loading}
           empty={byDay.length === 0}
+          infoKey="compression.compressedVsTotal"
         >
           <BarChart data={byDay}>
             <CartesianGrid strokeDasharray="3 3" stroke="#374151" />
@@ -204,22 +214,27 @@ export default function Compression() {
           rows={byTier}
           labelKey="tier"
           loading={loading}
+          infoKey="compression.byTier"
         />
         <BreakdownTable
           title="By source"
           rows={bySource}
           labelKey="source"
           loading={loading}
+          infoKey="compression.bySource"
         />
       </div>
     </div>
   );
 }
 
-function BreakdownTable({ title, rows, labelKey, loading }) {
+function BreakdownTable({ title, rows, labelKey, loading, infoKey }) {
   return (
     <div className="rounded-lg border border-border bg-card p-4">
-      <h3 className="mb-3 text-sm font-semibold text-gray-200">{title}</h3>
+      <h3 className="mb-3 flex items-center gap-1.5 text-sm font-semibold text-gray-200">
+        {title}
+        <WidgetInfo text={WIDGET_DESCRIPTIONS[infoKey]} />
+      </h3>
       {loading ? (
         <div className="skeleton" style={{ height: 120 }} />
       ) : rows.length === 0 ? (

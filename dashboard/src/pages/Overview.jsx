@@ -17,6 +17,8 @@ import {
 } from "recharts";
 import StatCard from "../components/StatCard.jsx";
 import Chart, { CHART_COLORS, axisProps, tooltipStyle } from "../components/Chart.jsx";
+import WidgetInfo from "../components/WidgetInfo.jsx";
+import { WIDGET_DESCRIPTIONS } from "../widgetDescriptions.js";
 import TimeRangeControl, { useTimeRange } from "../components/TimeRangeControl.jsx";
 import { api, fmtNumber, fmtCost, fmtLatency, fmtBucketLabel, pickBucket } from "../api.js";
 
@@ -117,21 +119,25 @@ export default function Overview() {
           label={`Requests (${rangeLabel})`}
           value={fmtNumber(m.request_count)}
           loading={loading}
+          infoKey="overview.requests"
         />
         <StatCard
           label="Avg Latency"
           value={fmtLatency(m.avg_latency_ms)}
           loading={loading}
+          infoKey="overview.avgLatency"
         />
         <StatCard
           label="Cost Today"
           value={fmtCost(m.total_cost)}
           loading={loading}
+          infoKey="overview.costToday"
         />
         <StatCard
           label="Tokens In / Out"
           value={`${fmtNumber(m.tokens_in)} / ${fmtNumber(m.tokens_out)}`}
           loading={loading}
+          infoKey="overview.tokensInOut"
         />
       </div>
 
@@ -141,11 +147,13 @@ export default function Overview() {
             label={`Active Sessions (${rangeLabel})`}
             value={fmtNumber(sessions.sessions)}
             loading={loading}
+            infoKey="overview.activeSessions"
           />
           <StatCard
             label={`Total Turns (${rangeLabel})`}
             value={fmtNumber(sessions.total_turns)}
             loading={loading}
+            infoKey="overview.totalTurns"
           />
         </div>
       )}
@@ -156,6 +164,7 @@ export default function Overview() {
             title={`Request volume (${rangeLabel})`}
             loading={loading}
             empty={volume.length === 0}
+            infoKey="overview.requestVolume"
           >
             <AreaChart data={volume}>
               <defs>
@@ -183,6 +192,7 @@ export default function Overview() {
           title="Model distribution"
           loading={loading}
           empty={byModel.length === 0}
+          infoKey="overview.modelDistribution"
         >
           <PieChart>
             <Pie
@@ -211,14 +221,23 @@ export default function Overview() {
             title={`Token flow (${rangeLabel})`}
             loading={loading}
             empty={tokenFlow.length === 0}
+            infoKey="overview.tokenFlow"
           >
             <LineChart data={tokenFlow}>
               <CartesianGrid strokeDasharray="3 3" stroke="#374151" />
               <XAxis dataKey="label" {...axisProps} />
-              <YAxis allowDecimals={false} {...axisProps} />
+              <YAxis yAxisId="left" allowDecimals={false} {...axisProps} />
+              <YAxis
+                yAxisId="right"
+                orientation="right"
+                allowDecimals={false}
+                stroke="#f59e0b"
+                tick={{ fill: "#f59e0b", fontSize: 12 }}
+              />
               <Tooltip {...tooltipStyle} />
               <Legend wrapperStyle={{ fontSize: 12, color: "#9ca3af" }} />
               <Line
+                yAxisId="left"
                 type="monotone"
                 dataKey="requested"
                 name="Requested"
@@ -227,6 +246,7 @@ export default function Overview() {
                 dot={false}
               />
               <Line
+                yAxisId="left"
                 type="monotone"
                 dataKey="compressed"
                 name="Compressed"
@@ -235,6 +255,7 @@ export default function Overview() {
                 dot={false}
               />
               <Line
+                yAxisId="right"
                 type="monotone"
                 dataKey="out"
                 name="Out"
@@ -250,6 +271,7 @@ export default function Overview() {
           title="Cache hits by model"
           loading={loading}
           empty={cacheByModel.length === 0}
+          infoKey="overview.cacheHitsByModel"
         >
           <BarChart data={cacheByModel}>
             <CartesianGrid strokeDasharray="3 3" stroke="#374151" />
@@ -297,7 +319,10 @@ function CompressionPanel({ compression, stats, rangeLabel, loading }) {
   if (loading) {
     return (
       <div className="mt-6 rounded-lg border border-border bg-card p-4">
-        <h3 className="mb-3 text-sm font-semibold text-gray-200">Compression</h3>
+        <h3 className="mb-3 flex items-center gap-1.5 text-sm font-semibold text-gray-200">
+          Compression
+          <WidgetInfo text={WIDGET_DESCRIPTIONS["overview.compression"]} />
+        </h3>
         <div className="skeleton h-24 w-full" />
       </div>
     );
@@ -318,8 +343,9 @@ function CompressionPanel({ compression, stats, rangeLabel, loading }) {
   return (
     <div className="mt-6 rounded-lg border border-border bg-card p-4">
       <div className="mb-3 flex flex-wrap items-center justify-between gap-2">
-        <h3 className="text-sm font-semibold text-gray-200">
+        <h3 className="flex items-center gap-1.5 text-sm font-semibold text-gray-200">
           Compression{rangeLabel ? ` (${rangeLabel})` : ""}
+          <WidgetInfo text={WIDGET_DESCRIPTIONS["overview.compression"]} />
         </h3>
         {compression && (
           <div className="flex items-center gap-2">
@@ -391,7 +417,10 @@ function ProviderHealth({ health, loading }) {
   const providers = health?.providers || [];
   return (
     <div className="mt-6 rounded-lg border border-border bg-card p-4">
-      <h3 className="mb-3 text-sm font-semibold text-gray-200">Provider health</h3>
+      <h3 className="mb-3 flex items-center gap-1.5 text-sm font-semibold text-gray-200">
+        Provider health
+        <WidgetInfo text={WIDGET_DESCRIPTIONS["overview.providerHealth"]} />
+      </h3>
       {loading ? (
         <div className="skeleton h-10 w-full" />
       ) : providers.length === 0 ? (

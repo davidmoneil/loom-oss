@@ -9,6 +9,8 @@ import {
 } from "recharts";
 import StatCard from "../components/StatCard.jsx";
 import Chart, { axisProps, tooltipStyle } from "../components/Chart.jsx";
+import WidgetInfo from "../components/WidgetInfo.jsx";
+import { WIDGET_DESCRIPTIONS } from "../widgetDescriptions.js";
 import { Header } from "./Overview.jsx";
 import TimeRangeControl, { useTimeRange } from "../components/TimeRangeControl.jsx";
 import { api, fmtTime, fmtTimeShort, fmtDateShort } from "../api.js";
@@ -110,28 +112,35 @@ export default function RateLimits() {
               label="Current Status"
               value={current.unified_status ?? "—"}
               loading={loading}
+              infoKey="rateLimits.currentStatus"
             />
             <StatCard
               label="Retry After"
               value={current.retry_after ? `${current.retry_after}s` : "None"}
               loading={loading}
+              infoKey="rateLimits.retryAfter"
             />
             <StatCard
               label="Model"
               value={current.model ?? "—"}
               sub={current.source}
               loading={loading}
+              infoKey="rateLimits.model"
             />
             <StatCard
               label="Last Seen"
               value={fmtTime(current.timestamp)}
               loading={loading}
+              infoKey="rateLimits.lastSeen"
             />
           </div>
 
           <div className="mt-6 grid grid-cols-1 gap-4 lg:grid-cols-2">
             <div className="rounded-lg border border-border bg-card p-4">
-              <h3 className="mb-4 text-sm font-semibold text-gray-200">Current Utilization</h3>
+              <h3 className="mb-4 flex items-center gap-1.5 text-sm font-semibold text-gray-200">
+              Current Utilization
+              <WidgetInfo text={WIDGET_DESCRIPTIONS["rateLimits.currentUtilization"]} />
+            </h3>
               <div className="space-y-3">
                 {pctBar(current.util_5h, "5-hour window")}
                 {pctBar(current.util_7d, "7-day window", "#10b981")}
@@ -145,7 +154,10 @@ export default function RateLimits() {
             </div>
 
             <div className="rounded-lg border border-border bg-card p-4">
-              <h3 className="mb-4 text-sm font-semibold text-gray-200">Per-Model Utilization</h3>
+              <h3 className="mb-4 flex items-center gap-1.5 text-sm font-semibold text-gray-200">
+              Per-Model Utilization
+              <WidgetInfo text={WIDGET_DESCRIPTIONS["rateLimits.perModelUtilization"]} />
+            </h3>
               {current.model_util_7d != null ? (
                 <div className="space-y-3">
                   {pctBar(current.model_util_7d, current.model_name_7d || current.model, "#8b5cf6")}
@@ -163,7 +175,7 @@ export default function RateLimits() {
       )}
 
       <div className="mt-6">
-        <Chart title={`Utilization trend (${rangeLabel})`} loading={loading} empty={trend.length === 0}>
+        <Chart title={`Utilization trend (${rangeLabel})`} loading={loading} empty={trend.length === 0} infoKey="rateLimits.utilizationTrend">
           <AreaChart data={trend}>
             <defs>
               <linearGradient id="rl5h" x1="0" y1="0" x2="0" y2="1">

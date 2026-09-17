@@ -13,6 +13,8 @@ import {
 } from "recharts";
 import StatCard from "../components/StatCard.jsx";
 import Chart, { CHART_COLORS, axisProps, tooltipStyle } from "../components/Chart.jsx";
+import WidgetInfo from "../components/WidgetInfo.jsx";
+import { WIDGET_DESCRIPTIONS } from "../widgetDescriptions.js";
 import { Header } from "./Overview.jsx";
 import TimeRangeControl, { useTimeRange } from "../components/TimeRangeControl.jsx";
 import { api, fmtNumber, fmtTime } from "../api.js";
@@ -86,14 +88,14 @@ export default function Routing() {
       {data?.available && (
         <>
           <div className="mt-6 grid grid-cols-2 gap-4 lg:grid-cols-4">
-            <StatCard label="Total Decisions" value={fmtNumber(data.total)} loading={loading} />
-            <StatCard label="Unique Models" value={fmtNumber(modelCounts.length)} loading={loading} />
-            <StatCard label="Overrides" value={fmtNumber(data.overrides)} sub={`${overridePct}% of decisions`} loading={loading} />
-            <StatCard label="Routing Reasons" value={fmtNumber(reasonData.length)} loading={loading} />
+            <StatCard label="Total Decisions" value={fmtNumber(data.total)} loading={loading} infoKey="routing.totalDecisions" />
+            <StatCard label="Unique Models" value={fmtNumber(modelCounts.length)} loading={loading} infoKey="routing.uniqueModels" />
+            <StatCard label="Overrides" value={fmtNumber(data.overrides)} sub={`${overridePct}% of decisions`} loading={loading} infoKey="routing.overrides" />
+            <StatCard label="Routing Reasons" value={fmtNumber(reasonData.length)} loading={loading} infoKey="routing.routingReasons" />
           </div>
 
           <div className="mt-6 grid grid-cols-1 gap-4 lg:grid-cols-2">
-            <Chart title="Decisions by model" loading={loading} empty={modelCounts.length === 0}>
+            <Chart title="Decisions by model" loading={loading} empty={modelCounts.length === 0} infoKey="routing.decisionsByModel">
               <PieChart>
                 <Pie
                   data={modelCounts}
@@ -114,7 +116,7 @@ export default function Routing() {
               </PieChart>
             </Chart>
 
-            <Chart title="Routing reasons" loading={loading} empty={reasonData.length === 0}>
+            <Chart title="Routing reasons" loading={loading} empty={reasonData.length === 0} infoKey="routing.routingReasonsChart">
               <BarChart data={reasonData} layout="vertical">
                 <CartesianGrid strokeDasharray="3 3" stroke="#374151" />
                 <XAxis type="number" {...axisProps} allowDecimals={false} />
@@ -126,7 +128,10 @@ export default function Routing() {
           </div>
 
           <div className="mt-6 rounded-lg border border-border bg-card p-4">
-            <h3 className="mb-3 text-sm font-semibold text-gray-200">Recent decisions</h3>
+            <h3 className="mb-3 flex items-center gap-1.5 text-sm font-semibold text-gray-200">
+              Recent decisions
+              <WidgetInfo text={WIDGET_DESCRIPTIONS["routing.recentDecisions"]} />
+            </h3>
             {loading ? (
               <div className="skeleton h-48 w-full" />
             ) : entries.length === 0 ? (
