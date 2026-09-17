@@ -91,7 +91,7 @@ routing consolidation.
 | Compression tags (loom:compressed) | `proxy/server.py` _strip_loom_tag/_add_loom_tag | `compression/tiers.py` + gateway | **PORTED** | Tags carry tier + pointer hash; recompression guard in gateway loop |
 | Tool-block compression (tool_result in place) | `proxy/server.py` _compress_content_block | `gateway/app.py` _compress_content_blocks | **PORTED** | PR #21: structure preserved, ModeB pre-pass, by_block_type metrics |
 | LLM prose compression (Ollama) | `context/content_processor.py:1515` | `compression/processor.py` _llm_compress_prose | **PORTED** | Opt-in (compression.llm_prose), extractive fallback, <think> stripping |
-| Variant store / original preservation | `context/graph.py` (Neo4j) | `compression/variants.py` | **PORTED** | PR #22: optional [neo4j] extra, NullVariantStore fallback |
+| Variant store / original preservation | `context/graph.py` (Neo4j) | `compression/variants.py` | **PORTED** | PR #22: optional [neo4j] extra, NullVariantStore fallback. Write/index path only — `get_original(content_hash)` is implemented on all three backends but has zero callers in `gateway/app.py`, and no HTTP route exposes it, so "pointer resolution" (docs/compression.md) isn't actually reachable yet. Also `variant_store` is unset (off) in the live `loom.homelab.yaml`. Confirmed 2026-09-17; see docs/compression.md for the retrieval-gap note and rough LOE. |
 | Postgres compression cache | `context/compression_cache.py` (124 LOC) | SQLite compression_cache table | **PORTED** | SQLite version in OSS |
 | Relevance scoring (embedding-based) | `proxy/server.py` _score_messages_by_relevance | `compression/relevance.py` (93 LOC) | **PORTED** | OSS uses SQLite content_importance |
 | T2 compressor | `context/t2_compressor.py` (258 LOC) | — | **CUT** | Research artifact |
@@ -176,6 +176,7 @@ routing consolidation.
 | Feature | Internal | OSS | Status | Notes |
 |---------|----------|-----|--------|-------|
 | Per-turn model routing | Not implemented | — | **DESIGN** | [Design doc](design/per-turn-routing.md) — route different turns within an interactive session to different models based on complexity. Infrastructure exists (per-request routing in gateway); needs data + policy before implementing. |
+| Plugin/hook extensibility for core functionality | Not implemented | — | **PROPOSED** (2026-09-17) | Objective: let David (or others) modify/extend core loom-oss behavior — candidate surfaces include routing (EQRT), compression strategy, the variant-store backend (§5, currently `age`/`neo4j`/null selected in code), and DLP scanning — via a plugin/hook mechanism instead of forking core code. No plugin/hook system exists in loom-oss today (checked `src/`, all docs, AIProjects debriefs — confirmed 2026-09-17). A specific design (extension points, hook types, registration model) was discussed with David previously but the details didn't survive session compaction and weren't found recorded anywhere; needs to be re-elicited from David before a design doc can be written. Tracked as Pulse task AIProjects-u52p. |
 
 ---
 

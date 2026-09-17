@@ -171,6 +171,28 @@ When unconfigured, unavailable, or the required driver isn't installed, the
 gateway transparently falls back to a no-op store and behaves exactly as
 without this feature — it's an enhancement, never a request-path dependency.
 
+### Current limitation: pointer resolution is unbuilt
+
+"Pointer resolution" above describes the intended capability, not a shipped
+one. `get_original(content_hash)` is implemented on all three backends
+(`NullVariantStore`, `AgeVariantStore`, `Neo4jVariantStore` in
+`compression/variants.py`) — the AGE version is a working Cypher query, not a
+stub — but it has no caller anywhere in `gateway/app.py`. Only the write path
+(`put_variant`, during compression) and `is_indexed_batch` (relevance
+scoring) are wired up. There is no HTTP route or tool that resolves a
+`loom:compressed` tag's hash back to original text, and `variant_store` is
+unset (off) in the live `loom.homelab.yaml` deployment, so today the feature
+is entirely disabled in production. (Confirmed 2026-09-17.)
+
+Rough LOE if this gets picked up (~1–2 days):
+- Enable `variant_store: age` against the shared AGE/Postgres instance —
+  watch the known non-superuser grant-chain gotcha on this backend.
+- Add a `GET /v1/variants/{hash}`-style endpoint calling `get_original()`.
+- Add a corresponding tool in homelab-mcp so an agent can resolve a tag
+  mid-session instead of losing the original content.
+- Update this doc and `docs/gap-analysis.md` once implemented; end-to-end
+  test (compress → tag → resolve → confirm original returned).
+
 ### Graph schema
 
 ```
