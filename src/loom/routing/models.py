@@ -44,6 +44,7 @@ class SourceProfile:
     allowed_providers: list[str] = field(default_factory=lambda: ["anthropic"])
     budget_tier: Optional[str] = None
     pinned_model: Optional[str] = None
+    eligible_models: list[str] = field(default_factory=list)
 
     @classmethod
     def from_policy(cls, name: str, policy) -> "SourceProfile":
@@ -56,6 +57,7 @@ class SourceProfile:
             ),
             budget_tier=getattr(policy, "budget_tier", None),
             pinned_model=getattr(policy, "pinned_model", None),
+            eligible_models=list(getattr(policy, "eligible_models", [])),
         )
 
 
@@ -379,6 +381,20 @@ class RoutingTable:
                 ]
                 if default_allowed:
                     filtered = default_allowed
+            if filtered:
+                candidates = filtered
+
+        # Gate 2b: Explicit eligible-models allow-list.
+        if profile.eligible_models:
+            eligible = set(profile.eligible_models)
+            filtered = [e for e in candidates if e.model in eligible]
+            if not filtered:
+                default_eligible = [
+                    e for e in self.entries
+                    if e.task_type == "_default" and e.model in eligible
+                ]
+                if default_eligible:
+                    filtered = default_eligible
             if filtered:
                 candidates = filtered
 
