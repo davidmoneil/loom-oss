@@ -30,6 +30,62 @@ def test_config_endpoint():
     assert resp.status_code == 200
 
 
+def test_routing_table_endpoint_no_table_configured():
+    from loom.gateway.app import app
+    client = TestClient(app)
+    resp = client.get("/api/routing/table")
+    assert resp.status_code == 200
+    data = resp.json()
+    assert "available" in data
+    assert isinstance(data["entries"], list)
+
+
+def test_routing_table_endpoint_with_table(tmp_path, monkeypatch):
+    from loom.routing.models import RoutingEntry, RoutingTable
+
+    table = RoutingTable(version=1, generated_at="2026-01-01", generated_from="test")
+    table.entries.append(RoutingEntry(
+        model="claude-sonnet-5",
+        backend="anthropic",
+        task_type="code",
+        temperature=0.0,
+        seed_strategy="none",
+        constraint_level_min=1,
+        determinism_score=0.9,
+        determinism_ci_lo=0.85,
+        determinism_ci_hi=0.95,
+        lexical_score=0.8,
+        structural_score=0.9,
+        semantic_score=0.9,
+        exact_match_pct=50.0,
+        num_runs=20,
+    ))
+
+    from loom.gateway.app import app
+
+    gw = app.state.gateway
+    original_routing = gw.routing
+
+    class _StubEngine:
+        @property
+        def table(self):
+            return table
+
+    gw.routing = _StubEngine()
+    try:
+        client = TestClient(app)
+        resp = client.get("/api/routing/table")
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["available"] is True
+        assert data["version"] == 1
+        assert len(data["entries"]) == 1
+        assert data["entries"][0]["model"] == "claude-sonnet-5"
+        assert data["entries"][0]["determinism_score"] == 0.9
+    finally:
+        gw.routing = original_routing
+
+
 # --- Content type detection ---
 
 def test_detect_log_output():

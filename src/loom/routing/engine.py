@@ -40,6 +40,10 @@ class RoutingEngine:
     def has_table(self) -> bool:
         return self._table is not None
 
+    @property
+    def table(self) -> Optional[RoutingTable]:
+        return self._table
+
     def recommend(
         self,
         task_type: str,

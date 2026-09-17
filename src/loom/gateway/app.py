@@ -21,6 +21,7 @@ affected feature degrades gracefully rather than crashing the process.
 from __future__ import annotations
 
 import asyncio
+import dataclasses
 import gzip
 import hashlib
 import json
@@ -70,6 +71,7 @@ from loom.gateway.schemas import (
     ModelListResponse,
     RateLimitResponse,
     RoutingStatsResponse,
+    RoutingTableResponse,
     ScannerRuleUpdateResponse,
     ScannerRulesResponse,
     ScannerStatsResponse,
@@ -2392,6 +2394,26 @@ def create_app() -> FastAPI:
             return {"available": True, **_jsonable(gw.storage.get_routing_decisions(hours=hours, limit=limit))}
         except Exception:
             return {"available": False, "hours": hours, "total": 0, "entries": [], "by_reason": {}, "overrides": 0}
+
+    # ------------------------------------------------------------ routing table
+    @app.get(
+        "/api/routing/table",
+        response_model=RoutingTableResponse,
+        tags=["observability"],
+        summary="Empirical routing table entries with EQRT scores",
+    )
+    async def api_routing_table():
+        gw = state()
+        table = gw.routing.table if gw.routing is not None else None
+        if table is None:
+            return {"available": False, "entries": []}
+        return {
+            "available": True,
+            "version": table.version,
+            "generated_at": table.generated_at,
+            "generated_from": table.generated_from,
+            "entries": [dataclasses.asdict(e) for e in table.entries],
+        }
 
     # ------------------------------------------------------------------- models
     @app.get(
