@@ -77,9 +77,9 @@ export default function Sessions() {
       </Header>
 
       <div className="mt-6 grid grid-cols-2 gap-4 lg:grid-cols-4">
-        <StatCard label="Sessions" value={fmtNumber(data?.sessions)} loading={loading} />
-        <StatCard label="Total Turns" value={fmtNumber(data?.total_turns)} loading={loading} />
-        <StatCard label="Total Cost" value={fmtCost(totalCost)} loading={loading} />
+        <StatCard label="Sessions" value={fmtNumber(data?.sessions)} loading={loading} infoKey="sessions.sessions" />
+        <StatCard label="Total Turns" value={fmtNumber(data?.total_turns)} loading={loading} infoKey="sessions.totalTurns" />
+        <StatCard label="Total Cost" value={fmtCost(totalCost)} loading={loading} infoKey="sessions.totalCost" />
         <StatCard
           label="Avg Turns / Session"
           value={
@@ -88,6 +88,7 @@ export default function Sessions() {
               : "—"
           }
           loading={loading}
+          infoKey="sessions.avgTurnsPerSession"
         />
       </div>
 
@@ -96,6 +97,7 @@ export default function Sessions() {
           title="Turns per session"
           loading={loading}
           empty={turnBuckets.length === 0}
+          infoKey="sessions.turnsPerSession"
         >
           <BarChart data={turnBuckets}>
             <CartesianGrid strokeDasharray="3 3" stroke="#374151" />
@@ -110,6 +112,7 @@ export default function Sessions() {
           title="Requests by model"
           loading={loading}
           empty={byModel.length === 0}
+          infoKey="sessions.requestsByModel"
         >
           <BarChart data={byModel} layout="vertical">
             <CartesianGrid strokeDasharray="3 3" stroke="#374151" />

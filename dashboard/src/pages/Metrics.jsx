@@ -83,6 +83,7 @@ export default function Metrics() {
           title={`Cost over time (${costMetric ? rangeLabel : "no paid usage"})`}
           loading={loading}
           empty={costByTime.length === 0}
+          infoKey="metrics.costOverTime"
         >
           <BarChart data={costByTime}>
             <CartesianGrid strokeDasharray="3 3" stroke="#374151" />
@@ -100,6 +101,7 @@ export default function Metrics() {
           title="Token usage over time"
           loading={loading}
           empty={tokensOverTime.length === 0}
+          infoKey="metrics.tokenUsageOverTime"
         >
           <AreaChart data={tokensOverTime}>
             <CartesianGrid strokeDasharray="3 3" stroke="#374151" />
@@ -132,6 +134,7 @@ export default function Metrics() {
           title="Requests by task type"
           loading={loading}
           empty={byTaskType.length === 0}
+          infoKey="metrics.requestsByTaskType"
         >
           <BarChart data={byTaskType} layout="vertical">
             <CartesianGrid strokeDasharray="3 3" stroke="#374151" />
@@ -146,6 +149,7 @@ export default function Metrics() {
           title="Distribution by source"
           loading={loading}
           empty={bySource.length === 0}
+          infoKey="metrics.distributionBySource"
         >
           <PieChart>
             <Pie

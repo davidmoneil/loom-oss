@@ -1,11 +1,16 @@
 import { ResponsiveContainer } from "recharts";
+import WidgetInfo from "./WidgetInfo.jsx";
+import { WIDGET_DESCRIPTIONS } from "../widgetDescriptions.js";
 
 // Card wrapper around a chart with a title, fixed height, and graceful
 // loading / empty states.
-export default function Chart({ title, loading, empty, height = 280, children }) {
+export default function Chart({ title, loading, empty, height = 280, infoKey, children }) {
   return (
     <div className="rounded-lg border border-border bg-card p-4">
-      <h3 className="mb-3 text-sm font-semibold text-gray-200">{title}</h3>
+      <h3 className="mb-3 flex items-center gap-1.5 text-sm font-semibold text-gray-200">
+        {title}
+        <WidgetInfo text={WIDGET_DESCRIPTIONS[infoKey]} />
+      </h3>
       {loading ? (
         <div className="skeleton" style={{ height }} />
       ) : empty ? (
