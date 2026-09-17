@@ -78,6 +78,30 @@ class TestEliminateGates:
         rec = table.recommend(task_type="chat", source_profile=profile, registry=registry())
         assert rec.model == "qwen2.5:7b"
 
+    def test_eligible_models_gate_excludes_unlisted_model(self):
+        table = RoutingTable(entries=[
+            make_entry("sonnet", determinism=0.99),
+            make_entry("haiku", determinism=0.5),
+        ])
+        profile = SourceProfile(name="src", eligible_models=["haiku"])
+        rec = table.recommend(task_type="chat", source_profile=profile, registry=registry())
+        assert rec.model == "haiku"
+
+    def test_eligible_models_empty_list_imposes_no_restriction(self):
+        table = RoutingTable(entries=[make_entry("sonnet", determinism=0.9)])
+        profile = SourceProfile(name="src", eligible_models=[])
+        rec = table.recommend(task_type="chat", source_profile=profile, registry=registry())
+        assert rec.model == "sonnet"
+
+    def test_eligible_models_falls_back_to_default_when_no_task_type_match(self):
+        table = RoutingTable(entries=[
+            make_entry("sonnet", task_type="_default"),
+            make_entry("haiku", task_type="chat"),
+        ])
+        profile = SourceProfile(name="src", eligible_models=["sonnet"])
+        rec = table.recommend(task_type="chat", source_profile=profile, registry=registry())
+        assert rec.model == "sonnet"
+
 
 class TestQualify:
     def test_tested_models_beat_untested_despite_lower_determinism(self):

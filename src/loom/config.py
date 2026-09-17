@@ -54,6 +54,10 @@ class SourcePolicy(BaseModel):
     pinned_model: Optional[str] = None
     compression_tier: Optional[str] = None
     per_turn_routing: bool = False
+    # Explicit allow-list of model_ids this source may route to. Empty list
+    # (the default) means no restriction — all tier/provider-eligible models
+    # remain candidates, matching pre-existing behavior.
+    eligible_models: list[str] = Field(default_factory=list)
 
 
 class RoutingConfig(BaseModel):

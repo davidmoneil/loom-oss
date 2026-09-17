@@ -2653,7 +2653,7 @@ def create_app() -> FastAPI:
         allowed = {
             "minimum_tier", "requires_tools", "allowed_providers",
             "budget_tier", "pinned_model", "compression_tier",
-            "per_turn_routing",
+            "per_turn_routing", "eligible_models",
         }
         updates = {k: v for k, v in body.items() if k in allowed}
         if not updates:
@@ -2680,7 +2680,7 @@ def create_app() -> FastAPI:
         allowed = {
             "minimum_tier", "requires_tools", "allowed_providers",
             "budget_tier", "pinned_model", "compression_tier",
-            "per_turn_routing",
+            "per_turn_routing", "eligible_models",
         }
         fields = {k: v for k, v in body.items() if k in allowed}
         gw.config.sources[source_name] = SourcePolicy(**fields)
@@ -3854,6 +3854,7 @@ def _sanitized_config(config: LoomConfig) -> dict:
                 "pinned_model": s.pinned_model,
                 "compression_tier": s.compression_tier,
                 "per_turn_routing": s.per_turn_routing,
+                "eligible_models": s.eligible_models,
             }
             for name, s in config.sources.items()
         },

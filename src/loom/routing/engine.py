@@ -84,12 +84,15 @@ class RoutingEngine:
             if profile.budget_tier else 2
         )
         allowed = set(profile.allowed_providers) if profile.allowed_providers else None
+        eligible = set(profile.eligible_models) if profile.eligible_models else None
 
         candidates = []
         for prov in self._config.providers:
             if allowed is not None and prov.name not in allowed:
                 continue
             for m in prov.models:
+                if eligible is not None and m.model_id not in eligible:
+                    continue
                 tier_order = TIER_ORDER.get(m.tier, 0)
                 if tier_order < min_order or tier_order > budget_order:
                     continue
