@@ -33,6 +33,15 @@ export default function Routing() {
   const [updatedAt, setUpdatedAt] = useState(null);
   const [error, setError] = useState(null);
 
+  const [table, setTable] = useState(null);
+  const [tableLoading, setTableLoading] = useState(true);
+
+  const [config, setConfig] = useState(null);
+  const [models, setModels] = useState([]);
+  const [assignSaving, setAssignSaving] = useState(false);
+  const [assignError, setAssignError] = useState(null);
+  const [assignSuccess, setAssignSuccess] = useState(null);
+
   const load = useCallback(async () => {
     setLoading(true);
     try {
@@ -47,11 +56,57 @@ export default function Routing() {
     }
   }, [hours]);
 
+  const loadTable = useCallback(async () => {
+    setTableLoading(true);
+    try {
+      const t = await api.routingTable();
+      setTable(t);
+    } catch {
+      setTable(null);
+    } finally {
+      setTableLoading(false);
+    }
+  }, []);
+
+  const loadAssignment = useCallback(async () => {
+    try {
+      const [c, m] = await Promise.all([api.config(), api.models()]);
+      setConfig(c);
+      setModels(m?.data || []);
+    } catch {
+      // leave prior state on failure — refresh button lets user retry
+    }
+  }, []);
+
   useEffect(() => {
     load();
     const id = setInterval(load, 30000);
     return () => clearInterval(id);
   }, [load]);
+
+  useEffect(() => {
+    loadTable();
+    loadAssignment();
+  }, [loadTable, loadAssignment]);
+
+  function flashAssignSuccess(msg) {
+    setAssignSuccess(msg);
+    setTimeout(() => setAssignSuccess(null), 3000);
+  }
+
+  async function updateEligibleModels(sourceName, eligibleModels) {
+    setAssignSaving(true);
+    setAssignError(null);
+    try {
+      const updated = await api.updateSourcePolicy(sourceName, { eligible_models: eligibleModels });
+      setConfig(updated);
+      flashAssignSuccess(`Updated model assignment for "${sourceName}"`);
+    } catch (e) {
+      setAssignError(e.message || "Failed to update model assignment");
+    } finally {
+      setAssignSaving(false);
+    }
+  }
 
   const entries = data?.entries || [];
   const byReason = data?.by_reason || {};
@@ -177,6 +232,116 @@ export default function Routing() {
           </div>
         </>
       )}
+
+      <div className="mt-6 rounded-lg border border-border bg-card p-4">
+        <h3 className="mb-3 flex items-center gap-1.5 text-sm font-semibold text-gray-200">
+          Empirical routing table
+          <WidgetInfo text={WIDGET_DESCRIPTIONS["routing.table"]} />
+        </h3>
+        {tableLoading ? (
+          <div className="skeleton h-48 w-full" />
+        ) : !table?.available || (table.entries || []).length === 0 ? (
+          <div className="text-sm text-gray-500">No empirical routing table entries yet</div>
+        ) : (
+          <div className="max-h-96 overflow-y-auto">
+            <table className="w-full text-left text-sm">
+              <thead className="sticky top-0 bg-card">
+                <tr className="border-b border-border text-xs font-medium uppercase text-gray-400">
+                  <th className="pb-2 pr-3">Model</th>
+                  <th className="pb-2 pr-3">Task type</th>
+                  <th className="pb-2 pr-3">Temp</th>
+                  <th className="pb-2 pr-3">Determinism</th>
+                  <th className="pb-2 pr-3">Lexical</th>
+                  <th className="pb-2 pr-3">Structural</th>
+                  <th className="pb-2 pr-3">Semantic</th>
+                  <th className="pb-2 pr-3">Exact match</th>
+                  <th className="pb-2 pr-3">Avg duration</th>
+                  <th className="pb-2 text-right">Runs</th>
+                </tr>
+              </thead>
+              <tbody>
+                {table.entries.map((e, i) => (
+                  <tr key={`${e.model}:${e.task_type}:${e.temperature}:${i}`} className="border-b border-border/50">
+                    <td className="py-2 pr-3 font-mono text-xs text-gray-300">{e.model}</td>
+                    <td className="py-2 pr-3 text-gray-300">{e.task_type}</td>
+                    <td className="py-2 pr-3 text-xs text-gray-400">{e.temperature}</td>
+                    <td className="py-2 pr-3 text-xs text-gray-400">{(e.determinism_score * 100).toFixed(0)}%</td>
+                    <td className="py-2 pr-3 text-xs text-gray-400">{(e.lexical_score * 100).toFixed(0)}%</td>
+                    <td className="py-2 pr-3 text-xs text-gray-400">{(e.structural_score * 100).toFixed(0)}%</td>
+                    <td className="py-2 pr-3 text-xs text-gray-400">{(e.semantic_score * 100).toFixed(0)}%</td>
+                    <td className="py-2 pr-3 text-xs text-gray-400">{(e.exact_match_pct * 100).toFixed(0)}%</td>
+                    <td className="py-2 pr-3 text-xs text-gray-400">
+                      {e.avg_duration_ms != null ? `${Math.round(e.avg_duration_ms)}ms` : "—"}
+                    </td>
+                    <td className="py-2 text-right text-xs text-gray-400">{e.num_runs}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        )}
+      </div>
+
+      <div className="mt-6 rounded-lg border border-border bg-card p-4">
+        <div className="mb-3 flex items-center justify-between">
+          <h3 className="flex items-center gap-1.5 text-sm font-semibold text-gray-200">
+            Model assignment by source
+            <WidgetInfo text={WIDGET_DESCRIPTIONS["routing.modelAssignment"]} />
+          </h3>
+          {assignSuccess && <span className="text-xs text-green-400">{assignSuccess}</span>}
+          {assignError && <span className="text-xs text-red-400">{assignError}</span>}
+        </div>
+        {!config ? (
+          <div className="skeleton h-32 w-full" />
+        ) : Object.keys(config.sources || {}).length === 0 ? (
+          <div className="text-sm text-gray-500">No source policies configured</div>
+        ) : (
+          <div className="space-y-3">
+            {Object.entries(config.sources).map(([name, policy]) => (
+              <div key={name} className="rounded border border-border/50 bg-gray-800/30 px-4 py-3">
+                <div className="mb-2 flex items-center justify-between">
+                  <span className="font-mono text-sm font-medium text-white">{name}</span>
+                  <span className="text-xs text-gray-500">
+                    {(policy.eligible_models || []).length === 0
+                      ? "no restriction — all eligible models allowed"
+                      : `${policy.eligible_models.length} model(s) assigned`}
+                  </span>
+                </div>
+                <div className="flex flex-wrap gap-2">
+                  {models.length === 0 ? (
+                    <span className="text-xs text-gray-500">No models configured</span>
+                  ) : (
+                    models.map((m) => {
+                      const active = (policy.eligible_models || []).includes(m.id);
+                      return (
+                        <button
+                          key={m.id}
+                          onClick={() => {
+                            const current = policy.eligible_models || [];
+                            const next = active
+                              ? current.filter((x) => x !== m.id)
+                              : [...current, m.id];
+                            updateEligibleModels(name, next);
+                          }}
+                          disabled={assignSaving}
+                          title={m.display_name || m.id}
+                          className={`rounded border px-2 py-1 text-xs font-medium transition-colors ${
+                            active
+                              ? "border-accent/50 bg-accent/20 text-accent"
+                              : "border-border bg-gray-800 text-gray-500 hover:text-gray-300"
+                          }`}
+                        >
+                          {m.id}
+                        </button>
+                      );
+                    })
+                  )}
+                </div>
+              </div>
+            ))}
+          </div>
+        )}
+      </div>
     </div>
   );
 }
