@@ -183,6 +183,69 @@ def test_tool_result_block_list_content():
     assert before > after
 
 
+def _image_message(idx: int, b64_len: int, image_url_shape: bool = False) -> dict:
+    data = "A" * b64_len
+    block = (
+        {"type": "image_url", "image_url": {"url": f"data:image/png;base64,{data}"}}
+        if image_url_shape
+        else {"type": "image", "source": {"type": "base64", "data": data}}
+    )
+    return {"role": "user" if idx % 2 == 0 else "assistant", "content": [block]}
+
+
+def test_image_offload_disabled_by_default():
+    """No config (or budget=0) preserves prior behavior: images always
+    pass through untouched, however large."""
+    msgs = _messages(8)
+    msgs[2] = _image_message(2, b64_len=10_000)
+    out, before, after, by_type, _loop = _compress_messages_inline(FakeProcessor(), msgs)
+    assert out[2]["content"] == msgs[2]["content"]
+    assert "image_offload" not in by_type
+
+
+def test_image_offload_over_budget_replaced():
+    """An image past the configured byte budget is swapped for a text
+    placeholder; images within budget stay untouched."""
+    msgs = _messages(8)
+    msgs[2] = _image_message(2, b64_len=10_000)  # ~7500 decoded bytes
+    stats: dict = {}
+    out, before, after, by_type, _loop = _compress_messages_inline(
+        FakeProcessor(),
+        msgs,
+        config=_config_stub(protect_window=2, image_offload_budget_bytes=100),
+        stats=stats,
+    )
+    block = out[2]["content"][0]
+    assert block["type"] == "text"
+    assert "omitted" in block["text"]
+    assert by_type["image_offload"]["before"] > by_type["image_offload"]["after"]
+    assert stats["image_offloaded"] == 1
+    assert before > after
+
+
+def test_image_offload_under_budget_untouched():
+    msgs = _messages(8)
+    msgs[2] = _image_message(2, b64_len=10_000)
+    out, *_ = _compress_messages_inline(
+        FakeProcessor(),
+        msgs,
+        config=_config_stub(protect_window=2, image_offload_budget_bytes=1_000_000),
+    )
+    assert out[2]["content"] == msgs[2]["content"]
+
+
+def test_image_offload_openai_shape():
+    """The OpenAI image_url/data-URI shape is recognized too."""
+    msgs = _messages(8)
+    msgs[2] = _image_message(2, b64_len=10_000, image_url_shape=True)
+    out, *_ = _compress_messages_inline(
+        FakeProcessor(),
+        msgs,
+        config=_config_stub(protect_window=2, image_offload_budget_bytes=100),
+    )
+    assert out[2]["content"][0]["type"] == "text"
+
+
 def test_tool_results_opt_out():
     """compress_tool_results=False restores the old skip behavior."""
     msgs = _tool_conversation()
@@ -226,11 +289,16 @@ def test_recent_tool_results_untouched():
     assert out[7]["content"] == msgs[7]["content"]
 
 
-def _config_stub(protect_window: int = 6, loop_multiplier: int = 3) -> SimpleNamespace:
+def _config_stub(
+    protect_window: int = 6,
+    loop_multiplier: int = 3,
+    image_offload_budget_bytes: int = 0,
+) -> SimpleNamespace:
     return SimpleNamespace(
         compression=SimpleNamespace(
             tool_result_protect_window=protect_window,
             loop_detected_protect_multiplier=loop_multiplier,
+            image_offload_budget_bytes=image_offload_budget_bytes,
         )
     )
 

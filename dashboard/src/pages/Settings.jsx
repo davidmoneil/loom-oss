@@ -671,6 +671,25 @@ function CompressionSettings({ config, setConfig, saving, setSaving, setError, f
           />
         </div>
 
+        {/* Image offload budget */}
+        <div className="flex items-center justify-between">
+          <div>
+            <span className="text-sm text-white">Image offload budget (bytes)</span>
+            <p className="text-xs text-gray-500">
+              Eligible images larger than this many decoded bytes are replaced with a text placeholder. 0 disables offload — images always pass through untouched.
+            </p>
+          </div>
+          <input
+            type="number"
+            min="0"
+            step="100000"
+            value={comp.image_offload_budget_bytes ?? 0}
+            onChange={(e) => update({ image_offload_budget_bytes: parseInt(e.target.value) || 0 })}
+            disabled={saving}
+            className="w-28 rounded border border-border bg-gray-800 px-2 py-1 text-right text-sm text-white"
+          />
+        </div>
+
         {/* Variant store */}
         <div className="flex items-center justify-between">
           <div>

@@ -77,6 +77,11 @@ compression:
                                   # (prevents read → compress → re-read loops)
   loop_detected_protect_multiplier: 3  # widen window by this factor when
                                        # repeated identical tool calls detected
+  # image_offload_budget_bytes: 4500000  # opt-in: replace eligible images
+                                          # larger than this many decoded
+                                          # bytes with a text placeholder
+                                          # (0/default: images always pass
+                                          # through untouched)
   # Optional LLM prose summarization (default: fully local/extractive, no
   # model calls). Any LLM failure falls back to extractive silently.
   # llm_prose: true
