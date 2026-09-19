@@ -101,6 +101,11 @@ class CompressionConfig(BaseModel):
     neo4j_database: str = "neo4j"
     tool_result_protect_window: int = 6
     loop_detected_protect_multiplier: int = 3
+    # Top-level image blocks (outside the protect window) larger than this
+    # many decoded bytes are replaced with a text placeholder instead of
+    # being forwarded — 0 (default) disables offload and preserves prior
+    # behavior (images always pass through untouched).
+    image_offload_budget_bytes: int = 0
 
 
 class StorageConfig(BaseModel):

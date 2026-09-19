@@ -2600,6 +2600,7 @@ def create_app() -> FastAPI:
             "llm_timeout_seconds": float,
             "allow_private_llm_url": bool,
             "variant_store": str,
+            "image_offload_budget_bytes": int,
         }
         VALID_TIERS = {"light", "medium", "heavy", "extreme"}
         VALID_STORES = {"", "age", "neo4j"}
@@ -2623,6 +2624,8 @@ def create_app() -> FastAPI:
                 val = max(1, min(val, 10))
             if key == "llm_timeout_seconds":
                 val = max(1.0, min(val, 120.0))
+            if key == "image_offload_budget_bytes":
+                val = max(0, min(val, 100_000_000))
             updates[key] = val
         if not updates:
             return JSONResponse({"error": "no valid fields"}, status_code=400)
@@ -3315,6 +3318,42 @@ def _tally(by_type: dict, key: str, before: int, after: int) -> None:
     slot["after"] += after
 
 
+def _image_block_bytes(block: dict) -> int:
+    """Estimate the decoded byte size of a top-level image content block.
+
+    Handles the Anthropic shape (``source.data``, base64) and the OpenAI
+    shape (``image_url.url``, a ``data:`` URI). Returns 0 for anything else
+    (e.g. a remote ``https://`` URL, which carries no local byte cost and
+    can't blow a provider's *inline* image budget the way embedded base64
+    can).
+    """
+    b64 = None
+    if block.get("type") == "image":
+        source = block.get("source")
+        if isinstance(source, dict) and source.get("type") == "base64":
+            b64 = source.get("data")
+    elif block.get("type") == "image_url":
+        image_url = block.get("image_url")
+        url = image_url.get("url") if isinstance(image_url, dict) else None
+        if isinstance(url, str) and ";base64," in url:
+            b64 = url.split(";base64,", 1)[1]
+    if not isinstance(b64, str):
+        return 0
+    return (len(b64) * 3) // 4
+
+
+def _image_offload_placeholder(actual_bytes: int, budget_bytes: int) -> dict:
+    """Text block standing in for an image dropped by budget overflow."""
+    return {
+        "type": "text",
+        "text": (
+            f"[image omitted by Loom compression: {actual_bytes / 1_000_000:.1f}MB "
+            f"exceeds the {budget_bytes / 1_000_000:.1f}MB image-offload budget for "
+            "aged content; the original was not retained]"
+        ),
+    }
+
+
 def _dsn_host_db(dsn: str | None) -> tuple[str, str]:
     """Parse ``host`` and ``db`` out of a DSN/URI for logging, never
     including credentials. Best-effort — returns ("unknown", "unknown")
@@ -3467,12 +3506,16 @@ def _compress_content_blocks(
     variants: Any = None,
     tier_name: str = "medium",
     stats: dict | None = None,
+    image_offload_budget_bytes: int = 0,
 ) -> tuple[list, int, int]:
     """Compress text within a content-block list, never changing its shape.
 
     tool_use blocks (structured inputs the model needs verbatim) and unknown
     block types pass through untouched; text and tool_result blocks get their
-    text compressed in place.
+    text compressed in place. Top-level image blocks pass through untouched
+    too, unless ``image_offload_budget_bytes`` is set and the image exceeds
+    it, in which case the image is replaced with a text placeholder (see
+    docs/compression.md#image-offload).
     """
     out_blocks: list = []
     tokens_before = 0
@@ -3525,6 +3568,20 @@ def _compress_content_blocks(
             tokens_after += ta
             _tally(by_type, "tool_result", tb, ta)
             out_blocks.append(new_block)
+        elif (
+            image_offload_budget_bytes > 0
+            and btype in ("image", "image_url")
+            and (img_bytes := _image_block_bytes(block)) > image_offload_budget_bytes
+        ):
+            tb = _block_tokens(block)
+            out = _image_offload_placeholder(img_bytes, image_offload_budget_bytes)
+            ta = _block_tokens(out)
+            tokens_before += tb
+            tokens_after += ta
+            _tally(by_type, "image_offload", tb, ta)
+            if stats is not None:
+                stats["image_offloaded"] = stats.get("image_offloaded", 0) + 1
+            out_blocks.append(out)
         else:
             # tool_use inputs and unknown block types stay verbatim.
             tb = _block_tokens(block)
@@ -3662,11 +3719,13 @@ def _compress_messages_inline(
 
     protect_window = 2
     loop_multiplier = 3
+    image_offload_budget_bytes = 0
     if config is not None:
         comp = getattr(config, "compression", None)
         if comp is not None:
             protect_window = getattr(comp, "tool_result_protect_window", 6)
             loop_multiplier = getattr(comp, "loop_detected_protect_multiplier", loop_multiplier)
+            image_offload_budget_bytes = getattr(comp, "image_offload_budget_bytes", 0)
 
     is_looping = _detect_compression_loop(messages)
     if is_looping:
@@ -3727,6 +3786,7 @@ def _compress_messages_inline(
                 variants,
                 tier_name,
                 stats,
+                image_offload_budget_bytes,
             )
             tokens_before += tb
             tokens_after += ta
@@ -3868,6 +3928,7 @@ def _sanitized_config(config: LoomConfig) -> dict:
             "tool_results": config.compression.tool_results,
             "tool_result_protect_window": config.compression.tool_result_protect_window,
             "loop_detected_protect_multiplier": config.compression.loop_detected_protect_multiplier,
+            "image_offload_budget_bytes": config.compression.image_offload_budget_bytes,
             "llm_prose": config.compression.llm_prose,
             "llm_url": config.compression.llm_url,
             "llm_model": config.compression.llm_model,
