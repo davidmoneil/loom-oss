@@ -15,7 +15,7 @@ from __future__ import annotations
 
 import os
 from pathlib import Path
-from typing import Optional
+from typing import Any, Optional
 
 import yaml
 from pydantic import BaseModel, Field
@@ -30,6 +30,9 @@ class ModelConfig(BaseModel):
     max_context_tokens: int = 8192
     cost_per_1k_input: float = 0.0
     cost_per_1k_output: float = 0.0
+    # Default OpenAI-passthrough params merged into every request for this
+    # model (e.g. chat_template_kwargs). Request-supplied values win.
+    extra_params: dict[str, Any] = Field(default_factory=dict)
 
 
 class ProviderConfig(BaseModel):

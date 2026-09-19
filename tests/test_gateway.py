@@ -447,3 +447,49 @@ def test_oauth_passthrough_env_override():
         assert cfg.server.oauth_passthrough is True
     finally:
         del os.environ["LOOM_OAUTH_PASSTHROUGH"]
+
+
+# --- chat_template_kwargs passthrough ---
+
+def test_chat_template_kwargs_in_openai_passthrough_allowlist():
+    from loom.gateway.app import _passthrough_params
+
+    body = {
+        "chat_template_kwargs": {"enable_thinking": True},
+        "temperature": 0.5,
+        "unrelated_field": "dropped",
+    }
+    forwarded = _passthrough_params(body)
+    assert forwarded["chat_template_kwargs"] == {"enable_thinking": True}
+    assert forwarded["temperature"] == 0.5
+    assert "unrelated_field" not in forwarded
+
+
+def test_model_config_extra_params_default_empty():
+    from loom.config import ModelConfig
+
+    cfg = ModelConfig(model_id="some-model")
+    assert cfg.extra_params == {}
+
+
+def test_model_config_extra_params_merge_request_overrides_default():
+    from loom.config import ModelConfig
+    from loom.gateway.app import _passthrough_params
+
+    cfg = ModelConfig(
+        model_id="qwen3-32b-spec",
+        extra_params={"chat_template_kwargs": {"enable_thinking": True}},
+    )
+    # No override in the request body: the model-level default is used.
+    forward = {**cfg.extra_params, **_passthrough_params({"temperature": 0.2})}
+    assert forward["chat_template_kwargs"] == {"enable_thinking": True}
+    assert forward["temperature"] == 0.2
+
+    # Request explicitly overrides the model default.
+    forward = {
+        **cfg.extra_params,
+        **_passthrough_params(
+            {"chat_template_kwargs": {"enable_thinking": False}}
+        ),
+    }
+    assert forward["chat_template_kwargs"] == {"enable_thinking": False}
