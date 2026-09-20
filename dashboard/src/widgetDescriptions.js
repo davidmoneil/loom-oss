@@ -76,6 +76,10 @@ export const WIDGET_DESCRIPTIONS = {
     "Count of routing decisions grouped by the reason recorded for each decision.",
   "routing.recentDecisions":
     "The most recent individual routing decisions, newest first, capped to the last 100.",
+  "routing.table":
+    "Empirical routing table entries — per model/task-type/temperature combination, with EQRT (determinism, lexical, structural, semantic, exact-match) scores from evaluation runs.",
+  "routing.modelAssignment":
+    "Restrict which models are eligible for each source policy. Toggle models on to build an allow-list; with no models selected, all configured models remain eligible.",
 
   // Sessions
   "sessions.sessions": "Number of distinct sessions in the selected time range.",
