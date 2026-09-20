@@ -28,6 +28,27 @@ services:
           memory: 128M
     restart: unless-stopped
 
+  # Optional laya shadow-mode sidecar — enabled with the "laya" profile
+  # (COMPOSE_PROFILES=laya). Off by default: loom.laya_shadow.enabled must
+  # also be set to true and pointed at this service (laya_shadow.url) for
+  # the gateway to call it. Its own container, its own restart lifecycle —
+  # never loaded into the loom process. See services/laya-sidecar/README.md.
+  laya-sidecar:
+    build:
+      context: services/laya-sidecar
+    profiles: ["laya"]
+    ports:
+      - "${LAYA_SIDECAR_PORT:-8091}:8091"
+    environment:
+      LAYA_SIDECAR_DEVICE: ${LAYA_SIDECAR_DEVICE:-cpu}
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8091/health')"]
+      interval: 30s
+      timeout: 5s
+      start_period: 90s
+      retries: 3
+    restart: unless-stopped
+
   # Optional bundled database — enabled with the "postgres" profile
   # (COMPOSE_PROFILES=postgres, written to .env by setup.sh).
   postgres:

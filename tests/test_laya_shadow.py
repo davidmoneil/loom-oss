@@ -1,34 +1,28 @@
-"""laya shadow-mode classifier: opt-in, off the critical path, comparison-only.
+"""laya shadow-mode client: opt-in, off the critical path, comparison-only.
 
-Mirrors the conventions in test_llm_prose.py for another optional,
-model-backed feature that's off by default and must degrade safely.
+The client talks to a standalone laya sidecar service over HTTP (see
+services/laya-sidecar/) — laya itself is never imported in this process,
+so these tests mock the HTTP layer, not laya. Mirrors the conventions in
+test_llm_prose.py for another optional, model-backed feature that's off by
+default and must degrade safely.
 """
 
 import json
-import sys
-import types
 from unittest import mock
 
-import pytest
-
 from loom.config import LayaShadowConfig, LoomConfig
-from loom.detection.laya_shadow import LayaShadowRunner
+from loom.detection.laya_shadow import LayaShadowClient
 
 
-def _fake_laya_module(predict_result=None, predict_side_effect=None, load_side_effect=None):
-    """Builds a fake ``laya`` module exposing ``laya.load(...) -> agent``."""
-    agent = mock.Mock()
-    if predict_side_effect is not None:
-        agent.predict.side_effect = predict_side_effect
+def _fake_response(json_data=None, status_code=200):
+    resp = mock.Mock()
+    resp.status_code = status_code
+    resp.json.return_value = json_data
+    if status_code >= 400:
+        resp.raise_for_status.side_effect = RuntimeError(f"http {status_code}")
     else:
-        agent.predict.return_value = predict_result
-
-    module = types.ModuleType("laya")
-    if load_side_effect is not None:
-        module.load = mock.Mock(side_effect=load_side_effect)
-    else:
-        module.load = mock.Mock(return_value=agent)
-    return module, agent
+        resp.raise_for_status.return_value = None
+    return resp
 
 
 GOOD_RESULT = {
@@ -39,25 +33,34 @@ GOOD_RESULT = {
 }
 
 
+def _client(**kwargs):
+    client = LayaShadowClient(**kwargs)
+    client._client = mock.Mock()  # never touch the network in tests
+    return client
+
+
 def test_config_defaults_are_off():
     cfg = LoomConfig()
     assert cfg.laya_shadow.enabled is False
-    assert cfg.laya_shadow.model_id == "convaiinnovations/laya"
+    assert cfg.laya_shadow.url == "http://localhost:8091"
+    assert cfg.laya_shadow.checkpoint == "base"
     assert cfg.laya_shadow.sample_rate == 1.0
+    assert cfg.laya_shadow.cache_size == 512
 
 
 def test_run_writes_comparison_record(tmp_path):
     log_path = tmp_path / "laya_shadow.jsonl"
-    runner = LayaShadowRunner(log_path=str(log_path))
-    fake_module, agent = _fake_laya_module(predict_result=GOOD_RESULT)
+    client = _client(log_path=str(log_path))
+    client._client.post.return_value = _fake_response(GOOD_RESULT)
 
-    with mock.patch.dict(sys.modules, {"laya": fake_module}):
-        runner._run("req-1", "test-source", "design a system", "standard", 55.0)
+    client._run("req-1", "test-source", "design a system", "standard", 55.0)
 
-    agent.predict.assert_called_once()
-    (state, questions), _ = agent.predict.call_args
-    assert state == {"request": "design a system"}
-    assert "tier" in questions and "needs_reasoning" in questions
+    client._client.post.assert_called_once()
+    args, kwargs = client._client.post.call_args
+    assert args[0] == "http://localhost:8091/classify"
+    assert kwargs["json"]["state"] == {"request": "design a system"}
+    assert kwargs["json"]["checkpoint"] == "base"
+    assert "tier" in kwargs["json"]["questions"] and "needs_reasoning" in kwargs["json"]["questions"]
 
     lines = log_path.read_text().strip().splitlines()
     assert len(lines) == 1
@@ -71,86 +74,125 @@ def test_run_writes_comparison_record(tmp_path):
     assert record["laya_needs_reasoning"] == 0.9
     assert record["agree"] is False
     assert "laya_latency_ms" in record
+    assert record["cached"] is False
+    assert "prompt_hash" in record
 
 
 def test_run_agree_true_when_tiers_match(tmp_path):
     log_path = tmp_path / "laya_shadow.jsonl"
-    runner = LayaShadowRunner(log_path=str(log_path))
-    fake_module, _ = _fake_laya_module(predict_result=GOOD_RESULT)  # laya says "premium"
+    client = _client(log_path=str(log_path))
+    client._client.post.return_value = _fake_response(GOOD_RESULT)  # laya says "premium"
 
-    with mock.patch.dict(sys.modules, {"laya": fake_module}):
-        runner._run("req-2", "src", "prompt", "premium", 90.0)
+    client._run("req-2", "src", "prompt", "premium", 90.0)
 
     record = json.loads(log_path.read_text().strip())
     assert record["agree"] is True
 
 
-def test_model_load_failure_is_sticky_and_safe(tmp_path):
+def test_sidecar_unreachable_is_safe_and_unlogged(tmp_path):
     log_path = tmp_path / "laya_shadow.jsonl"
-    runner = LayaShadowRunner(log_path=str(log_path))
-    fake_module, _ = _fake_laya_module(load_side_effect=RuntimeError("no weights"))
+    client = _client(log_path=str(log_path))
+    client._client.post.side_effect = ConnectionError("no route to host")
 
-    with mock.patch.dict(sys.modules, {"laya": fake_module}):
-        runner._run("req-3", "src", "prompt", "economy", 10.0)
-        runner._run("req-4", "src", "prompt", "economy", 10.0)
+    client._run("req-3", "src", "prompt", "economy", 10.0)
+    client._run("req-4", "src", "prompt", "economy", 10.0)
 
-    # load() attempted only once — failure is sticky, no retry storm.
-    assert fake_module.load.call_count == 1
+    # No retry logic to break — every call is independent and silent.
+    assert client._client.post.call_count == 2
     assert not log_path.exists()
 
 
-def test_missing_laya_package_is_safe(tmp_path):
+def test_sidecar_error_status_is_safe_and_unlogged(tmp_path):
     log_path = tmp_path / "laya_shadow.jsonl"
-    runner = LayaShadowRunner(log_path=str(log_path))
+    client = _client(log_path=str(log_path))
+    client._client.post.return_value = _fake_response(status_code=500)
 
-    with mock.patch.dict(sys.modules, {"laya": None}):  # forces ImportError
-        runner._run("req-5", "src", "prompt", "economy", 10.0)
+    client._run("req-6", "src", "prompt", "economy", 10.0)
 
     assert not log_path.exists()
-    assert runner._load_failed is True
 
 
-def test_predict_failure_is_safe_and_unlogged(tmp_path):
+def test_malformed_response_is_safe_and_unlogged(tmp_path):
     log_path = tmp_path / "laya_shadow.jsonl"
-    runner = LayaShadowRunner(log_path=str(log_path))
-    fake_module, _ = _fake_laya_module(predict_side_effect=RuntimeError("boom"))
+    client = _client(log_path=str(log_path))
+    client._client.post.return_value = _fake_response({"unexpected": "shape"})
 
-    with mock.patch.dict(sys.modules, {"laya": fake_module}):
-        runner._run("req-6", "src", "prompt", "economy", 10.0)
+    client._run("req-6b", "src", "prompt", "economy", 10.0)
 
     assert not log_path.exists()
 
 
 def test_sample_rate_zero_skips_entirely(tmp_path):
     log_path = tmp_path / "laya_shadow.jsonl"
-    runner = LayaShadowRunner(log_path=str(log_path), sample_rate=0.0)
-    fake_module, agent = _fake_laya_module(predict_result=GOOD_RESULT)
+    client = _client(log_path=str(log_path), sample_rate=0.0)
+    client._client.post.return_value = _fake_response(GOOD_RESULT)
 
-    with mock.patch.dict(sys.modules, {"laya": fake_module}):
-        runner.shadow("req-7", "src", "prompt", "economy", 10.0)
-        runner._executor.shutdown(wait=True)
+    client.shadow("req-7", "src", "prompt", "economy", 10.0)
+    client._executor.shutdown(wait=True)
 
-    agent.predict.assert_not_called()
+    client._client.post.assert_not_called()
+    assert not log_path.exists()
+
+
+def test_long_prompt_is_skipped(tmp_path):
+    log_path = tmp_path / "laya_shadow.jsonl"
+    client = _client(log_path=str(log_path), max_prompt_chars=10)
+    client._client.post.return_value = _fake_response(GOOD_RESULT)
+
+    client.shadow("req-9", "src", "this prompt is way over the limit", "economy", 10.0)
+    client._executor.shutdown(wait=True)
+
+    client._client.post.assert_not_called()
+    assert not log_path.exists()
+
+
+def test_cache_hit_avoids_second_call(tmp_path):
+    log_path = tmp_path / "laya_shadow.jsonl"
+    client = _client(log_path=str(log_path))
+    client._client.post.return_value = _fake_response(GOOD_RESULT)
+
+    client._run("req-10", "src", "same prompt", "economy", 10.0)
+    client._run("req-11", "src", "same prompt", "economy", 10.0)
+
+    client._client.post.assert_called_once()
+    lines = [json.loads(l) for l in log_path.read_text().strip().splitlines()]
+    assert len(lines) == 2
+    assert lines[0]["cached"] is False
+    assert lines[1]["cached"] is True
+    assert lines[1]["laya_tier"] == "premium"
+
+
+def test_unsafe_url_is_rejected_without_a_call(tmp_path):
+    log_path = tmp_path / "laya_shadow.jsonl"
+    # Link-local (incl. cloud metadata) is never allowed, even with the
+    # private opt-in — see netcheck.validate_outbound_url.
+    client = _client(
+        log_path=str(log_path), url="http://169.254.169.254:80", allow_private_url=True
+    )
+    client._client.post.return_value = _fake_response(GOOD_RESULT)
+
+    client._run("req-12", "src", "prompt", "economy", 10.0)
+
+    client._client.post.assert_not_called()
     assert not log_path.exists()
 
 
 def test_shadow_is_fire_and_forget_via_executor(tmp_path):
     log_path = tmp_path / "laya_shadow.jsonl"
-    runner = LayaShadowRunner(log_path=str(log_path))
-    fake_module, agent = _fake_laya_module(predict_result=GOOD_RESULT)
+    client = _client(log_path=str(log_path))
+    client._client.post.return_value = _fake_response(GOOD_RESULT)
 
-    with mock.patch.dict(sys.modules, {"laya": fake_module}):
-        runner.shadow("req-8", "src", "hello", "economy", 88.0)
-        # Deterministic wait for the background worker instead of a sleep.
-        runner._executor.shutdown(wait=True)
+    client.shadow("req-8", "src", "hello", "economy", 88.0)
+    # Deterministic wait for the background worker instead of a sleep.
+    client._executor.shutdown(wait=True)
 
     record = json.loads(log_path.read_text().strip())
     assert record["request_id"] == "req-8"
 
 
 def test_close_does_not_raise(tmp_path):
-    runner = LayaShadowRunner(log_path=str(tmp_path / "x.jsonl"))
-    runner.close()  # must not raise even with no work scheduled
+    client = _client(log_path=str(tmp_path / "x.jsonl"))
+    client.close()  # must not raise even with no work scheduled
 
 
 # --------------------------------------------------------------------------- #

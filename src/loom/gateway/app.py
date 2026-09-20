@@ -97,9 +97,9 @@ except Exception:  # pragma: no cover - degraded mode
     _detection_classify = None
 
 try:
-    from loom.detection.laya_shadow import LayaShadowRunner  # type: ignore
+    from loom.detection.laya_shadow import LayaShadowClient  # type: ignore
 except Exception:  # pragma: no cover - degraded mode / optional dependency
-    LayaShadowRunner = None  # type: ignore
+    LayaShadowClient = None  # type: ignore
 
 try:
     from loom.compression.processor import ContentProcessor  # type: ignore
@@ -1319,17 +1319,23 @@ async def lifespan(app: FastAPI):
             except Exception:
                 state.detection = None
 
-    # Shadow-mode ML classifier: off by default. When enabled, it runs
+    # Shadow-mode laya sidecar client: off by default. When enabled, it
+    # calls the standalone laya sidecar service (services/laya-sidecar/)
     # alongside DetectionEngine on /v1/detect purely for comparison
     # logging (see loom.detection.laya_shadow) and never affects the tier
-    # returned to callers. Model load happens lazily on first request, on
-    # a background thread, so it can never add startup or request latency.
-    if LayaShadowRunner is not None and state.config.laya_shadow.enabled:
+    # returned to callers. The HTTP call happens on a background thread,
+    # so it can never add request latency; laya itself is never imported
+    # or loaded in this process.
+    if LayaShadowClient is not None and state.config.laya_shadow.enabled:
         try:
-            state.laya_shadow = LayaShadowRunner(
-                model_id=state.config.laya_shadow.model_id,
-                device=state.config.laya_shadow.device,
+            state.laya_shadow = LayaShadowClient(
+                url=state.config.laya_shadow.url,
+                checkpoint=state.config.laya_shadow.checkpoint,
+                timeout_seconds=state.config.laya_shadow.timeout_seconds,
+                allow_private_url=state.config.laya_shadow.allow_private_url,
                 sample_rate=state.config.laya_shadow.sample_rate,
+                max_prompt_chars=state.config.laya_shadow.max_prompt_chars,
+                cache_size=state.config.laya_shadow.cache_size,
                 log_path=state.config.laya_shadow.log_path,
             )
         except Exception:

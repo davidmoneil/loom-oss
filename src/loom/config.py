@@ -120,20 +120,38 @@ class ObservabilityConfig(BaseModel):
 class LayaShadowConfig(BaseModel):
     """Optional shadow-mode ML classifier, compared against DetectionEngine.
 
-    Off by default. When enabled, the laya (convaiinnovations/laya) prompt
-    classifier runs alongside the rule-based DetectionEngine on every
-    ``/v1/detect`` call, entirely off that request's critical path: its
-    prediction is logged next to the rule-based one for comparison but
-    never changes the tier returned to the caller. See
+    Off by default. When enabled, every ``/v1/detect`` call (and, passively,
+    real ``/v1/chat/completions`` traffic) fires a non-blocking HTTP call to
+    a standalone laya sidecar service (``services/laya-sidecar/`` in this
+    repo) running the convaiinnovations/laya prompt classifier. laya itself
+    is never imported or loaded in the gateway process — a multi-GB
+    torch/CUDA model has no business being tied to every gateway restart.
+    The sidecar's prediction is logged next to the rule-based one for
+    comparison but never changes the tier returned to the caller. See
     ``src/loom/detection/laya_shadow.py``.
     """
 
     enabled: bool = False
-    model_id: str = "convaiinnovations/laya"
-    device: str = "cpu"
-    # Fraction of /v1/detect calls to also shadow through laya (cost control;
-    # laya is a ~421M-param model, ~33ms/call, vs. <10ms for the rule engine).
+    url: str = "http://localhost:8091"
+    # Which sidecar-resident checkpoint to request. "base" is the one
+    # benchmarked for tier classification (0.929 vs 0.714 for
+    # typed-decisions); see the implementation plan.
+    checkpoint: str = "base"
+    timeout_seconds: float = 2.0
+    # Loopback url targets are always allowed. Non-loopback private/LAN
+    # addresses (e.g. a sidecar on 192.168.x) require this opt-in so a
+    # config change can't turn the gateway into an SSRF proxy for internal
+    # networks — mirrors compression.allow_private_llm_url.
+    allow_private_url: bool = False
+    # Fraction of eligible calls to also shadow through laya (cost control).
     sample_rate: float = 1.0
+    # Prompts longer than this (chars) are skipped: the rule engine's
+    # length-based escalation is already reliable there, and laya's
+    # benchmarked value is specifically on short prompts.
+    max_prompt_chars: int = 4000
+    # In-memory cache of prompt-hash -> laya result, so a repeated prompt
+    # only calls the sidecar once. 0 disables caching.
+    cache_size: int = 512
     log_path: str = "logs/laya_shadow.jsonl"
 
 
