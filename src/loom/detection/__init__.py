@@ -5,6 +5,7 @@ from .engine import (
     classify_task_type,
     extract_features,
 )
+from .laya_shadow import LayaShadowRunner
 
 __all__ = [
     "DetectionEngine",
@@ -12,4 +13,5 @@ __all__ = [
     "PromptFeatures",
     "classify_task_type",
     "extract_features",
+    "LayaShadowRunner",
 ]

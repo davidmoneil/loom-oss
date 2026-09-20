@@ -117,6 +117,26 @@ class ObservabilityConfig(BaseModel):
     metrics_log_path: str = "logs/metrics.jsonl"
 
 
+class LayaShadowConfig(BaseModel):
+    """Optional shadow-mode ML classifier, compared against DetectionEngine.
+
+    Off by default. When enabled, the laya (convaiinnovations/laya) prompt
+    classifier runs alongside the rule-based DetectionEngine on every
+    ``/v1/detect`` call, entirely off that request's critical path: its
+    prediction is logged next to the rule-based one for comparison but
+    never changes the tier returned to the caller. See
+    ``src/loom/detection/laya_shadow.py``.
+    """
+
+    enabled: bool = False
+    model_id: str = "convaiinnovations/laya"
+    device: str = "cpu"
+    # Fraction of /v1/detect calls to also shadow through laya (cost control;
+    # laya is a ~421M-param model, ~33ms/call, vs. <10ms for the rule engine).
+    sample_rate: float = 1.0
+    log_path: str = "logs/laya_shadow.jsonl"
+
+
 class ScannerConfig(BaseModel):
     enabled: bool = False
     sanitize_logs: bool = True
@@ -158,6 +178,7 @@ class LoomConfig(BaseModel):
     storage: StorageConfig = Field(default_factory=StorageConfig)
     observability: ObservabilityConfig = Field(default_factory=ObservabilityConfig)
     scanner: ScannerConfig = Field(default_factory=ScannerConfig)
+    laya_shadow: LayaShadowConfig = Field(default_factory=LayaShadowConfig)
 
     # ------------------------------------------------------------------ loaders
     @classmethod

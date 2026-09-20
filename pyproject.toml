@@ -22,6 +22,11 @@ postgres = [
 neo4j = [
     "neo4j>=5.0",
 ]
+laya = [
+    # Optional shadow-mode ML classifier for detection (loom.detection.laya_shadow).
+    # Off by default; see LoomConfig.laya_shadow.
+    "laya",
+]
 dev = [
     "pytest>=7.0",
     "pytest-asyncio>=0.21",

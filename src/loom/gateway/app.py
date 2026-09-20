@@ -97,6 +97,11 @@ except Exception:  # pragma: no cover - degraded mode
     _detection_classify = None
 
 try:
+    from loom.detection.laya_shadow import LayaShadowRunner  # type: ignore
+except Exception:  # pragma: no cover - degraded mode / optional dependency
+    LayaShadowRunner = None  # type: ignore
+
+try:
     from loom.compression.processor import ContentProcessor  # type: ignore
 except Exception:  # pragma: no cover - degraded mode
     ContentProcessor = None  # type: ignore
@@ -158,6 +163,7 @@ class GatewayState:
         self.audit: Any = None
         self.routing: Any = None
         self.detection: Any = None
+        self.laya_shadow: Any = None
         self.compression: Any = None
         self.variants: Any = None
         self.scanner: Any = None
@@ -1267,6 +1273,22 @@ async def lifespan(app: FastAPI):
             except Exception:
                 state.detection = None
 
+    # Shadow-mode ML classifier: off by default. When enabled, it runs
+    # alongside DetectionEngine on /v1/detect purely for comparison
+    # logging (see loom.detection.laya_shadow) and never affects the tier
+    # returned to callers. Model load happens lazily on first request, on
+    # a background thread, so it can never add startup or request latency.
+    if LayaShadowRunner is not None and state.config.laya_shadow.enabled:
+        try:
+            state.laya_shadow = LayaShadowRunner(
+                model_id=state.config.laya_shadow.model_id,
+                device=state.config.laya_shadow.device,
+                sample_rate=state.config.laya_shadow.sample_rate,
+                log_path=state.config.laya_shadow.log_path,
+            )
+        except Exception:
+            state.laya_shadow = None
+
     if ContentProcessor is not None:
         try:
             state.compression = ContentProcessor(state.config)
@@ -1336,6 +1358,11 @@ async def lifespan(app: FastAPI):
                     close()
                 except Exception:
                     pass
+        if state.laya_shadow is not None:
+            try:
+                state.laya_shadow.close()
+            except Exception:
+                pass
 
 
 # --------------------------------------------------------------------------- #
@@ -2224,7 +2251,23 @@ def create_app() -> FastAPI:
             result = _run_detect(gw.detection, source, prompt)
         except Exception as exc:
             return _error_response(exc, request_id)
-        return JSONResponse({"request_id": request_id, **_jsonable(result)})
+        payload = _jsonable(result)
+
+        # Shadow mode: fire-and-forget laya comparison, never on the
+        # response path and never able to affect what's returned above.
+        if gw.laya_shadow is not None:
+            try:
+                gw.laya_shadow.shadow(
+                    request_id,
+                    source,
+                    prompt,
+                    rule_tier=payload.get("recommended_tier"),
+                    rule_confidence=payload.get("confidence"),
+                )
+            except Exception:
+                pass
+
+        return JSONResponse({"request_id": request_id, **payload})
 
     # ------------------------------------------------------------------- health
     @app.get(
@@ -2249,6 +2292,7 @@ def create_app() -> FastAPI:
             "providers": [p.name for p in gw.config.providers],
             "routing_table_loaded": gw.routing is not None,
             "detection_enabled": gw.detection is not None,
+            "laya_shadow_enabled": gw.laya_shadow is not None,
             "scanner_enabled": gw.scanner is not None and gw.scanner.enabled,
             # Observability contract blocks (docs/observability-api.md).
             # Compression rollup covers this process lifetime (estimated

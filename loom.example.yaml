@@ -109,3 +109,15 @@ storage:
 observability:
   audit_log_path: logs/audit.jsonl
   metrics_log_path: logs/metrics.jsonl
+
+# Shadow-mode ML classifier, compared against the rule-based DetectionEngine
+# on every /v1/detect call. Off by default — this is an observability/eval
+# feature, not a routing feature: laya's prediction is logged next to the
+# rule-based one but never changes the tier a caller gets back.
+# Install the optional dependency first: pip install 'loom-gateway[laya]'
+# laya_shadow:
+#   enabled: true
+#   model_id: convaiinnovations/laya
+#   device: cpu
+#   sample_rate: 1.0                   # fraction of /v1/detect calls to shadow
+#   log_path: logs/laya_shadow.jsonl
