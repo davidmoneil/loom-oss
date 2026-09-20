@@ -1476,7 +1476,7 @@ def create_app() -> FastAPI:
                     status_code=500,
                 )
 
-            forward = _passthrough_params(body)
+            forward = {**model_cfg.extra_params, **_passthrough_params(body)}
 
             # Session tracking: multi-signal fingerprint, turn counter.
             signals = _extract_session_signals(
@@ -3009,7 +3009,7 @@ _OPENAI_PASSTHROUGH = (
     "temperature", "top_p", "n", "stop", "max_tokens", "max_completion_tokens",
     "presence_penalty", "frequency_penalty", "logit_bias", "user", "seed",
     "response_format", "tools", "tool_choice", "functions", "function_call",
-    "parallel_tool_calls", "logprobs", "top_logprobs",
+    "parallel_tool_calls", "logprobs", "top_logprobs", "chat_template_kwargs",
 )
 _ANTHROPIC_PASSTHROUGH = (
     "temperature", "top_p", "top_k", "max_tokens", "stop_sequences", "system",
