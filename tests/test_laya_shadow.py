@@ -151,3 +151,93 @@ def test_shadow_is_fire_and_forget_via_executor(tmp_path):
 def test_close_does_not_raise(tmp_path):
     runner = LayaShadowRunner(log_path=str(tmp_path / "x.jsonl"))
     runner.close()  # must not raise even with no work scheduled
+
+
+# --------------------------------------------------------------------------- #
+#  _shadow_observe: the hook on the REAL request path
+#
+#  Regression cover for a gap in the first implementation: the shadow call was
+#  wired only into /v1/detect, a diagnostic endpoint that production traffic
+#  never reaches, so shadow mode collected nothing from real usage.
+# --------------------------------------------------------------------------- #
+
+class _RecordingShadow:
+    def __init__(self, explode=False):
+        self.calls = []
+        self.explode = explode
+
+    def shadow(self, request_id, source, prompt, rule_tier=None, rule_confidence=None):
+        if self.explode:
+            raise RuntimeError("shadow blew up")
+        self.calls.append(
+            {"request_id": request_id, "source": source, "prompt": prompt,
+             "rule_tier": rule_tier, "rule_confidence": rule_confidence}
+        )
+
+
+class _FakeGateway:
+    def __init__(self, shadow=None, detection=None):
+        self.laya_shadow = shadow
+        self.detection = detection
+
+
+def _observe(gw, messages, source="s", request_id="r1"):
+    from loom.gateway.app import _shadow_observe
+    _shadow_observe(gw, request_id, source, messages)
+
+
+def test_shadow_observe_fires_on_chat_messages():
+    sh = _RecordingShadow()
+    _observe(_FakeGateway(sh), [{"role": "user", "content": "Prove this is correct."}])
+    assert len(sh.calls) == 1
+    assert sh.calls[0]["prompt"] == "Prove this is correct."
+
+
+def test_shadow_observe_includes_rule_tier_when_detection_available():
+    from loom.detection.engine import DetectionEngine
+    sh = _RecordingShadow()
+    _observe(_FakeGateway(sh, DetectionEngine()),
+             [{"role": "user", "content": "What's the capital of France?"}])
+    assert sh.calls[0]["rule_tier"] in ("economy", "standard", "premium")
+    assert sh.calls[0]["rule_confidence"] is not None
+
+
+def test_shadow_observe_works_without_detection_engine():
+    sh = _RecordingShadow()
+    _observe(_FakeGateway(sh, None), [{"role": "user", "content": "hello"}])
+    assert sh.calls[0]["rule_tier"] is None
+
+
+def test_shadow_observe_noop_when_disabled():
+    _observe(_FakeGateway(None), [{"role": "user", "content": "hi"}])  # must not raise
+
+
+def test_shadow_observe_swallows_failures():
+    """A broken shadow must never surface on the request path."""
+    _observe(_FakeGateway(_RecordingShadow(explode=True)),
+             [{"role": "user", "content": "hi"}])  # must not raise
+
+
+def test_shadow_observe_handles_multimodal_content():
+    sh = _RecordingShadow()
+    _observe(_FakeGateway(sh), [
+        {"role": "user", "content": [{"type": "text", "text": "describe this"},
+                                     {"type": "image_url", "image_url": {"url": "x"}}]},
+    ])
+    assert "describe this" in sh.calls[0]["prompt"]
+
+
+def test_shadow_observe_skips_empty_prompt():
+    sh = _RecordingShadow()
+    _observe(_FakeGateway(sh), [{"role": "user", "content": ""}])
+    assert sh.calls == []
+
+
+def test_shadow_observe_joins_multiple_messages():
+    sh = _RecordingShadow()
+    _observe(_FakeGateway(sh), [
+        {"role": "system", "content": "be terse"},
+        {"role": "user", "content": "explain gc"},
+    ])
+    assert "be terse" in sh.calls[0]["prompt"]
+    assert "explain gc" in sh.calls[0]["prompt"]

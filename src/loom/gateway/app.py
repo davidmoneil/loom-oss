@@ -643,6 +643,52 @@ def _fallback_model(config: LoomConfig, policy: SourcePolicy) -> Optional[str]:
     return None
 
 
+
+def _shadow_observe(gw: Any, request_id: str, source: str, messages: list) -> None:
+    """Passively compare the rule detector against laya on real traffic.
+
+    Neither result influences routing: ``/v1/chat/completions`` selects its
+    model through :func:`_select_model` (task-type based), which this does not
+    touch. This exists purely to accumulate comparison data on the prompts
+    users actually send, since ``/v1/detect`` is a diagnostic endpoint that
+    production traffic never reaches.
+
+    Always silent. Any failure here must leave the request untouched.
+    """
+    if gw.laya_shadow is None:
+        return
+    try:
+        prompt = "\n".join(
+            part.get("text", "")
+            for m in messages
+            if isinstance(m, dict)
+            for part in (
+                m["content"] if isinstance(m.get("content"), list)
+                else [{"text": m.get("content") or ""}]
+            )
+            if isinstance(part, dict)
+        ).strip()
+        if not prompt:
+            return
+
+        rule_tier = None
+        rule_confidence = None
+        if gw.detection is not None:
+            result = _jsonable(_run_detect(gw.detection, source, prompt))
+            rule_tier = result.get("recommended_tier")
+            rule_confidence = result.get("confidence")
+
+        gw.laya_shadow.shadow(
+            request_id,
+            source,
+            prompt,
+            rule_tier=rule_tier,
+            rule_confidence=rule_confidence,
+        )
+    except Exception:
+        pass
+
+
 def _select_model(
     state: GatewayState,
     requested_model: Optional[str],
@@ -1484,6 +1530,10 @@ def create_app() -> FastAPI:
         api_key = _provider_api_key(request) or _bearer(request)
         source = _source(request)
         stream = bool(body.get("stream", False))
+
+        # Shadow-mode observation on real traffic. Fire-and-forget, never
+        # affects model selection or the response.
+        _shadow_observe(gw, request_id, source, messages)
 
         try:
             model, task_type, routing_reason = _select_model(
