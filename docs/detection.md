@@ -67,9 +67,13 @@ laya_shadow:
   log_path: logs/laya_shadow.jsonl
 ```
 
-`sample_rate` controls cost: laya is a ~421M-parameter model
-(~30-40ms/call) versus sub-millisecond for the rule-based engine, so on a
-busy gateway you may want to shadow only a fraction of requests.
+`sample_rate` controls cost: laya is a ~421M-parameter model. The model
+card's per-call figure is optimistic — measured on this project's own eval
+hardware (`laya-eval/bench.py`) it's closer to ~143ms fixed cost plus
+~39ms per additional question in the same batch (this integration asks two
+questions per call, `tier` and `needs_reasoning`, so budget roughly
+180-220ms per shadowed request), versus sub-millisecond for the rule-based
+engine. On a busy gateway you likely want `sample_rate` well below `1.0`.
 
 Each log line:
 
