@@ -97,6 +97,11 @@ except Exception:  # pragma: no cover - degraded mode
     _detection_classify = None
 
 try:
+    from loom.detection.laya_shadow import LayaShadowClient  # type: ignore
+except Exception:  # pragma: no cover - degraded mode / optional dependency
+    LayaShadowClient = None  # type: ignore
+
+try:
     from loom.compression.processor import ContentProcessor  # type: ignore
 except Exception:  # pragma: no cover - degraded mode
     ContentProcessor = None  # type: ignore
@@ -158,6 +163,7 @@ class GatewayState:
         self.audit: Any = None
         self.routing: Any = None
         self.detection: Any = None
+        self.laya_shadow: Any = None
         self.compression: Any = None
         self.variants: Any = None
         self.scanner: Any = None
@@ -635,6 +641,52 @@ def _fallback_model(config: LoomConfig, policy: SourcePolicy) -> Optional[str]:
         if provider.models:
             return provider.models[0].model_id
     return None
+
+
+
+def _shadow_observe(gw: Any, request_id: str, source: str, messages: list) -> None:
+    """Passively compare the rule detector against laya on real traffic.
+
+    Neither result influences routing: ``/v1/chat/completions`` selects its
+    model through :func:`_select_model` (task-type based), which this does not
+    touch. This exists purely to accumulate comparison data on the prompts
+    users actually send, since ``/v1/detect`` is a diagnostic endpoint that
+    production traffic never reaches.
+
+    Always silent. Any failure here must leave the request untouched.
+    """
+    if gw.laya_shadow is None:
+        return
+    try:
+        prompt = "\n".join(
+            part.get("text", "")
+            for m in messages
+            if isinstance(m, dict)
+            for part in (
+                m["content"] if isinstance(m.get("content"), list)
+                else [{"text": m.get("content") or ""}]
+            )
+            if isinstance(part, dict)
+        ).strip()
+        if not prompt:
+            return
+
+        rule_tier = None
+        rule_confidence = None
+        if gw.detection is not None:
+            result = _jsonable(_run_detect(gw.detection, source, prompt))
+            rule_tier = result.get("recommended_tier")
+            rule_confidence = result.get("confidence")
+
+        gw.laya_shadow.shadow(
+            request_id,
+            source,
+            prompt,
+            rule_tier=rule_tier,
+            rule_confidence=rule_confidence,
+        )
+    except Exception:
+        pass
 
 
 def _select_model(
@@ -1267,6 +1319,28 @@ async def lifespan(app: FastAPI):
             except Exception:
                 state.detection = None
 
+    # Shadow-mode laya sidecar client: off by default. When enabled, it
+    # calls the standalone laya sidecar service (services/laya-sidecar/)
+    # alongside DetectionEngine on /v1/detect purely for comparison
+    # logging (see loom.detection.laya_shadow) and never affects the tier
+    # returned to callers. The HTTP call happens on a background thread,
+    # so it can never add request latency; laya itself is never imported
+    # or loaded in this process.
+    if LayaShadowClient is not None and state.config.laya_shadow.enabled:
+        try:
+            state.laya_shadow = LayaShadowClient(
+                url=state.config.laya_shadow.url,
+                checkpoint=state.config.laya_shadow.checkpoint,
+                timeout_seconds=state.config.laya_shadow.timeout_seconds,
+                allow_private_url=state.config.laya_shadow.allow_private_url,
+                sample_rate=state.config.laya_shadow.sample_rate,
+                max_prompt_chars=state.config.laya_shadow.max_prompt_chars,
+                cache_size=state.config.laya_shadow.cache_size,
+                log_path=state.config.laya_shadow.log_path,
+            )
+        except Exception:
+            state.laya_shadow = None
+
     if ContentProcessor is not None:
         try:
             state.compression = ContentProcessor(state.config)
@@ -1336,6 +1410,11 @@ async def lifespan(app: FastAPI):
                     close()
                 except Exception:
                     pass
+        if state.laya_shadow is not None:
+            try:
+                state.laya_shadow.close()
+            except Exception:
+                pass
 
 
 # --------------------------------------------------------------------------- #
@@ -1457,6 +1536,10 @@ def create_app() -> FastAPI:
         api_key = _provider_api_key(request) or _bearer(request)
         source = _source(request)
         stream = bool(body.get("stream", False))
+
+        # Shadow-mode observation on real traffic. Fire-and-forget, never
+        # affects model selection or the response.
+        _shadow_observe(gw, request_id, source, messages)
 
         try:
             model, task_type, routing_reason = _select_model(
@@ -2224,7 +2307,23 @@ def create_app() -> FastAPI:
             result = _run_detect(gw.detection, source, prompt)
         except Exception as exc:
             return _error_response(exc, request_id)
-        return JSONResponse({"request_id": request_id, **_jsonable(result)})
+        payload = _jsonable(result)
+
+        # Shadow mode: fire-and-forget laya comparison, never on the
+        # response path and never able to affect what's returned above.
+        if gw.laya_shadow is not None:
+            try:
+                gw.laya_shadow.shadow(
+                    request_id,
+                    source,
+                    prompt,
+                    rule_tier=payload.get("recommended_tier"),
+                    rule_confidence=payload.get("confidence"),
+                )
+            except Exception:
+                pass
+
+        return JSONResponse({"request_id": request_id, **payload})
 
     # ------------------------------------------------------------------- health
     @app.get(
@@ -2249,6 +2348,7 @@ def create_app() -> FastAPI:
             "providers": [p.name for p in gw.config.providers],
             "routing_table_loaded": gw.routing is not None,
             "detection_enabled": gw.detection is not None,
+            "laya_shadow_enabled": gw.laya_shadow is not None,
             "scanner_enabled": gw.scanner is not None and gw.scanner.enabled,
             # Observability contract blocks (docs/observability-api.md).
             # Compression rollup covers this process lifetime (estimated

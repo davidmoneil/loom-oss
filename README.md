@@ -137,7 +137,9 @@ Loom is organized into a few focused layers:
   LLM-assisted prose summarization and a Neo4j variant store for relevance-aware
   compression. See [docs/compression.md](docs/compression.md) for the full picture.
 - **Detection** (`loom.detection`) — classifies incoming requests (task type, capability
-  needs) to inform routing.
+  needs) to inform routing. Rule-based and dependency-free by default, with an optional
+  ML shadow classifier for comparison-only evaluation. See
+  [docs/detection.md](docs/detection.md).
 - **Observability** (`loom.observability`) — fire-and-forget JSONL audit and metrics logs,
   backed by a pluggable store (`loom.storage`, SQLite or PostgreSQL) for routing decisions,
   metrics, and the compression cache.
