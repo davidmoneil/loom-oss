@@ -1769,6 +1769,13 @@ def create_app() -> FastAPI:
         source = _source(request)
         stream = bool(body.get("stream", False))
 
+        # Shadow-mode observation on real traffic. Fire-and-forget, never
+        # affects model selection or the response. See _shadow_observe's
+        # docstring: /v1/chat/completions and /v1/messages are the only two
+        # routes real traffic uses, so both must call this for shadow mode
+        # to see anything but /v1/detect's synthetic prompts.
+        _shadow_observe(gw, request_id, source, messages)
+
         try:
             model, task_type, routing_reason = _select_model(
                 gw, body.get("model"), source, body, messages

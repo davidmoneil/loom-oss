@@ -13,6 +13,11 @@ RUN pip install --no-cache-dir -r requirements.txt
 
 COPY server.py .
 
+# Pre-create the HF cache mount point: a volume mounted onto a path that
+# doesn't already exist in the image is created root-owned by the container
+# runtime, which the non-root laya user can't write to.
+RUN mkdir -p /app/.cache/huggingface
+
 RUN chown -R laya:laya /app
 USER laya
 
