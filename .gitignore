@@ -38,5 +38,12 @@ loom.yaml
 !.env.homelab.example
 docker-compose.homelab.yml
 loom.homelab.yaml
+loom.homelab.yaml.*
 graphify-out/
 .deploy-log.jsonl
+
+# Editor/OS backup and sidecar files — these can carry copies of gitignored
+# config (e.g. loom.homelab.yaml.pre-*) or macOS metadata (._*) that would
+# otherwise slip into this public repo unnoticed
+._*
+.DS_Store
