@@ -70,6 +70,15 @@ class RoutingConfig(BaseModel):
     reroute_enabled: bool = True
     programmatic_search_enabled: bool = True
     search_sources: dict[str, str] = Field(default_factory=dict)
+    # Feed DetectionEngine's tier estimate into routing as a minimum_tier
+    # floor (never overrides an explicit client model or a source pin —
+    # both short-circuit before the routing engine runs). Off by default:
+    # detection has been diagnostic-only in production until now, and
+    # enabling this changes real model spend.
+    detection_routing_enabled: bool = False
+    # Only raise the floor when the detector clears this confidence — a
+    # shaky tier bump is not worth its extra cost.
+    detection_routing_min_confidence: float = 0.5
 
 
 class CompressionConfig(BaseModel):

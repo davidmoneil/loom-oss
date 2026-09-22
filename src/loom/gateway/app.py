@@ -91,6 +91,11 @@ except Exception:  # pragma: no cover - degraded mode
     RoutingEngine = None  # type: ignore
 
 try:
+    from loom.routing.providers import TIER_ORDER  # type: ignore
+except Exception:  # pragma: no cover - degraded mode
+    TIER_ORDER = {}  # type: ignore
+
+try:
     from loom.detection.engine import DetectionEngine, classify_task_type as _detection_classify  # type: ignore
 except Exception:  # pragma: no cover - degraded mode
     DetectionEngine = None  # type: ignore
@@ -644,6 +649,20 @@ def _fallback_model(config: LoomConfig, policy: SourcePolicy) -> Optional[str]:
 
 
 
+def _extract_prompt_text(messages: list) -> str:
+    """Flatten a messages list into the plain text a detector can score."""
+    return "\n".join(
+        part.get("text", "")
+        for m in messages
+        if isinstance(m, dict)
+        for part in (
+            m["content"] if isinstance(m.get("content"), list)
+            else [{"text": m.get("content") or ""}]
+        )
+        if isinstance(part, dict)
+    ).strip()
+
+
 def _shadow_observe(gw: Any, request_id: str, source: str, messages: list) -> None:
     """Passively compare the rule detector against laya on real traffic.
 
@@ -658,16 +677,7 @@ def _shadow_observe(gw: Any, request_id: str, source: str, messages: list) -> No
     if gw.laya_shadow is None:
         return
     try:
-        prompt = "\n".join(
-            part.get("text", "")
-            for m in messages
-            if isinstance(m, dict)
-            for part in (
-                m["content"] if isinstance(m.get("content"), list)
-                else [{"text": m.get("content") or ""}]
-            )
-            if isinstance(part, dict)
-        ).strip()
+        prompt = _extract_prompt_text(messages)
         if not prompt:
             return
 
@@ -689,6 +699,33 @@ def _shadow_observe(gw: Any, request_id: str, source: str, messages: list) -> No
         pass
 
 
+def _detect_tier_floor(state: Any, source: str, messages: list) -> Optional[str]:
+    """Return a detected tier to use as a routing floor, or None.
+
+    Gated behind ``routing.detection_routing_enabled`` (off by default) plus
+    a confidence threshold: a confident tier bump is worth the extra spend,
+    a shaky one is not. Any failure here degrades to "no floor" — detection
+    must never be able to break routing.
+    """
+    try:
+        cfg = state.config.routing
+        if not getattr(cfg, "detection_routing_enabled", False):
+            return None
+        if state.detection is None:
+            return None
+        prompt = _extract_prompt_text(messages)
+        if not prompt:
+            return None
+        result = _jsonable(_run_detect(state.detection, source, prompt))
+        tier = result.get("recommended_tier")
+        confidence = result.get("confidence") or 0.0
+        if not tier or confidence < cfg.detection_routing_min_confidence:
+            return None
+        return tier
+    except Exception:
+        return None
+
+
 def _select_model(
     state: GatewayState,
     requested_model: Optional[str],
@@ -708,10 +745,15 @@ def _select_model(
         return policy.pinned_model, task_type, "source_pinned"
 
     if state.routing is not None:
-        rec = _try_recommend(state.routing, task_type, source, policy)
+        tier_floor = _detect_tier_floor(state, source, messages)
+        rec = _try_recommend(state.routing, task_type, source, policy, tier_floor)
         model = _recommendation_model(rec)
         if model:
             reason = getattr(rec, "routing_reason", "") or "routed"
+            if tier_floor and TIER_ORDER.get(tier_floor, 0) > TIER_ORDER.get(
+                policy.minimum_tier, 0
+            ):
+                reason = f"{reason}|detected_tier_floor:{tier_floor}"
             return model, task_type, reason
 
     fallback = _fallback_model(state.config, policy)
@@ -724,17 +766,33 @@ def _select_model(
     )
 
 
-def _try_recommend(engine: Any, task_type: str, source: str, policy: SourcePolicy) -> Any:
+def _try_recommend(
+    engine: Any,
+    task_type: str,
+    source: str,
+    policy: SourcePolicy,
+    min_tier_floor: Optional[str] = None,
+) -> Any:
     """Call RoutingEngine.recommend, tolerating minor signature drift."""
     try:
         return engine.recommend(
             task_type=task_type,
             source=source,
             requires_tools=policy.requires_tools,
+            min_tier_floor=min_tier_floor,
         )
     except TypeError:
         try:
-            return engine.recommend(task_type=task_type, source=source)
+            return engine.recommend(
+                task_type=task_type,
+                source=source,
+                requires_tools=policy.requires_tools,
+            )
+        except TypeError:
+            try:
+                return engine.recommend(task_type=task_type, source=source)
+            except Exception:
+                return None
         except Exception:
             return None
     except Exception:
