@@ -47,3 +47,6 @@ graphify-out/
 # otherwise slip into this public repo unnoticed
 ._*
 .DS_Store
+
+# Backups of the (already ignored) homelab compose file
+docker-compose.homelab.yml.*
