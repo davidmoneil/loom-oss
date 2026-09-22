@@ -91,10 +91,20 @@ except Exception:  # pragma: no cover - degraded mode
     RoutingEngine = None  # type: ignore
 
 try:
+    from loom.routing.providers import TIER_ORDER  # type: ignore
+except Exception:  # pragma: no cover - degraded mode
+    TIER_ORDER = {}  # type: ignore
+
+try:
     from loom.detection.engine import DetectionEngine, classify_task_type as _detection_classify  # type: ignore
 except Exception:  # pragma: no cover - degraded mode
     DetectionEngine = None  # type: ignore
     _detection_classify = None
+
+try:
+    from loom.detection.laya_shadow import LayaShadowClient  # type: ignore
+except Exception:  # pragma: no cover - degraded mode / optional dependency
+    LayaShadowClient = None  # type: ignore
 
 try:
     from loom.compression.processor import ContentProcessor  # type: ignore
@@ -158,6 +168,7 @@ class GatewayState:
         self.audit: Any = None
         self.routing: Any = None
         self.detection: Any = None
+        self.laya_shadow: Any = None
         self.compression: Any = None
         self.variants: Any = None
         self.scanner: Any = None
@@ -637,6 +648,84 @@ def _fallback_model(config: LoomConfig, policy: SourcePolicy) -> Optional[str]:
     return None
 
 
+
+def _extract_prompt_text(messages: list) -> str:
+    """Flatten a messages list into the plain text a detector can score."""
+    return "\n".join(
+        part.get("text", "")
+        for m in messages
+        if isinstance(m, dict)
+        for part in (
+            m["content"] if isinstance(m.get("content"), list)
+            else [{"text": m.get("content") or ""}]
+        )
+        if isinstance(part, dict)
+    ).strip()
+
+
+def _shadow_observe(gw: Any, request_id: str, source: str, messages: list) -> None:
+    """Passively compare the rule detector against laya on real traffic.
+
+    Neither result influences routing: ``/v1/chat/completions`` selects its
+    model through :func:`_select_model` (task-type based), which this does not
+    touch. This exists purely to accumulate comparison data on the prompts
+    users actually send, since ``/v1/detect`` is a diagnostic endpoint that
+    production traffic never reaches.
+
+    Always silent. Any failure here must leave the request untouched.
+    """
+    if gw.laya_shadow is None:
+        return
+    try:
+        prompt = _extract_prompt_text(messages)
+        if not prompt:
+            return
+
+        rule_tier = None
+        rule_confidence = None
+        if gw.detection is not None:
+            result = _jsonable(_run_detect(gw.detection, source, prompt))
+            rule_tier = result.get("recommended_tier")
+            rule_confidence = result.get("confidence")
+
+        gw.laya_shadow.shadow(
+            request_id,
+            source,
+            prompt,
+            rule_tier=rule_tier,
+            rule_confidence=rule_confidence,
+        )
+    except Exception:
+        pass
+
+
+def _detect_tier_floor(state: Any, source: str, messages: list) -> Optional[str]:
+    """Return a detected tier to use as a routing floor, or None.
+
+    Gated behind ``routing.detection_routing_enabled`` (off by default) plus
+    a confidence threshold: a confident tier bump is worth the extra spend,
+    a shaky one is not. Any failure here degrades to "no floor" — detection
+    must never be able to break routing.
+    """
+    try:
+        cfg = state.config.routing
+        if not getattr(cfg, "detection_routing_enabled", False):
+            return None
+        if state.detection is None:
+            return None
+        prompt = _extract_prompt_text(messages)
+        if not prompt:
+            return None
+        result = _jsonable(_run_detect(state.detection, source, prompt))
+        tier = result.get("recommended_tier")
+        confidence = result.get("confidence") or 0.0
+        if not tier or confidence < cfg.detection_routing_min_confidence:
+            return None
+        return tier
+    except Exception:
+        return None
+
+
 def _select_model(
     state: GatewayState,
     requested_model: Optional[str],
@@ -656,10 +745,15 @@ def _select_model(
         return policy.pinned_model, task_type, "source_pinned"
 
     if state.routing is not None:
-        rec = _try_recommend(state.routing, task_type, source, policy)
+        tier_floor = _detect_tier_floor(state, source, messages)
+        rec = _try_recommend(state.routing, task_type, source, policy, tier_floor)
         model = _recommendation_model(rec)
         if model:
             reason = getattr(rec, "routing_reason", "") or "routed"
+            if tier_floor and TIER_ORDER.get(tier_floor, 0) > TIER_ORDER.get(
+                policy.minimum_tier, 0
+            ):
+                reason = f"{reason}|detected_tier_floor:{tier_floor}"
             return model, task_type, reason
 
     fallback = _fallback_model(state.config, policy)
@@ -672,17 +766,33 @@ def _select_model(
     )
 
 
-def _try_recommend(engine: Any, task_type: str, source: str, policy: SourcePolicy) -> Any:
+def _try_recommend(
+    engine: Any,
+    task_type: str,
+    source: str,
+    policy: SourcePolicy,
+    min_tier_floor: Optional[str] = None,
+) -> Any:
     """Call RoutingEngine.recommend, tolerating minor signature drift."""
     try:
         return engine.recommend(
             task_type=task_type,
             source=source,
             requires_tools=policy.requires_tools,
+            min_tier_floor=min_tier_floor,
         )
     except TypeError:
         try:
-            return engine.recommend(task_type=task_type, source=source)
+            return engine.recommend(
+                task_type=task_type,
+                source=source,
+                requires_tools=policy.requires_tools,
+            )
+        except TypeError:
+            try:
+                return engine.recommend(task_type=task_type, source=source)
+            except Exception:
+                return None
         except Exception:
             return None
     except Exception:
@@ -1267,6 +1377,28 @@ async def lifespan(app: FastAPI):
             except Exception:
                 state.detection = None
 
+    # Shadow-mode laya sidecar client: off by default. When enabled, it
+    # calls the standalone laya sidecar service (services/laya-sidecar/)
+    # alongside DetectionEngine on /v1/detect purely for comparison
+    # logging (see loom.detection.laya_shadow) and never affects the tier
+    # returned to callers. The HTTP call happens on a background thread,
+    # so it can never add request latency; laya itself is never imported
+    # or loaded in this process.
+    if LayaShadowClient is not None and state.config.laya_shadow.enabled:
+        try:
+            state.laya_shadow = LayaShadowClient(
+                url=state.config.laya_shadow.url,
+                checkpoint=state.config.laya_shadow.checkpoint,
+                timeout_seconds=state.config.laya_shadow.timeout_seconds,
+                allow_private_url=state.config.laya_shadow.allow_private_url,
+                sample_rate=state.config.laya_shadow.sample_rate,
+                max_prompt_chars=state.config.laya_shadow.max_prompt_chars,
+                cache_size=state.config.laya_shadow.cache_size,
+                log_path=state.config.laya_shadow.log_path,
+            )
+        except Exception:
+            state.laya_shadow = None
+
     if ContentProcessor is not None:
         try:
             state.compression = ContentProcessor(state.config)
@@ -1336,6 +1468,11 @@ async def lifespan(app: FastAPI):
                     close()
                 except Exception:
                     pass
+        if state.laya_shadow is not None:
+            try:
+                state.laya_shadow.close()
+            except Exception:
+                pass
 
 
 # --------------------------------------------------------------------------- #
@@ -1458,6 +1595,10 @@ def create_app() -> FastAPI:
         source = _source(request)
         stream = bool(body.get("stream", False))
 
+        # Shadow-mode observation on real traffic. Fire-and-forget, never
+        # affects model selection or the response.
+        _shadow_observe(gw, request_id, source, messages)
+
         try:
             model, task_type, routing_reason = _select_model(
                 gw, body.get("model"), source, body, messages
@@ -1476,7 +1617,7 @@ def create_app() -> FastAPI:
                     status_code=500,
                 )
 
-            forward = _passthrough_params(body)
+            forward = {**model_cfg.extra_params, **_passthrough_params(body)}
 
             # Session tracking: multi-signal fingerprint, turn counter.
             signals = _extract_session_signals(
@@ -1685,6 +1826,13 @@ def create_app() -> FastAPI:
         api_key = _provider_api_key(request) or request.headers.get("x-api-key", "") or _bearer(request)
         source = _source(request)
         stream = bool(body.get("stream", False))
+
+        # Shadow-mode observation on real traffic. Fire-and-forget, never
+        # affects model selection or the response. See _shadow_observe's
+        # docstring: /v1/chat/completions and /v1/messages are the only two
+        # routes real traffic uses, so both must call this for shadow mode
+        # to see anything but /v1/detect's synthetic prompts.
+        _shadow_observe(gw, request_id, source, messages)
 
         try:
             model, task_type, routing_reason = _select_model(
@@ -2224,7 +2372,23 @@ def create_app() -> FastAPI:
             result = _run_detect(gw.detection, source, prompt)
         except Exception as exc:
             return _error_response(exc, request_id)
-        return JSONResponse({"request_id": request_id, **_jsonable(result)})
+        payload = _jsonable(result)
+
+        # Shadow mode: fire-and-forget laya comparison, never on the
+        # response path and never able to affect what's returned above.
+        if gw.laya_shadow is not None:
+            try:
+                gw.laya_shadow.shadow(
+                    request_id,
+                    source,
+                    prompt,
+                    rule_tier=payload.get("recommended_tier"),
+                    rule_confidence=payload.get("confidence"),
+                )
+            except Exception:
+                pass
+
+        return JSONResponse({"request_id": request_id, **payload})
 
     # ------------------------------------------------------------------- health
     @app.get(
@@ -2249,6 +2413,7 @@ def create_app() -> FastAPI:
             "providers": [p.name for p in gw.config.providers],
             "routing_table_loaded": gw.routing is not None,
             "detection_enabled": gw.detection is not None,
+            "laya_shadow_enabled": gw.laya_shadow is not None,
             "scanner_enabled": gw.scanner is not None and gw.scanner.enabled,
             # Observability contract blocks (docs/observability-api.md).
             # Compression rollup covers this process lifetime (estimated
@@ -3012,7 +3177,7 @@ _OPENAI_PASSTHROUGH = (
     "temperature", "top_p", "n", "stop", "max_tokens", "max_completion_tokens",
     "presence_penalty", "frequency_penalty", "logit_bias", "user", "seed",
     "response_format", "tools", "tool_choice", "functions", "function_call",
-    "parallel_tool_calls", "logprobs", "top_logprobs",
+    "parallel_tool_calls", "logprobs", "top_logprobs", "chat_template_kwargs",
 )
 _ANTHROPIC_PASSTHROUGH = (
     "temperature", "top_p", "top_k", "max_tokens", "stop_sequences", "system",

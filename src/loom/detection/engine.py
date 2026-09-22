@@ -31,6 +31,77 @@ _HIGH_COMPLEXITY_TAGS = frozenset([
 ])
 
 
+# Vocabulary that signals genuine reasoning work: multi-step analysis, design
+# under tradeoffs, proof, or long-horizon planning. These drive the difficulty
+# score high enough to reach ``premium`` on their own, independent of length —
+# a short prompt asking for a correctness proof is not an economy prompt.
+_PREMIUM_PATTERNS = [
+    r"\barchitect(?:ure|ing)?\b", r"\bdesign\b", r"\bprove\b", r"\bproof\b",
+    r"\bderive\b", r"\bjustif(?:y|ication)\b", r"\bdefend\b",
+    r"\banalys(?:e|is)\b", r"\banalyz(?:e|is)\b", r"\baudit\b",
+    r"\bdiagnos(?:e|is)\b", r"\btrade[\s-]?offs?\b", r"\btrading off\b",
+    r"\bcounterexample\b", r"\blineariz(?:able|ability)\b",
+    r"\broot[\s-]cause\b", r"\bfailure[\s-]mode", r"\battack path\b",
+    r"\bblast radius\b", r"\bremediation\b", r"\bexploitability\b",
+    r"\bmigration\b", r"\brollback\b", r"\bzero[\s-]downtime\b",
+    r"\bdeployable\b", r"\bdependency ordering\b", r"\bdecision tree\b",
+    r"\battribute the\b", r"\bwalk through\b", r"\bsystematically\b",
+    r"\breason through\b", r"\bstrongest objection\b", r"\btelemetry\b",
+    r"\bconsistency\b", r"\bquantify\b", r"\bisolate\b",
+    r"\bevaluate\b", r"\bweigh\b", r"\bassess\b", r"\bcompare\b",
+    r"\brecommend(?:ation)?\b", r"\bstrategy\b", r"\brollout\b",
+    r"\breconciliation\b", r"\bconstraints?\b", r"\bimplications?\b",
+]
+
+# Verbs that imply producing a non-trivial artifact: ordinary engineering and
+# writing work. Enough to clear ``economy``, not enough to reach ``premium``.
+_PRODUCTION_PATTERNS = [
+    r"\bwrite\b", r"\bdraft\b", r"\bimplement\b", r"\bexplain\b",
+    r"\breview\b", r"\brefactor\b", r"\bsummaris(?:e)\b", r"\bsummariz(?:e)\b",
+    r"\bturn these\b", r"\bturn this\b", r"\badd\b", r"\bgenerate\b",
+    r"\bcreate\b", r"\bbuild\b", r"\bfix\b", r"\boptimis(?:e)\b",
+    r"\boptimiz(?:e)\b", r"\bsuggest\b",
+]
+
+# Markers of a trivial, single-step operation. These cancel a production verb
+# so that e.g. "fix the typo" or "summarise in one sentence" stays economy.
+_TRIVIAL_PATTERNS = [
+    r"\btranslate\b", r"\bconvert\b", r"\breformat\b", r"\btypo\b",
+    r"\bsynonym\b", r"\bantonym\b", r"\bin one sentence\b",
+    r"\bcapital of\b", r"\bstand for\b", r"\bprime number\b",
+    r"\bextract the\b", r"\bwho wrote\b", r"\bdefine\b",
+]
+
+# A second imperative joined by "and" indicates a multi-part request.
+_MULTIPART_RE = re.compile(
+    r"\band\s+(?:then\s+)?(?:list|suggest|propose|recommend|make|return|"
+    r"report|give|produce|rank|state|defend|explain|add|write|construct|"
+    r"quantify|design)\b",
+    re.IGNORECASE,
+)
+
+_PREMIUM_RE = re.compile("|".join(_PREMIUM_PATTERNS), re.IGNORECASE)
+_PRODUCTION_RE = re.compile("|".join(_PRODUCTION_PATTERNS), re.IGNORECASE)
+_TRIVIAL_RE = re.compile("|".join(_TRIVIAL_PATTERNS), re.IGNORECASE)
+
+# Difficulty weights. A single premium signal (34) lands in standard — one
+# reasoning verb is ambiguous on its own. Two clear STANDARD_MAX (65)
+# unaided, which matters because real prompts carry no XML markup to top
+# them up. Length contributes at most LENGTH_MAX_CONTRIBUTION,
+# reduced from the original 50 so that verbosity alone cannot outrank
+# substance — 9000 words of filler must not outscore a proof request.
+PREMIUM_SIGNAL_WEIGHT = 34.0
+PREMIUM_SIGNAL_CAP = 68.0
+PRODUCTION_SIGNAL_WEIGHT = 32.0
+PRODUCTION_SIGNAL_CAP = 32.0
+TRIVIAL_SIGNAL_PENALTY = 18.0
+MULTIPART_WEIGHT = 10.0
+MULTIPART_CAP = 20.0
+HIGH_COMPLEXITY_TAG_WEIGHT = 9.0
+HIGH_COMPLEXITY_TAG_CAP = 27.0
+LENGTH_MAX_CONTRIBUTION = 30.0
+
+
 @dataclass
 class PromptFeatures:
     token_estimate: int
@@ -39,18 +110,59 @@ class PromptFeatures:
     tool_call_patterns: int
     message_count: int
     has_code_blocks: bool
+    # Semantic-difficulty counts. Defaulted so existing positional callers and
+    # tests that predate these fields keep working.
+    premium_signal_count: int = 0
+    production_signal_count: int = 0
+    trivial_signal_count: int = 0
+    multipart_count: int = 0
+
+    @property
+    def difficulty_score(self) -> float:
+        """0-100 score for semantic difficulty, ignoring prompt length entirely.
+
+        This is the part that length cannot buy. A prompt earns premium-range
+        difficulty by asking for reasoning work — proof, design under
+        tradeoffs, root-cause analysis — not by being long.
+        """
+        score = 0.0
+        score += min(PREMIUM_SIGNAL_CAP,
+                     self.premium_signal_count * PREMIUM_SIGNAL_WEIGHT)
+        score += min(HIGH_COMPLEXITY_TAG_CAP,
+                     self.high_complexity_tag_count * HIGH_COMPLEXITY_TAG_WEIGHT)
+        score += min(MULTIPART_CAP, self.multipart_count * MULTIPART_WEIGHT)
+
+        # Production verbs lift a prompt out of economy, but a trivial marker
+        # ("fix the TYPO", "summarise IN ONE SENTENCE") cancels that lift.
+        # Trivial markers never suppress genuine reasoning signals.
+        if self.premium_signal_count == 0:
+            production = min(PRODUCTION_SIGNAL_CAP,
+                             self.production_signal_count * PRODUCTION_SIGNAL_WEIGHT)
+            if self.trivial_signal_count:
+                production = max(
+                    0.0, production - self.trivial_signal_count * TRIVIAL_SIGNAL_PENALTY
+                )
+            score += production
+
+        if self.has_code_blocks:
+            score += 5
+        score += min(12, self.tool_call_patterns * 3)
+        return min(100.0, score)
+
+    @property
+    def length_score(self) -> float:
+        """0-``LENGTH_MAX_CONTRIBUTION`` contribution from sheer prompt size."""
+        return min(
+            LENGTH_MAX_CONTRIBUTION,
+            self.token_estimate / LONG_PROMPT_TOKENS * LENGTH_MAX_CONTRIBUTION,
+        )
 
     @property
     def complexity_score(self) -> float:
         """0-100 complexity score; higher = more complex = prefer a higher tier."""
-        score = 0.0
-        score += min(50, self.token_estimate / LONG_PROMPT_TOKENS * 50)
-        score += min(20, self.high_complexity_tag_count * 4)
-        score += min(15, self.tool_call_patterns * 3)
+        score = self.difficulty_score + self.length_score
         score += min(10, self.xml_tag_count * 0.5)
-        if self.has_code_blocks:
-            score += 5
-        return min(100, score)
+        return min(100.0, score)
 
 
 @dataclass
@@ -83,6 +195,14 @@ def extract_features(prompt_text: str, message_count: int = 1) -> PromptFeatures
     ))
     has_code = bool(re.search(r"```[\w]*\n", prompt_text))
 
+    premium_signals = len(set(m.group(0).lower()
+                              for m in _PREMIUM_RE.finditer(prompt_text)))
+    production_signals = len(set(m.group(0).lower()
+                                 for m in _PRODUCTION_RE.finditer(prompt_text)))
+    trivial_signals = len(set(m.group(0).lower()
+                              for m in _TRIVIAL_RE.finditer(prompt_text)))
+    multipart = len(_MULTIPART_RE.findall(prompt_text))
+
     return PromptFeatures(
         token_estimate=token_estimate,
         xml_tag_count=len(all_tags),
@@ -90,6 +210,10 @@ def extract_features(prompt_text: str, message_count: int = 1) -> PromptFeatures
         tool_call_patterns=tool_patterns,
         message_count=message_count,
         has_code_blocks=has_code,
+        premium_signal_count=premium_signals,
+        production_signal_count=production_signals,
+        trivial_signal_count=trivial_signals,
+        multipart_count=multipart,
     )
 
 
@@ -180,6 +304,13 @@ class DetectionEngine:
             reasons.append(f"high complexity ({features.complexity_score:.0f}/100)")
         elif features.complexity_score <= self._economy_max:
             reasons.append(f"low complexity ({features.complexity_score:.0f}/100)")
+        if features.premium_signal_count > 0:
+            reasons.append(
+                f"{features.premium_signal_count} reasoning signals "
+                f"(difficulty {features.difficulty_score:.0f}/100)"
+            )
+        if features.multipart_count > 0:
+            reasons.append(f"{features.multipart_count} multi-part requests")
         if features.high_complexity_tag_count > 0:
             reasons.append(f"{features.high_complexity_tag_count} complex XML tags")
         if features.tool_call_patterns > 0:

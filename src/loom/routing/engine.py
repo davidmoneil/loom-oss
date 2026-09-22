@@ -51,10 +51,22 @@ class RoutingEngine:
         requires_tools: bool = False,
         format_required: Optional[str] = None,
         payload_tokens_est: int = 0,
+        min_tier_floor: Optional[str] = None,
     ) -> Optional[RoutingRecommendation]:
-        """Recommend a model using the EQRT algorithm, or config fallback."""
+        """Recommend a model using the EQRT algorithm, or config fallback.
+
+        ``min_tier_floor``, when higher than the source's configured
+        ``minimum_tier``, raises the floor for this call only — it never
+        lowers it. The caller (the gateway) is responsible for deciding
+        when a floor applies; a source's own policy always wins on a pin.
+        """
         policy = self._config.get_source_policy(source)
         profile = SourceProfile.from_policy(source, policy)
+
+        if min_tier_floor and TIER_ORDER.get(min_tier_floor, -1) > TIER_ORDER.get(
+            profile.minimum_tier, 0
+        ):
+            profile.minimum_tier = min_tier_floor
 
         if self._table:
             return self._table.recommend(

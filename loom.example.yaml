@@ -114,3 +114,24 @@ storage:
 observability:
   audit_log_path: logs/audit.jsonl
   metrics_log_path: logs/metrics.jsonl
+
+# Shadow-mode ML classifier, compared against the rule-based DetectionEngine
+# on every /v1/detect call (and, passively, real /v1/chat/completions
+# traffic). Off by default — this is an observability/eval feature, not a
+# routing feature: laya's prediction is logged next to the rule-based one
+# but never changes the tier a caller gets back.
+#
+# Requires the laya sidecar service running separately (services/laya-sidecar/
+# in this repo — its own container, since laya pulls a multi-GB torch/CUDA
+# dependency set that has no business being loaded into every gateway
+# restart). See services/laya-sidecar/README.md to run it.
+# laya_shadow:
+#   enabled: true
+#   url: http://localhost:8091         # laya sidecar base URL
+#   checkpoint: base                   # sidecar-resident checkpoint to request
+#   timeout_seconds: 2.0
+#   allow_private_url: false           # opt in to a non-loopback LAN sidecar
+#   sample_rate: 1.0                   # fraction of eligible calls to shadow
+#   max_prompt_chars: 4000             # skip prompts longer than this
+#   cache_size: 512                    # prompt-hash -> result cache entries
+#   log_path: logs/laya_shadow.jsonl

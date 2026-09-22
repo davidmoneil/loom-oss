@@ -15,7 +15,7 @@ from __future__ import annotations
 
 import os
 from pathlib import Path
-from typing import Optional
+from typing import Any, Optional
 
 import yaml
 from pydantic import BaseModel, Field
@@ -30,6 +30,9 @@ class ModelConfig(BaseModel):
     max_context_tokens: int = 8192
     cost_per_1k_input: float = 0.0
     cost_per_1k_output: float = 0.0
+    # Default OpenAI-passthrough params merged into every request for this
+    # model (e.g. chat_template_kwargs). Request-supplied values win.
+    extra_params: dict[str, Any] = Field(default_factory=dict)
 
 
 class ProviderConfig(BaseModel):
@@ -67,6 +70,15 @@ class RoutingConfig(BaseModel):
     reroute_enabled: bool = True
     programmatic_search_enabled: bool = True
     search_sources: dict[str, str] = Field(default_factory=dict)
+    # Feed DetectionEngine's tier estimate into routing as a minimum_tier
+    # floor (never overrides an explicit client model or a source pin —
+    # both short-circuit before the routing engine runs). Off by default:
+    # detection has been diagnostic-only in production until now, and
+    # enabling this changes real model spend.
+    detection_routing_enabled: bool = False
+    # Only raise the floor when the detector clears this confidence — a
+    # shaky tier bump is not worth its extra cost.
+    detection_routing_min_confidence: float = 0.5
 
 
 class CompressionConfig(BaseModel):
@@ -119,6 +131,44 @@ class ObservabilityConfig(BaseModel):
     metrics_log_path: str = "logs/metrics.jsonl"
 
 
+class LayaShadowConfig(BaseModel):
+    """Optional shadow-mode ML classifier, compared against DetectionEngine.
+
+    Off by default. When enabled, every ``/v1/detect`` call (and, passively,
+    real ``/v1/chat/completions`` traffic) fires a non-blocking HTTP call to
+    a standalone laya sidecar service (``services/laya-sidecar/`` in this
+    repo) running the convaiinnovations/laya prompt classifier. laya itself
+    is never imported or loaded in the gateway process — a multi-GB
+    torch/CUDA model has no business being tied to every gateway restart.
+    The sidecar's prediction is logged next to the rule-based one for
+    comparison but never changes the tier returned to the caller. See
+    ``src/loom/detection/laya_shadow.py``.
+    """
+
+    enabled: bool = False
+    url: str = "http://localhost:8091"
+    # Which sidecar-resident checkpoint to request. "base" is the one
+    # benchmarked for tier classification (0.929 vs 0.714 for
+    # typed-decisions); see the implementation plan.
+    checkpoint: str = "base"
+    timeout_seconds: float = 2.0
+    # Loopback url targets are always allowed. Non-loopback private/LAN
+    # addresses (e.g. a sidecar on 192.168.x) require this opt-in so a
+    # config change can't turn the gateway into an SSRF proxy for internal
+    # networks — mirrors compression.allow_private_llm_url.
+    allow_private_url: bool = False
+    # Fraction of eligible calls to also shadow through laya (cost control).
+    sample_rate: float = 1.0
+    # Prompts longer than this (chars) are skipped: the rule engine's
+    # length-based escalation is already reliable there, and laya's
+    # benchmarked value is specifically on short prompts.
+    max_prompt_chars: int = 4000
+    # In-memory cache of prompt-hash -> laya result, so a repeated prompt
+    # only calls the sidecar once. 0 disables caching.
+    cache_size: int = 512
+    log_path: str = "logs/laya_shadow.jsonl"
+
+
 class ScannerConfig(BaseModel):
     enabled: bool = False
     sanitize_logs: bool = True
@@ -160,6 +210,7 @@ class LoomConfig(BaseModel):
     storage: StorageConfig = Field(default_factory=StorageConfig)
     observability: ObservabilityConfig = Field(default_factory=ObservabilityConfig)
     scanner: ScannerConfig = Field(default_factory=ScannerConfig)
+    laya_shadow: LayaShadowConfig = Field(default_factory=LayaShadowConfig)
 
     # ------------------------------------------------------------------ loaders
     @classmethod
