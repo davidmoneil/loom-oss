@@ -71,6 +71,15 @@ Tier resolution priority (first match wins):
 4. `LOOM_COMPRESSION_TIER` environment variable
 5. `medium`
 
+## Founding-message protection
+
+The oldest message always has `age_ratio = 1.0`, so in any conversation
+longer than the protect window it would land in the heavy tier and be
+evicted to a status line — taking the original task with it. The first
+`head_protect_window` messages (default: 1) are therefore never compressed.
+Set it to `0` to disable, or raise it when task setup spans several leading
+messages.
+
 ## Recency protection
 
 The `tool_result_protect_window` (default: 6) shields the last N messages
@@ -301,6 +310,7 @@ point. These settings are also editable from the dashboard at
 | `tool_results` | `true` | Compress text inside `tool_result` blocks |
 | `tool_result_protect_window` | `6` | Number of most-recent messages shielded from compression |
 | `loop_detected_protect_multiplier` | `3` | Multiplier applied to protect window when loop is detected |
+| `head_protect_window` | `1` | Number of leading messages (founding task) shielded from compression |
 | `llm_prose` | `false` | Route prose through a local LLM instead of extractive compression |
 | `llm_url` | `http://localhost:11434` | Ollama or OpenAI-compatible (`/v1`) endpoint |
 | `llm_model` | `qwen2.5:7b` | Model name passed to the endpoint |
