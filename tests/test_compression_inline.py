@@ -398,3 +398,42 @@ def test_head_protect_window_configurable():
     cfg.compression.head_protect_window = 0
     out0, *_ = _compress_messages_inline(FakeProcessor(), msgs, config=cfg)
     assert out0[0] != msgs[0]
+
+
+class _HeavyProcessor:
+    """Like the real processor's heavy band: age_ratio>=0.7 -> 'heavy'."""
+
+    def compress_graduated(self, text: str, age_ratio: float):
+        if age_ratio < 0.7:
+            return text, "full"
+        return "[stub]", "heavy"
+
+
+def test_heavy_on_head_counter_when_head_protect_disabled():
+    """Message 0 is always the oldest (age_ratio=1.0). With head protection
+    disabled it is no longer shielded and lands in the heavy tier -- the
+    same founding-message eviction #112 fixed for the default config. The
+    heavy_on_head counter must record this so a misconfigured
+    head_protect_window is visible on the dashboard rather than only
+    surfacing as a failed run."""
+    msgs = _messages(20)
+    cfg = _config_stub(protect_window=6)
+    cfg.compression.head_protect_window = 0
+    stats: dict = {}
+    out, *_ = _compress_messages_inline(
+        _HeavyProcessor(), msgs, config=cfg, stats=stats,
+    )
+    assert out[0]["content"] != msgs[0]["content"]
+    assert stats["heavy_on_head"] == 1
+
+
+def test_heavy_on_head_counter_absent_when_head_protected():
+    """With the default head_protect_window (1), message 0 never reaches
+    the heavy tier, so the counter is never incremented."""
+    msgs = _messages(20)
+    stats: dict = {}
+    out, *_ = _compress_messages_inline(
+        _HeavyProcessor(), msgs, config=_config_stub(protect_window=6), stats=stats,
+    )
+    assert out[0] == msgs[0]
+    assert stats.get("heavy_on_head", 0) == 0
