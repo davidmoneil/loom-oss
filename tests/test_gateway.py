@@ -138,6 +138,63 @@ def test_compress_graduated_light():
     assert len(result) < len(text)
 
 
+def test_compress_graduated_heavy_evicts_long_content():
+    """Content well above min_tokens_to_evict (default 250) still gets
+    reduced to a status stub in the heavy tier."""
+    from loom.compression.processor import ContentProcessor
+    proc = ContentProcessor()
+    text = "Investigate the service. Confirm the run finished. " * 40  # ~500 tokens
+    result, tier = proc.compress_graduated(text, age_ratio=1.0)
+    assert tier == "heavy"
+    assert len(result) < len(text)
+
+
+def test_compress_graduated_heavy_falls_back_to_light_for_short_content():
+    """Issue #113: heavy tier (age_ratio >= 0.7) normally replaces content
+    with a status stub, but a stub is wasteful and destructive for short
+    content. Below min_tokens_to_evict (default 250 estimated tokens) it
+    should fall back to compress_light instead of evicting."""
+    from loom.compression.processor import ContentProcessor
+    proc = ContentProcessor()
+    text = "Deploy the fix and confirm the run finished successfully today."  # ~20 tokens
+    result, tier = proc.compress_graduated(text, age_ratio=1.0)
+    assert tier == "light"
+    assert result == proc.compress_light(text)
+
+
+# --- /v1/compress preview endpoint ---
+
+def test_compress_endpoint_honors_head_protect_window():
+    """Issue #114: the preview endpoint must agree with what the live
+    gateway does for the founding message (head_protect_window, default 1)
+    instead of reporting message 0 evicted to a heavy-tier stub."""
+    from loom.compression.processor import ContentProcessor
+    from loom.gateway.app import app
+
+    gw = app.state.gateway
+    original_compression = gw.compression
+    gw.compression = ContentProcessor()
+    try:
+        client = TestClient(app)
+        filler = (
+            "So basically what happened is that the deployment process, "
+            "you know, actually completed successfully in the end. "
+        ) * 10
+        messages = [
+            {"role": "user" if i % 2 == 0 else "assistant", "content": f"turn {i}: {filler}"}
+            for i in range(20)
+        ]
+        resp = client.post("/v1/compress", json={"messages": messages, "mode": "preview"})
+        assert resp.status_code == 200
+        data = resp.json()
+        # Message 0 is byte-identical to the input; later messages, being
+        # old and unprotected, are actually compressed.
+        assert data["messages"][0]["content"] == messages[0]["content"]
+        assert data["messages"][1]["content"] != messages[1]["content"]
+    finally:
+        gw.compression = original_compression
+
+
 # --- Routing models ---
 
 def test_routing_recommendation_to_dict():

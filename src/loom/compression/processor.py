@@ -496,6 +496,15 @@ class ContentProcessor:
                 return variant.text, "medium"
             return self.compress_light(content), "light"
 
+        # Short content isn't worth reducing to a status stub — the stub
+        # itself would be close to (or larger than) the original, and small
+        # content is often load-bearing (a short instruction, a single
+        # path). Fall back to light compression instead of evicting it.
+        comp_cfg = getattr(self._config, "compression", None)
+        min_tokens_to_evict = getattr(comp_cfg, "min_tokens_to_evict", 250)
+        if _estimate_tokens(content) < min_tokens_to_evict:
+            return self.compress_light(content), "light"
+
         signals = self._extract_status_signals(content)
         if signals:
             return "[Status: " + " | ".join(signals[:5]) + "]", "heavy"

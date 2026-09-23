@@ -2303,6 +2303,13 @@ def create_app() -> FastAPI:
 
         n = len(messages)
 
+        # Mirror the head protection _compress_messages_inline applies to live
+        # traffic (compression.head_protect_window, default 1) so a preview
+        # call reports the same outcome the gateway actually produces for the
+        # founding message, instead of showing it evicted to a status stub.
+        comp_cfg = getattr(gw.config, "compression", None)
+        head_protect = getattr(comp_cfg, "head_protect_window", 1)
+
         def _compress_all() -> tuple[list[dict], int, int]:
             out_msgs: list[dict] = []
             chars_in = 0
@@ -2312,10 +2319,10 @@ def create_app() -> FastAPI:
                 text = content if isinstance(content, str) else json.dumps(content)
                 chars_in += len(text)
                 age_ratio = 1 - idx / max(n - 1, 1) if n > 1 else 0.0
-                if mode == "audit":
+                if mode == "audit" or idx < head_protect:
                     new_text = text
                 else:
-                    new_text = _run_compress_graduated(gw.compression, text, age_ratio)
+                    new_text, _tier = _run_compress_graduated(gw.compression, text, age_ratio)
                 chars_out += len(new_text)
                 out = dict(msg)
                 out["content"] = new_text
@@ -3893,6 +3900,16 @@ def _compress_messages_inline(
             if stats is not None:
                 stats["relevance_discounted"] = stats.get("relevance_discounted", 0) + 1
 
+        # Message 0 only reaches here when head_protect_window is 0 (or a
+        # future change narrows head protection below idx 0). If it still
+        # gets compressed to heavy/extreme, that's the founding-message
+        # eviction failure mode #112 fixed for the default config — count
+        # it so a misconfigured head_protect_window is visible on the
+        # dashboard instead of only surfacing as a failed run.
+        heavy_before = None
+        if stats is not None and idx == 0:
+            heavy_before = stats.get("applied_heavy", 0) + stats.get("applied_extreme", 0)
+
         if isinstance(content, list):
             new_blocks, tb, ta = _compress_content_blocks(
                 processor,
@@ -3908,6 +3925,10 @@ def _compress_messages_inline(
             )
             tokens_before += tb
             tokens_after += ta
+            if heavy_before is not None:
+                heavy_after = stats.get("applied_heavy", 0) + stats.get("applied_extreme", 0)
+                if heavy_after > heavy_before:
+                    stats["heavy_on_head"] = stats.get("heavy_on_head", 0) + 1
             if ta < tb:
                 out = dict(msg)
                 out["content"] = new_blocks
@@ -3924,6 +3945,10 @@ def _compress_messages_inline(
         tokens_before += tb
         tokens_after += ta
         _tally(by_type, "message", tb, ta)
+        if heavy_before is not None:
+            heavy_after = stats.get("applied_heavy", 0) + stats.get("applied_extreme", 0)
+            if heavy_after > heavy_before:
+                stats["heavy_on_head"] = stats.get("heavy_on_head", 0) + 1
         if new_text != text:
             out = dict(msg)
             out["content"] = new_text

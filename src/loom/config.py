@@ -115,6 +115,10 @@ class CompressionConfig(BaseModel):
     loop_detected_protect_multiplier: int = 3
     # Leading messages (founding task framing) never compressed.
     head_protect_window: int = 1
+    # Heavy tier (age_ratio >= 0.7) normally replaces content with a status
+    # stub. Below this token estimate the stub saves little and destroys
+    # small-but-load-bearing content, so compress_light is used instead.
+    min_tokens_to_evict: int = 250
 
 
 class StorageConfig(BaseModel):

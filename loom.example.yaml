@@ -78,6 +78,8 @@ compression:
   loop_detected_protect_multiplier: 3  # widen window by this factor when
                                        # repeated identical tool calls detected
   head_protect_window: 1  # never compress the first N messages (founding task)
+  min_tokens_to_evict: 250  # heavy tier falls back to light compression below
+                            # this token estimate instead of evicting to a stub
   # Optional LLM prose summarization (default: fully local/extractive, no
   # model calls). Any LLM failure falls back to extractive silently.
   # llm_prose: true
