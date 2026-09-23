@@ -77,6 +77,7 @@ compression:
                                   # (prevents read → compress → re-read loops)
   loop_detected_protect_multiplier: 3  # widen window by this factor when
                                        # repeated identical tool calls detected
+  head_protect_window: 1  # never compress the first N messages (founding task)
   # Optional LLM prose summarization (default: fully local/extractive, no
   # model calls). Any LLM failure falls back to extractive silently.
   # llm_prose: true

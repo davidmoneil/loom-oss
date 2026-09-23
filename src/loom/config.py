@@ -113,6 +113,8 @@ class CompressionConfig(BaseModel):
     neo4j_database: str = "neo4j"
     tool_result_protect_window: int = 6
     loop_detected_protect_multiplier: int = 3
+    # Leading messages (founding task framing) never compressed.
+    head_protect_window: int = 1
 
 
 class StorageConfig(BaseModel):

@@ -3812,7 +3812,9 @@ def _compress_messages_inline(
     is 6 when config is provided (configurable via
     ``compression.tool_result_protect_window``), or 2 for backward compat
     when called without config.  When repeated identical tool calls are
-    detected the window is widened further to break the loop.
+    detected the window is widened further to break the loop.  The first
+    ``head_protect`` messages (default 1, ``compression.head_protect_window``)
+    are also left verbatim so the founding task is never evicted.
 
     When *stats* is a dict, per-stage skip/apply counters are recorded into
     it for observability (see ``/api/metrics/compression``); leaving it
@@ -3827,11 +3829,13 @@ def _compress_messages_inline(
 
     protect_window = 2
     loop_multiplier = 3
+    head_protect = 1
     if config is not None:
         comp = getattr(config, "compression", None)
         if comp is not None:
             protect_window = getattr(comp, "tool_result_protect_window", 6)
             loop_multiplier = getattr(comp, "loop_detected_protect_multiplier", loop_multiplier)
+            head_protect = getattr(comp, "head_protect_window", head_protect)
 
     is_looping = _detect_compression_loop(messages)
     if is_looping:
@@ -3864,6 +3868,15 @@ def _compress_messages_inline(
     tokens_after = 0
     for idx, msg in enumerate(messages):
         if idx >= protect_cutoff:
+            compressed.append(msg)
+            continue
+
+        # The leading message(s) carry the founding task framing; being the
+        # oldest they'd otherwise always sit at age_ratio=1.0 (heavy tier)
+        # and be evicted to a status line in any long session.
+        if idx < head_protect:
+            if stats is not None:
+                stats["protected_head"] = stats.get("protected_head", 0) + 1
             compressed.append(msg)
             continue
 

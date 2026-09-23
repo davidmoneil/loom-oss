@@ -72,9 +72,9 @@ def test_light_tier_filler_only():
     # Light never invokes the graduated pass...
     assert proc.ages == []
     # ...but still removes filler and tags the result.
-    _, tier = _strip_loom_tag(out[0]["content"])
+    _, tier = _strip_loom_tag(out[1]["content"])
     assert tier == "light"
-    assert "you know, " not in _strip_loom_tag(out[0]["content"])[0]
+    assert "you know, " not in _strip_loom_tag(out[1]["content"])[0]
     assert before > after
 
 
