@@ -144,6 +144,42 @@ and those segments get a summary-plus-pointer treatment ahead of the general
 content-type compressors. This catches structure that spans a whole tool
 result rather than a single content type.
 
+## Image offload (opt-in)
+
+By default (`compression.image_offload_budget_bytes: 0`), top-level image
+content blocks (Anthropic `{"type": "image", "source": {...}}` or OpenAI
+`{"type": "image_url", "image_url": {...}}`) pass through untouched
+regardless of size — this is unchanged prior behavior. If a request image
+exceeds a provider's inline-image limit, that surfaces today as a raw
+provider error; Loom does no client-side size checking.
+
+Setting `compression.image_offload_budget_bytes` to a positive byte count
+enables an offload heuristic: for messages outside the recency protect
+window (the same eligibility rule as text/tool_result compression), any
+image block whose decoded byte size exceeds the budget is replaced with a
+text placeholder (`[image omitted by Loom compression: ...]`) stating the
+original size and the configured budget. Images inside `tool_result` blocks
+are not covered by this setting — those already pass through verbatim (see
+[Tool-result block compression](#tool-result-block-compression)) and are out
+of scope here.
+
+The byte budget is a heuristic, not a provider-reported value — Loom-OSS has
+no per-provider image-pricing/budget adapter today, so this is a local
+size cap you tune to whatever ceiling your providers enforce, not an
+API-derived limit.
+
+**Cache-prefix invalidation:** no special handling is needed. Image offload
+reuses the same `_has_cache_control` gate the rest of inline compression
+already uses — any message carrying `cache_control` is skipped entirely
+before offload is considered, so a cached prefix is never silently mutated.
+For everything outside that gate, replacing an image with a placeholder
+changes message content the same way text/tool_result compression already
+does, and is subject to the same age-based eligibility — this is the
+"structural avoidance" approach from the [dsh compaction-plugin
+determination](https://github.com/deepseek-ai/deepseek-harness/blob/master/packages/compaction/compaction-image-offload/README.md),
+not dsh's request-series/explicit-invalidation approach (which doesn't
+transfer to Loom-OSS's stateless per-request recompression model).
+
 ## LLM prose compression (opt-in)
 
 Extractive prose compression (first sentence of each paragraph) is fast and
@@ -319,6 +355,7 @@ point. These settings are also editable from the dashboard at
 | `tool_results` | `true` | Compress text inside `tool_result` blocks |
 | `tool_result_protect_window` | `6` | Number of most-recent messages shielded from compression |
 | `loop_detected_protect_multiplier` | `3` | Multiplier applied to protect window when loop is detected |
+| `image_offload_budget_bytes` | `0` (off) | Replace eligible images larger than this many decoded bytes with a text placeholder |
 | `head_protect_window` | `1` | Number of leading messages (founding task) shielded from compression |
 | `min_tokens_to_evict` | `250` | Below this token estimate, heavy tier falls back to light compression instead of evicting to a status stub |
 | `llm_prose` | `false` | Route prose through a local LLM instead of extractive compression |

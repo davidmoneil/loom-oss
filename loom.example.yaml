@@ -77,6 +77,11 @@ compression:
                                   # (prevents read → compress → re-read loops)
   loop_detected_protect_multiplier: 3  # widen window by this factor when
                                        # repeated identical tool calls detected
+  # image_offload_budget_bytes: 4500000  # opt-in: replace eligible images
+                                          # larger than this many decoded
+                                          # bytes with a text placeholder
+                                          # (0/default: images always pass
+                                          # through untouched)
   head_protect_window: 1  # never compress the first N messages (founding task)
   min_tokens_to_evict: 250  # heavy tier falls back to light compression below
                             # this token estimate instead of evicting to a stub
