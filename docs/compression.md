@@ -71,6 +71,24 @@ Tier resolution priority (first match wins):
 4. `LOOM_COMPRESSION_TIER` environment variable
 5. `medium`
 
+## Founding-message protection
+
+The oldest message always has `age_ratio = 1.0`, so in any conversation
+longer than the protect window it would land in the heavy tier and be
+evicted to a status line — taking the original task with it. The first
+`head_protect_window` messages (default: 1) are therefore never compressed.
+Set it to `0` to disable, or raise it when task setup spans several leading
+messages.
+
+## Heavy-tier size floor
+
+Heavy tier (age ratio ≥ 0.7) normally replaces content with a status stub —
+either extracted status signals or a `[N tokens evicted]` placeholder.
+For short content the stub saves little and can destroy something
+load-bearing (a short instruction, a single path). Below `min_tokens_to_evict`
+(default: 250, estimated) heavy tier falls back to light compression instead
+of evicting the content.
+
 ## Recency protection
 
 The `tool_result_protect_window` (default: 6) shields the last N messages
@@ -338,6 +356,8 @@ point. These settings are also editable from the dashboard at
 | `tool_result_protect_window` | `6` | Number of most-recent messages shielded from compression |
 | `loop_detected_protect_multiplier` | `3` | Multiplier applied to protect window when loop is detected |
 | `image_offload_budget_bytes` | `0` (off) | Replace eligible images larger than this many decoded bytes with a text placeholder |
+| `head_protect_window` | `1` | Number of leading messages (founding task) shielded from compression |
+| `min_tokens_to_evict` | `250` | Below this token estimate, heavy tier falls back to light compression instead of evicting to a status stub |
 | `llm_prose` | `false` | Route prose through a local LLM instead of extractive compression |
 | `llm_url` | `http://localhost:11434` | Ollama or OpenAI-compatible (`/v1`) endpoint |
 | `llm_model` | `qwen2.5:7b` | Model name passed to the endpoint |

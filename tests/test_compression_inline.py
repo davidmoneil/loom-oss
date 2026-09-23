@@ -375,10 +375,11 @@ def test_stats_plumbing_keys_present():
     assert stats["msgs_total"] == 8
     assert stats["protected_recency"] == 2
     assert stats["loop_detected"] is False
-    # Age ratio grows toward idx=0 (the oldest message). Indices 0-4
-    # (age_ratio >= 0.3) compress to "medium"; index 5, closest to the
-    # protected/recent tail, doesn't.
-    assert stats["applied_medium"] == 5
+    # Age ratio grows toward idx=0 (the oldest message), but idx=0 is the
+    # founding message and head-protected. Indices 1-4 (age_ratio >= 0.3)
+    # compress to "medium"; index 5, closest to the recent tail, doesn't.
+    assert stats["protected_head"] == 1
+    assert stats["applied_medium"] == 4
     assert stats["unchanged"] == 1
 
     # No stats dict passed -> no crash, no behavior change.
@@ -422,3 +423,85 @@ def test_record_metrics_skip_reasons_roundtrip(tmp_path):
         assert summary["skip_reasons"]["loop_detected"] == 1
     finally:
         store.close()
+
+
+def test_founding_message_survives_long_session():
+    """The first message (task framing) is always the oldest, so it sits at
+    age_ratio=1.0 and would be evicted to a status line in any long session.
+    It must survive verbatim regardless of session length."""
+    msgs = _messages(20)
+    stats: dict = {}
+    out, *_ = _compress_messages_inline(
+        FakeProcessor(), msgs, config=_config_stub(protect_window=6), stats=stats,
+    )
+    assert out[0] == msgs[0]
+    assert out[1] != msgs[1]
+    assert stats["protected_head"] == 1
+
+
+def test_founding_message_survives_real_processor():
+    """End-to-end with the real ContentProcessor: a short founding task
+    containing status words must not be reduced to a heavy-tier stub."""
+    from loom.compression.processor import ContentProcessor
+
+    task = "Investigate the service. Confirm the run finished and was closed."
+    msgs = [{"role": "user", "content": task}] + _messages(19)
+    out, *_ = _compress_messages_inline(
+        ContentProcessor(), msgs, config=_config_stub(protect_window=6),
+    )
+    assert out[0]["content"] == task
+
+
+def test_head_protect_window_configurable():
+    """head_protect_window=0 restores the old behavior; larger values
+    shield more leading messages."""
+    msgs = _messages(20)
+    cfg = _config_stub(protect_window=6)
+    cfg.compression.head_protect_window = 3
+    out, *_ = _compress_messages_inline(FakeProcessor(), msgs, config=cfg)
+    for idx in range(3):
+        assert out[idx] == msgs[idx]
+    assert out[3] != msgs[3]
+
+    cfg.compression.head_protect_window = 0
+    out0, *_ = _compress_messages_inline(FakeProcessor(), msgs, config=cfg)
+    assert out0[0] != msgs[0]
+
+
+class _HeavyProcessor:
+    """Like the real processor's heavy band: age_ratio>=0.7 -> 'heavy'."""
+
+    def compress_graduated(self, text: str, age_ratio: float):
+        if age_ratio < 0.7:
+            return text, "full"
+        return "[stub]", "heavy"
+
+
+def test_heavy_on_head_counter_when_head_protect_disabled():
+    """Message 0 is always the oldest (age_ratio=1.0). With head protection
+    disabled it is no longer shielded and lands in the heavy tier -- the
+    same founding-message eviction #112 fixed for the default config. The
+    heavy_on_head counter must record this so a misconfigured
+    head_protect_window is visible on the dashboard rather than only
+    surfacing as a failed run."""
+    msgs = _messages(20)
+    cfg = _config_stub(protect_window=6)
+    cfg.compression.head_protect_window = 0
+    stats: dict = {}
+    out, *_ = _compress_messages_inline(
+        _HeavyProcessor(), msgs, config=cfg, stats=stats,
+    )
+    assert out[0]["content"] != msgs[0]["content"]
+    assert stats["heavy_on_head"] == 1
+
+
+def test_heavy_on_head_counter_absent_when_head_protected():
+    """With the default head_protect_window (1), message 0 never reaches
+    the heavy tier, so the counter is never incremented."""
+    msgs = _messages(20)
+    stats: dict = {}
+    out, *_ = _compress_messages_inline(
+        _HeavyProcessor(), msgs, config=_config_stub(protect_window=6), stats=stats,
+    )
+    assert out[0] == msgs[0]
+    assert stats.get("heavy_on_head", 0) == 0

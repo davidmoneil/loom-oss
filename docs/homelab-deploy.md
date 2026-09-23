@@ -85,6 +85,99 @@ frontend-only change — always means the homelab overlay, never the bare
 public bundled-Postgres/`setup.sh` path (see "Reproducing on a new machine"
 below) and should not be invoked against this host at all.
 
+## External access: `loom.<your-domain>`
+
+The gateway is reached from the LAN at `https://loom.<your-domain>`, proxied by
+the homelab Caddy container on `<caddy-host-lan-ip>`. Caddy's config lives *outside*
+this repo, in a separate git repo:
+`<caddy-config-repo>/Caddyfile`. The site block is:
+
+```caddyfile
+# Loom Gateway - LAN-only, has built-in API auth
+loom.<your-domain> {
+	import security_filters
+	reverse_proxy loom-oss-loom-1:4444
+}
+```
+
+Two properties of this setup are worth knowing before debugging it:
+
+**Caddy reaches Loom over `n8n_n8n-network`.** That is the only network the two
+containers share (Caddy sits on several other networks of its own; Loom is on
+`loom-oss_default` and `n8n_n8n-network`). So the external-network attachment that the incidents above
+care about for *Postgres* is also what makes the *reverse proxy* work — a
+dropped `n8n_n8n-network` breaks `loom.<your-domain>` with a 502 at the same
+time it breaks the database, from a container that still reports "healthy".
+The network-verification step in "Deploy / update" covers both.
+
+**The deployment is LAN-only, deliberately.** `*.<your-domain>` is a DNS-only
+wildcard record pointing at `<caddy-host-lan-ip>` — a private RFC1918 address, so
+public resolvers hand out an address that is unroutable from the internet
+(verify with a public resolver such as `1.1.1.1`). No tunnel or public ingress
+covers these hostnames. The site block therefore has no forward-auth layer —
+Loom carries its own auth, and its API still answers 401 unauthenticated
+through the proxy.
+
+### Incident: 2026-09-21 `loom.<your-domain>` TLS failure → missing Caddy site block
+
+`https://loom.<your-domain>` failed at the TLS handshake with
+`tlsv1 alert internal error` (curl exit 35), while `http://<caddy-host-lan-ip>:4444`
+served normally. The gateway itself was never involved: container healthy,
+HTTP 200 on 4444, and Caddy reachable on :443 for all its other hostnames.
+
+The cause was simply that the Caddyfile had no site block for
+`loom.<your-domain>` — 32 other services had one, this one did not. With no
+vhost matching the SNI and no on-demand TLS configured, Caddy aborts the
+handshake rather than serving a default certificate, which is why the failure
+looked like a certificate problem rather than a missing-route problem. A valid
+Let's Encrypt certificate for the hostname was already sitting in Caddy's store
+(`/data/caddy/certificates/.../loom.<your-domain>/`, issued 2026-07-25), so the
+block had existed at some earlier point and was lost — most likely during an
+edit of the 1000-line Caddyfile. Nothing in this repo caused or could have
+prevented it.
+
+**The part that wastes time: the Caddyfile is a single-file bind mount.**
+Editing it with a tool that writes atomically (temp file + rename) replaces the
+file's inode, and a Docker *file* bind mount follows the inode, not the path —
+so the container keeps reading the old file. Both `caddy validate` and
+`caddy reload` then report success against the **stale** config, with no
+warning that they are not seeing the edit. After the first edit-and-reload
+cycle the site was still broken and still absent from the running config.
+Confirm with:
+
+```bash
+CF=<caddy-config-repo>/Caddyfile
+diff "$CF" <(docker exec caddy sh -c 'cat /etc/caddy/Caddyfile') && echo "in sync"
+```
+
+The content diff is the authoritative check. An inode comparison
+(`stat -c %i` on each side) explains *why* they diverged, but differing inodes
+on their own are not a fault: once the host file has been rewritten, the two
+inodes stay different for the life of the container even though the contents
+match, which is the state this host is in now. Docker re-resolves the path on
+container restart, so a later restart picks up the host file correctly.
+
+Fix without restarting Caddy (a restart would re-resolve the bind and also
+work, at the cost of a brief outage for every other site on the host) — write
+the host file's contents *through* the container's own path, preserving the
+bound inode, then validate and reload:
+
+```bash
+docker exec -i caddy sh -c 'cat > /etc/caddy/Caddyfile' < "$CF"
+docker exec caddy caddy validate --config /etc/caddy/Caddyfile --adapter caddyfile
+docker exec -w /etc/caddy caddy caddy reload --config /etc/caddy/Caddyfile --adapter caddyfile
+diff "$CF" <(docker exec caddy sh -c 'cat /etc/caddy/Caddyfile') && echo "in sync"
+```
+
+After the reload, `https://loom.<your-domain>` returned 200 serving the Loom
+Gateway page on a valid certificate, with the other sites unaffected.
+
+Takeaway: when a `*.<your-domain>` hostname fails the TLS handshake outright
+while the service answers fine on its LAN port, suspect a missing Caddy site
+block before suspecting certificates — and always verify a Caddyfile edit
+actually reached the container, because a successful `validate`/`reload` pair
+does not prove it did.
+
 ## Reproducing on a new machine
 
 `loom.homelab.yaml` and `docker-compose.homelab.yml` are gitignored (not
