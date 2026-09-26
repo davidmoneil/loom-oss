@@ -2041,6 +2041,51 @@ def create_app() -> FastAPI:
             _audit_error(gw, request_id, "/v1/messages", source, 500)
             return _error_response(exc, request_id)
 
+    # ----------------------------------------------------------- routing decision only
+    @app.post("/v1/route")
+    async def route_only(request: Request):
+        """Return a routing decision without executing a completion.
+
+        Side-effect-free: no provider is called, nothing is billed. Runs the
+        exact same `_select_model` used by /v1/chat/completions and
+        /v1/messages, so the answer matches what a real request would get —
+        including an optional `preferred_model` input (honored only if it
+        passes the same eligibility policy every candidate must satisfy; see
+        `RoutingEngine.recommend`). Built for callers that need "what would
+        this route to" up front, e.g. Nexus's executor.sh asking for a model
+        per job run (2026-09-26 routing decision).
+        """
+        gw = state()
+        request_id = str(uuid.uuid4())
+        try:
+            body = await request.json()
+        except Exception:
+            _audit_error(gw, request_id, "/v1/route", _source(request), 400)
+            return _error_response(
+                ProviderError("invalid JSON body", status_code=400), request_id, 400
+            )
+        messages = body.get("messages") or []
+        source = _source(request)
+        try:
+            model, task_type, routing_reason = _select_model(
+                gw, body.get("model"), source, body, messages
+            )
+        except ProviderError as exc:
+            _audit_error(gw, request_id, "/v1/route", source, exc.status_code)
+            return _error_response(exc, request_id, exc.status_code)
+        except Exception as exc:
+            _audit_error(gw, request_id, "/v1/route", source, 500)
+            return _error_response(exc, request_id, 500)
+        return JSONResponse(
+            {
+                "model": model,
+                "task_type": task_type,
+                "routing_reason": routing_reason,
+                "source": source,
+            },
+            headers={"X-Loom-Request-Id": request_id},
+        )
+
     # ----------------------------------------------------------------- ollama-compat
     @app.post("/api/generate")
     async def ollama_generate(request: Request):
