@@ -744,9 +744,19 @@ def _select_model(
     if policy.pinned_model:
         return policy.pinned_model, task_type, "source_pinned"
 
+    # A caller-supplied preferred model (e.g. a Pulse task's `model-preference:`
+    # label, forwarded by the executor) is an *input* to routing, not a bypass:
+    # unlike `requested_model` above, it never short-circuits — it only ever wins
+    # by satisfying the same tier/provider/tool-support policy every other
+    # candidate must satisfy. See `RoutingEngine.recommend`'s `preferred_model`
+    # handling for the honor/override logic.
+    preferred_model = _clean_preferred_model(body)
+
     if state.routing is not None:
         tier_floor = _detect_tier_floor(state, source, messages)
-        rec = _try_recommend(state.routing, task_type, source, policy, tier_floor)
+        rec = _try_recommend(
+            state.routing, task_type, source, policy, tier_floor, preferred_model
+        )
         model = _recommendation_model(rec)
         if model:
             reason = getattr(rec, "routing_reason", "") or "routed"
@@ -766,12 +776,30 @@ def _select_model(
     )
 
 
+def _clean_preferred_model(body: dict) -> Optional[str]:
+    """Extract an optional `preferred_model` from the request body.
+
+    Distinct from `model`/`requested_model`: this is never a bypass, only a
+    soft input to routing (see `_select_model`). Blank/whitespace-only values
+    and the same "no preference" sentinels `model` accepts are treated as
+    "no preference".
+    """
+    val = body.get("preferred_model")
+    if not isinstance(val, str):
+        return None
+    val = val.strip()
+    if val in ("", "auto", "loom-auto"):
+        return None
+    return val
+
+
 def _try_recommend(
     engine: Any,
     task_type: str,
     source: str,
     policy: SourcePolicy,
     min_tier_floor: Optional[str] = None,
+    preferred_model: Optional[str] = None,
 ) -> Any:
     """Call RoutingEngine.recommend, tolerating minor signature drift."""
     try:
@@ -780,6 +808,7 @@ def _try_recommend(
             source=source,
             requires_tools=policy.requires_tools,
             min_tier_floor=min_tier_floor,
+            preferred_model=preferred_model,
         )
     except TypeError:
         try:
@@ -787,14 +816,22 @@ def _try_recommend(
                 task_type=task_type,
                 source=source,
                 requires_tools=policy.requires_tools,
+                min_tier_floor=min_tier_floor,
             )
         except TypeError:
             try:
-                return engine.recommend(task_type=task_type, source=source)
+                return engine.recommend(
+                    task_type=task_type,
+                    source=source,
+                    requires_tools=policy.requires_tools,
+                )
+            except TypeError:
+                try:
+                    return engine.recommend(task_type=task_type, source=source)
+                except Exception:
+                    return None
             except Exception:
                 return None
-        except Exception:
-            return None
     except Exception:
         return None
 
@@ -2003,6 +2040,51 @@ def create_app() -> FastAPI:
         except Exception as exc:
             _audit_error(gw, request_id, "/v1/messages", source, 500)
             return _error_response(exc, request_id)
+
+    # ----------------------------------------------------------- routing decision only
+    @app.post("/v1/route")
+    async def route_only(request: Request):
+        """Return a routing decision without executing a completion.
+
+        Side-effect-free: no provider is called, nothing is billed. Runs the
+        exact same `_select_model` used by /v1/chat/completions and
+        /v1/messages, so the answer matches what a real request would get —
+        including an optional `preferred_model` input (honored only if it
+        passes the same eligibility policy every candidate must satisfy; see
+        `RoutingEngine.recommend`). Built for callers that need "what would
+        this route to" up front, e.g. Nexus's executor.sh asking for a model
+        per job run (2026-09-26 routing decision).
+        """
+        gw = state()
+        request_id = str(uuid.uuid4())
+        try:
+            body = await request.json()
+        except Exception:
+            _audit_error(gw, request_id, "/v1/route", _source(request), 400)
+            return _error_response(
+                ProviderError("invalid JSON body", status_code=400), request_id, 400
+            )
+        messages = body.get("messages") or []
+        source = _source(request)
+        try:
+            model, task_type, routing_reason = _select_model(
+                gw, body.get("model"), source, body, messages
+            )
+        except ProviderError as exc:
+            _audit_error(gw, request_id, "/v1/route", source, exc.status_code)
+            return _error_response(exc, request_id, exc.status_code)
+        except Exception as exc:
+            _audit_error(gw, request_id, "/v1/route", source, 500)
+            return _error_response(exc, request_id, 500)
+        return JSONResponse(
+            {
+                "model": model,
+                "task_type": task_type,
+                "routing_reason": routing_reason,
+                "source": source,
+            },
+            headers={"X-Loom-Request-Id": request_id},
+        )
 
     # ----------------------------------------------------------------- ollama-compat
     @app.post("/api/generate")
