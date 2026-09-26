@@ -744,9 +744,19 @@ def _select_model(
     if policy.pinned_model:
         return policy.pinned_model, task_type, "source_pinned"
 
+    # A caller-supplied preferred model (e.g. a Pulse task's `model-preference:`
+    # label, forwarded by the executor) is an *input* to routing, not a bypass:
+    # unlike `requested_model` above, it never short-circuits — it only ever wins
+    # by satisfying the same tier/provider/tool-support policy every other
+    # candidate must satisfy. See `RoutingEngine.recommend`'s `preferred_model`
+    # handling for the honor/override logic.
+    preferred_model = _clean_preferred_model(body)
+
     if state.routing is not None:
         tier_floor = _detect_tier_floor(state, source, messages)
-        rec = _try_recommend(state.routing, task_type, source, policy, tier_floor)
+        rec = _try_recommend(
+            state.routing, task_type, source, policy, tier_floor, preferred_model
+        )
         model = _recommendation_model(rec)
         if model:
             reason = getattr(rec, "routing_reason", "") or "routed"
@@ -766,12 +776,30 @@ def _select_model(
     )
 
 
+def _clean_preferred_model(body: dict) -> Optional[str]:
+    """Extract an optional `preferred_model` from the request body.
+
+    Distinct from `model`/`requested_model`: this is never a bypass, only a
+    soft input to routing (see `_select_model`). Blank/whitespace-only values
+    and the same "no preference" sentinels `model` accepts are treated as
+    "no preference".
+    """
+    val = body.get("preferred_model")
+    if not isinstance(val, str):
+        return None
+    val = val.strip()
+    if val in ("", "auto", "loom-auto"):
+        return None
+    return val
+
+
 def _try_recommend(
     engine: Any,
     task_type: str,
     source: str,
     policy: SourcePolicy,
     min_tier_floor: Optional[str] = None,
+    preferred_model: Optional[str] = None,
 ) -> Any:
     """Call RoutingEngine.recommend, tolerating minor signature drift."""
     try:
@@ -780,6 +808,7 @@ def _try_recommend(
             source=source,
             requires_tools=policy.requires_tools,
             min_tier_floor=min_tier_floor,
+            preferred_model=preferred_model,
         )
     except TypeError:
         try:
@@ -787,14 +816,22 @@ def _try_recommend(
                 task_type=task_type,
                 source=source,
                 requires_tools=policy.requires_tools,
+                min_tier_floor=min_tier_floor,
             )
         except TypeError:
             try:
-                return engine.recommend(task_type=task_type, source=source)
+                return engine.recommend(
+                    task_type=task_type,
+                    source=source,
+                    requires_tools=policy.requires_tools,
+                )
+            except TypeError:
+                try:
+                    return engine.recommend(task_type=task_type, source=source)
+                except Exception:
+                    return None
             except Exception:
                 return None
-        except Exception:
-            return None
     except Exception:
         return None
 
