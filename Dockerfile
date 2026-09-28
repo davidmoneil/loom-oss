@@ -17,6 +17,19 @@ RUN if [ -n "$INSTALL_EXTRAS" ]; then \
       pip install --no-cache-dir .; \
     fi
 
+# Fail the build, not the deploy, if the gateway entrypoint or the Postgres
+# driver it optionally depends on can't import. Same failure class as
+# pulse#4 (SQLAlchemy 2.1 broke a bare postgresql:// URL at container start
+# on 2026-09-27) — here the risk is the `postgres` extra silently missing
+# from the image, not a SQLAlchemy dialect (loom-oss talks to Postgres via
+# psycopg directly, no SQLAlchemy in this repo). No network/DB/secrets
+# needed: create_app() builds routes only, storage.connect() happens later
+# in the app's lifespan handler, not at import time.
+RUN python -c "import loom.gateway.app; print('build-start-check: gateway entrypoint imports cleanly')" && \
+    if echo "$INSTALL_EXTRAS" | grep -q postgres; then \
+      python -c "import psycopg; print('build-start-check: psycopg (postgres driver) imports cleanly')"; \
+    fi
+
 # Create data and log directories owned by loom user
 RUN mkdir -p /app/data /app/logs && chown -R loom:loom /app
 
