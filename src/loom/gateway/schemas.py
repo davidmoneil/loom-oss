@@ -64,6 +64,27 @@ class CompressionSummaryResponse(ObservabilityResponse):
     calls_per_prompt: dict[str, Any] = {}
 
 
+class SessionDetailResponse(ObservabilityResponse):
+    available: bool = True
+    found: bool = True
+    session_id: str
+    requests: int = 0
+    user_prompts: int = 0
+    tool_calls: int = 0
+    tool_calls_this_turn: int = 0
+    tokens_in: int = 0
+    tokens_out: int = 0
+    cache_read_tokens: int = 0
+    cost: float = 0.0
+    compressed_requests: int = 0
+    evictions: int = 0
+    tokens_saved: int = 0
+    saved_pct: float = 0.0
+    first_seen: float | None = None
+    last_seen: float | None = None
+    last_model: str | None = None
+
+
 class SessionListResponse(ObservabilityResponse):
     supported: bool
     sessions: int
