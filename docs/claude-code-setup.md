@@ -136,6 +136,21 @@ If you also run Claude Code headless (e.g., via a job executor), the executor ca
 settings.json value. This lets headless sessions use a different Loom instance or
 disable routing independently.
 
+## Session id and status line
+
+Loom keys Claude Code sessions as `cc-<session id>`, taken from the
+`session_id` Claude Code already sends inside `metadata.user_id`, so no extra
+configuration is needed. A status line command can show live Loom stats:
+
+```bash
+sid="cc-$(jq -r .session_id <<<"$input")"   # status line JSON input
+curl -s -m 1 -H "x-loom-gateway-key: $LOOM_KEY" \
+  "http://localhost:${LOOM_PORT}/api/sessions/$sid/stats"
+```
+
+Headless runners that want their own id (e.g. a job run id) can send
+`X-Loom-Session-Id` via `ANTHROPIC_CUSTOM_HEADERS`.
+
 ## Troubleshooting
 
 | Symptom | Cause | Fix |

@@ -75,6 +75,7 @@ from loom.gateway.schemas import (
     ScannerRuleUpdateResponse,
     ScannerRulesResponse,
     ScannerStatsResponse,
+    SessionDetailResponse,
     SessionListResponse,
 )
 
@@ -1566,7 +1567,7 @@ def create_app() -> FastAPI:
             allow_credentials=True,
             allow_methods=["*"],
             allow_headers=["*"],
-            expose_headers=["X-Loom-Request-Id"],
+            expose_headers=["X-Loom-Request-Id", "X-Loom-Session-Id"],
         )
 
     rate_limiter = _RateLimiter(
@@ -1608,6 +1609,9 @@ def create_app() -> FastAPI:
         response = await call_next(request)
         if response.status_code >= 500:
             gw.error_count += 1
+        loom_session_id = getattr(request.state, "loom_session_id", None)
+        if loom_session_id and loom_session_id != "unknown":
+            response.headers["X-Loom-Session-Id"] = loom_session_id
         return response
 
     def state() -> GatewayState:
@@ -1663,6 +1667,7 @@ def create_app() -> FastAPI:
                 body=body,
             )
             session_id = signals["session_id"]
+            request.state.loom_session_id = session_id
             if gw.storage is not None and session_id != "unknown":
                 try:
                     gw.storage.touch_session(
@@ -1897,6 +1902,7 @@ def create_app() -> FastAPI:
                 messages, source, headers=inbound_hdrs, body=body,
             )
             session_id = signals["session_id"]
+            request.state.loom_session_id = session_id
             if gw.storage is not None and session_id != "unknown":
                 try:
                     gw.storage.touch_session(
@@ -2632,6 +2638,27 @@ def create_app() -> FastAPI:
             except Exception:
                 pass
         return {**block, "hours": hours, "entries": entries}
+
+    @app.get(
+        "/api/sessions/{session_id}/stats",
+        response_model=SessionDetailResponse,
+        tags=["observability"],
+        summary="Live stats for one session (status line / job runs)",
+    )
+    async def api_session_stats(session_id: str):
+        gw = state()
+        if gw.storage is None or not hasattr(gw.storage, "get_session_detail"):
+            return JSONResponse({"available": False, "session_id": session_id}, status_code=503)
+        sid = _clean_session_id(session_id)
+        if not sid:
+            return JSONResponse({"error": "invalid session id"}, status_code=400)
+        try:
+            stats = gw.storage.get_session_detail(sid)
+        except Exception:
+            return JSONResponse({"available": False, "session_id": sid}, status_code=503)
+        if stats is None:
+            return JSONResponse({"available": True, "found": False, "session_id": sid}, status_code=404)
+        return {"available": True, "found": True, **_jsonable(stats)}
 
     # -------------------------------------------------------------- routing log
     @app.get(
@@ -3399,6 +3426,19 @@ def _extract_session_signals(
     seed = ":".join(parts)
     session_id = "gw-" + hashlib.sha256(seed.encode()).hexdigest()[:16]
 
+    # A client that names its own session wins over the composite hash, so
+    # the client can look its session up (status line, job runs) and the
+    # two ids join. Explicit X-Loom-Session-Id first, then Claude Code's
+    # session_id inside its JSON metadata.user_id.
+    client_session_id = _clean_session_id(headers.get("x-loom-session-id", ""))
+    if client_session_id:
+        session_id = client_session_id
+    else:
+        cc_session = _claude_code_session_id(user_id)
+        if cc_session:
+            client_session_id = cc_session
+            session_id = "cc-" + cc_session
+
     return {
         "session_id": session_id if first_user is not None else "unknown",
         "client_type": client_type,
@@ -3406,7 +3446,30 @@ def _extract_session_signals(
         "api_key_suffix": api_key_suffix,
         "system_hash": system_hash,
         "session_name": msg_prefix.strip()[:80] if msg_prefix else "",
+        "client_session_id": client_session_id,
     }
+
+
+_SESSION_ID_RE = re.compile(r"^[A-Za-z0-9._:-]{1,128}$")
+
+
+def _clean_session_id(raw: str) -> str:
+    """A client-supplied session id, or "" if absent or malformed."""
+    raw = (raw or "").strip()
+    return raw if _SESSION_ID_RE.match(raw) else ""
+
+
+def _claude_code_session_id(user_id: str) -> str:
+    """Claude Code sends metadata.user_id as JSON carrying its session_id."""
+    if not user_id or not user_id.lstrip().startswith("{"):
+        return ""
+    try:
+        parsed = json.loads(user_id)
+    except (TypeError, ValueError):
+        return ""
+    if not isinstance(parsed, dict):
+        return ""
+    return _clean_session_id(str(parsed.get("session_id", "")))
 
 
 def derive_session_id(messages: list[dict], source: str) -> str:

@@ -729,6 +729,19 @@ class PostgresStorage:
         row = self.conn.execute(sql, params).fetchone()
         return {"sessions": row[0], "total_turns": int(row[1])}
 
+    def get_session_detail(self, session_id: str) -> Optional[dict]:
+        from loom.storage.base import _summarize_session
+
+        rows = self.conn.execute(
+            """
+            SELECT tokens_in, tokens_out, cost_estimate AS cost, tokens_saved, compressed, cache_read_tokens, skip_reasons, timestamp, model, tokens_before
+            FROM metrics WHERE session_id = %s
+            ORDER BY timestamp ASC
+            """,
+            (session_id,),
+        ).fetchall()
+        return _summarize_session(session_id, [dict(zip(['tokens_in', 'tokens_out', 'cost', 'tokens_saved', 'compressed', 'cache_read_tokens', 'skip_reasons', 'timestamp', 'model', 'tokens_before'], r)) for r in rows])
+
     def list_sessions(self, hours: int = 24, limit: int = 200) -> list[dict]:
         cutoff = time.time() - hours * 3600
         rows = self.conn.execute(

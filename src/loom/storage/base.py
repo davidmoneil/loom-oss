@@ -57,6 +57,7 @@ class StorageBackend(Protocol):
     def get_routing_decisions(self, hours: int = 24, limit: int = 200) -> dict: ...
     def get_session_stats(self, hours: int | None = None) -> dict: ...
     def list_sessions(self, hours: int = 24, limit: int = 200) -> list[dict]: ...
+    def get_session_detail(self, session_id: str) -> Optional[dict]: ...
     def get_cost_summary(self, days: int = 30) -> dict: ...
     def get_metrics_timeseries(self, hours: int = 24, bucket: str = "1h") -> list[dict]: ...
     def get_audit_entries(self, **kwargs: Any) -> list[dict]: ...
@@ -253,4 +254,53 @@ def _calls_per_prompt(records: list[dict]) -> dict:
         "p50": _pct(0.5),
         "p90": _pct(0.9),
         "max": sizes[-1],
+    }
+
+
+def _summarize_session(session_id: str, rows: list[dict]) -> Optional[dict]:
+    """Per-session stats for /api/sessions/{id}/stats.
+
+    ``rows``: the session's metrics rows, oldest first, with tokens_in,
+    tokens_out, cost, tokens_saved, compressed, cache_read_tokens,
+    skip_reasons (JSON text), timestamp, model. Shared by both backends.
+    """
+    if not rows:
+        return None
+    requests = len(rows)
+    tokens_in = sum(r.get("tokens_in") or 0 for r in rows)
+    tokens_out = sum(r.get("tokens_out") or 0 for r in rows)
+    cache_read = sum(r.get("cache_read_tokens") or 0 for r in rows)
+    saved = sum(r.get("tokens_saved") or 0 for r in rows)
+    before = sum(r.get("tokens_before") or 0 for r in rows)
+    compressed = sum(1 for r in rows if r.get("compressed"))
+    applied_heavy = 0
+    turn: dict = {}
+    for r in rows:
+        try:
+            sk = json.loads(r.get("skip_reasons") or "{}")
+        except (TypeError, ValueError):
+            continue
+        if not isinstance(sk, dict):
+            continue
+        applied_heavy += int(sk.get("applied_heavy", 0) or 0) + int(sk.get("applied_extreme", 0) or 0)
+        if isinstance(sk.get("turn"), dict):
+            turn = sk["turn"]
+    last = rows[-1]
+    return {
+        "session_id": session_id,
+        "requests": requests,
+        "user_prompts": int(turn.get("user_prompts", 0) or 0),
+        "tool_calls": int(turn.get("tool_calls", 0) or 0),
+        "tool_calls_this_turn": int(turn.get("tool_calls_this_turn", 0) or 0),
+        "tokens_in": tokens_in,
+        "tokens_out": tokens_out,
+        "cache_read_tokens": cache_read,
+        "cost": round(sum(r.get("cost") or 0.0 for r in rows), 4),
+        "compressed_requests": compressed,
+        "evictions": applied_heavy,
+        "tokens_saved": saved,
+        "saved_pct": round(100.0 * saved / before, 1) if before else 0.0,
+        "first_seen": rows[0].get("timestamp"),
+        "last_seen": last.get("timestamp"),
+        "last_model": last.get("model"),
     }

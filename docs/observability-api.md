@@ -130,6 +130,33 @@ Backends without session tracking return `supported: false` with zeroed
 counters and `entries: []`. The lifetime session totals remain available in the
 `sessions` block of `GET /health`.
 
+## GET /api/sessions/{session_id}/stats
+
+Live stats for one session, for a client's status line or a job run.
+`404` when the session has no requests yet, `400` for a malformed id.
+
+```json
+{
+  "available": true, "found": true, "session_id": "cc-171c1a07-...",
+  "requests": 143, "user_prompts": 7, "tool_calls": 54, "tool_calls_this_turn": 6,
+  "tokens_in": 812345, "tokens_out": 40211, "cache_read_tokens": 701000,
+  "cost": 4.12, "compressed_requests": 120, "evictions": 3,
+  "tokens_saved": 61000, "saved_pct": 41.2,
+  "first_seen": 1791139000.1, "last_seen": 1791143000.4, "last_model": "claude-opus-5-5"
+}
+```
+
+### Session ids
+
+Every proxied response carries `X-Loom-Session-Id`. The id is, in order:
+
+1. `X-Loom-Session-Id` request header, when the client names its session
+   (letters, digits, `._:-`, max 128 chars), e.g. a job run id.
+2. `cc-<session_id>` when `metadata.user_id` is Claude Code's JSON blob,
+   so a Claude Code session can find itself from `$CLAUDE_CODE_SESSION_ID`.
+3. Otherwise the composite `gw-<hash>` fingerprint (source, user id, key
+   suffix, system prompt hash, client OS/arch).
+
 ## Other dashboard endpoints
 
 The endpoints below back internal dashboard/admin views rather than the
