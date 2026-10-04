@@ -544,7 +544,7 @@ class PostgresStorage:
             """
             SELECT compressed, compression_ratio, tokens_saved, tier,
                    model, source, timestamp, skip_reasons,
-                   tokens_before, tokens_after, by_block_type
+                   tokens_before, tokens_after, by_block_type, session_id
             FROM metrics WHERE timestamp >= %s
             """,
             (since,),
@@ -562,6 +562,7 @@ class PostgresStorage:
                 "tokens_before": r[8] or 0,
                 "tokens_after": r[9] or 0,
                 "by_block_type": r[10],
+                "session_id": r[11],
             }
             for r in rows
         ]

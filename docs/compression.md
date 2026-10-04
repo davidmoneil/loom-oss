@@ -80,6 +80,26 @@ evicted to a status line — taking the original task with it. The first
 Set it to `0` to disable, or raise it when task setup spans several leading
 messages.
 
+## Turn-aware protection
+
+`tool_result_protect_window` counts API messages, but in agentic clients one
+user prompt is often followed by many tool calls, each costing two messages
+(assistant `tool_use` + user `tool_result`). A 6-message window is then only
+three tool calls, and results from earlier in the *same* task get compressed.
+
+Set `protect_user_turns: N` to also shield every message from the Nth-most-
+recent genuine user prompt (a user message with text and no `tool_result`)
+onward. The effective window is whichever of the two is larger, capped at
+`protect_turn_max_messages` so one very long turn can't disable compression.
+Requests record `skip_reasons.protected_turn` when turn protection widened
+the window.
+
+Every request also records its turn shape (`skip_reasons.turn`: user prompts,
+total tool calls, tool calls in the current turn). `GET /api/metrics/compression`
+reports `calls_per_prompt` (turns, sessions, avg, p50, p90, max): tool calls
+between consecutive user prompts, grouped by session. Use it to pick
+`protect_user_turns` and `protect_turn_max_messages` from data.
+
 ## Heavy-tier size floor
 
 Heavy tier (age ratio ≥ 0.7) normally replaces content with a status stub —
@@ -357,6 +377,8 @@ point. These settings are also editable from the dashboard at
 | `loop_detected_protect_multiplier` | `3` | Multiplier applied to protect window when loop is detected |
 | `image_offload_budget_bytes` | `0` (off) | Replace eligible images larger than this many decoded bytes with a text placeholder |
 | `head_protect_window` | `1` | Number of leading messages (founding task) shielded from compression |
+| `protect_user_turns` | `0` (off) | Shield everything since the Nth-most-recent genuine user prompt (see Turn-aware protection) |
+| `protect_turn_max_messages` | `40` | Upper bound on messages turn protection may shield |
 | `min_tokens_to_evict` | `250` | Below this token estimate, heavy tier falls back to light compression instead of evicting to a status stub |
 | `llm_prose` | `false` | Route prose through a local LLM instead of extractive compression |
 | `llm_url` | `http://localhost:11434` | Ollama or OpenAI-compatible (`/v1`) endpoint |

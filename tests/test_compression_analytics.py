@@ -131,3 +131,21 @@ def test_compression_endpoint(tmp_path):
         storage.close()
         gw.storage = prev_storage
         gw._gateway_keys_exist = prev_cache
+
+
+def test_compression_summary_reports_calls_per_prompt(storage):
+    """Turn shape stored in skip_reasons rolls up per session (AIProjects-vzt4)."""
+    for sid, prompts, calls in (("s1", 1, 2), ("s1", 1, 6), ("s1", 2, 4), ("s2", 1, 8)):
+        storage.record_metrics(
+            request_id=uuid.uuid4().hex[:12], model="haiku", provider="anthropic",
+            tokens_in=10, tokens_out=1, latency_ms=1.0, cost=0.0, source="pytest",
+            session_id=sid,
+            skip_reasons=json.dumps({"msgs_total": 9, "turn": {
+                "user_prompts": prompts, "tool_calls": calls,
+                "tool_calls_this_turn": calls}}),
+        )
+    out = storage.get_compression_summary(days=1)
+    cpp = out["calls_per_prompt"]
+    assert cpp["turns"] == 3 and cpp["sessions"] == 2
+    assert cpp["avg"] == 6.0 and cpp["max"] == 8
+    assert out["skip_reasons"]["msgs_total"] == 36

@@ -60,6 +60,8 @@ class CompressionSummaryResponse(ObservabilityResponse):
     by_source: list[dict[str, Any]] = []
     by_day: list[dict[str, Any]] = []
     by_block_type: dict[str, Any] = {}
+    skip_reasons: dict[str, Any] = {}
+    calls_per_prompt: dict[str, Any] = {}
 
 
 class SessionListResponse(ObservabilityResponse):

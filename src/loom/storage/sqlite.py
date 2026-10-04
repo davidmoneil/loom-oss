@@ -1121,7 +1121,7 @@ class LoomStorage:
             """
             SELECT compressed, compression_ratio, tokens_saved, tier,
                    model, source, timestamp, skip_reasons,
-                   tokens_before, tokens_after, by_block_type
+                   tokens_before, tokens_after, by_block_type, session_id
             FROM metrics WHERE timestamp >= ?
             """,
             (since,),
@@ -1139,6 +1139,7 @@ class LoomStorage:
                 "tokens_before": r["tokens_before"] or 0,
                 "tokens_after": r["tokens_after"] or 0,
                 "by_block_type": r["by_block_type"],
+                "session_id": r["session_id"],
             }
             for r in rows
         ]
