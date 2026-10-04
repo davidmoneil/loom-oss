@@ -180,6 +180,11 @@ def _is_high_entropy(text: str) -> bool:
 
 
 # Status signals — decision-critical markers that must survive compression.
+# Status signals keep their whole source line, capped at this length.
+_STATUS_LINE_MAX_CHARS = 160
+# Heavy-tier eviction keeps this many leading chars as a preview.
+_EVICTED_HEAD_CHARS = 200
+
 RE_STATUS_SIGNALS = [
     re.compile(r'\b(\d+)\s+(?:tasks?|items?|results?|records?|files?)\s+(?:found|returned|matched|queued|eligible)', re.IGNORECASE),
     re.compile(r'\b(?:exit[_ ]?code|status)[:\s]+(\d+)', re.IGNORECASE),
@@ -434,11 +439,15 @@ class ContentProcessor:
             )
             compressed_text = content
 
-        status_signals = self._extract_status_signals(content)
-        if status_signals:
-            signal_block = "\n[Status: " + " | ".join(status_signals) + "]"
-            if signal_block not in compressed_text:
-                compressed_text = compressed_text.rstrip() + "\n" + signal_block
+        # Re-attach only status lines the compressed text dropped.
+        missing = [
+            s for s in self._extract_status_signals(content)
+            if s not in compressed_text
+        ]
+        if missing:
+            compressed_text = (
+                compressed_text.rstrip() + "\n[Status lines:\n" + "\n".join(missing) + "]"
+            )
 
         compressed_tokens = _estimate_tokens(compressed_text)
         return CompressedVariant(
@@ -453,15 +462,27 @@ class ContentProcessor:
     @staticmethod
     def _extract_status_signals(content: str) -> list[str]:
         """Extract decision-critical status markers (exit codes, completion
-        markers, counts, output paths) so they survive compression."""
+        markers, counts, output paths) so they survive compression.
+
+        Each signal is the source line the marker appears on, not the bare
+        keyword: a lone "fail" or "done" stripped of context reads as a
+        verdict on the whole output and misleads the model (issue #122).
+        """
         signals = []
         seen = set()
         for pattern in RE_STATUS_SIGNALS:
             for match in pattern.finditer(content):
-                text = match.group(0).strip()
-                if text.lower() not in seen and len(text) < 200:
-                    signals.append(text)
-                    seen.add(text.lower())
+                start = content.rfind("\n", 0, match.start()) + 1
+                end = content.find("\n", match.end())
+                line = content[start:end if end != -1 else len(content)].strip()
+                if len(line) > _STATUS_LINE_MAX_CHARS:
+                    # Keep a window centred on the match for very long lines.
+                    mid = (match.start() + match.end()) // 2 - start
+                    lo = max(0, mid - _STATUS_LINE_MAX_CHARS // 2)
+                    line = "…" + line[lo:lo + _STATUS_LINE_MAX_CHARS].strip() + "…"
+                if line and line.lower() not in seen:
+                    signals.append(line)
+                    seen.add(line.lower())
         return signals[:10]
 
     def compress_light(self, content: str) -> str:
@@ -505,10 +526,22 @@ class ContentProcessor:
         if _estimate_tokens(content) < min_tokens_to_evict:
             return self.compress_light(content), "light"
 
+        # Evicted stub: a short head preview (what this output was), the
+        # status lines (how it ended), and the evicted size — never a bare
+        # keyword that could be mistaken for the result itself.
+        tokens = _estimate_tokens(content)
+        head = content.strip()[:_EVICTED_HEAD_CHARS].strip()
+        if len(content.strip()) > _EVICTED_HEAD_CHARS:
+            head += "…"
+        parts = [head]
         signals = self._extract_status_signals(content)
         if signals:
-            return "[Status: " + " | ".join(signals[:5]) + "]", "heavy"
-        return f"[{_estimate_tokens(content)} tokens evicted]", "heavy"
+            parts.append("Status lines:\n" + "\n".join(signals[:5]))
+        parts.append(f"[~{tokens} tokens evicted by loom compression]")
+        stub = "\n".join(parts)
+        if _estimate_tokens(stub) >= tokens:
+            return self.compress_light(content), "light"
+        return stub, "heavy"
 
     # --- Compression implementations ---
 
