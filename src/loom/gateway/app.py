@@ -2855,6 +2855,8 @@ def create_app() -> FastAPI:
             "allow_private_llm_url": bool,
             "variant_store": str,
             "image_offload_budget_bytes": int,
+            "protect_user_turns": int,
+            "protect_turn_max_messages": int,
         }
         VALID_TIERS = {"light", "medium", "heavy", "extreme"}
         VALID_STORES = {"", "age", "neo4j"}
@@ -2876,6 +2878,10 @@ def create_app() -> FastAPI:
                 val = max(0, min(val, 50))
             if key == "loop_detected_protect_multiplier":
                 val = max(1, min(val, 10))
+            if key == "protect_user_turns":
+                val = max(0, min(val, 10))
+            if key == "protect_turn_max_messages":
+                val = max(0, min(val, 200))
             if key == "llm_timeout_seconds":
                 val = max(1.0, min(val, 120.0))
             if key == "image_offload_budget_bytes":
@@ -3930,6 +3936,62 @@ def _detect_compression_loop(messages: list[dict]) -> bool:
     return len(dupes) > 0
 
 
+def _is_user_prompt(msg: dict) -> bool:
+    """True for a genuine user prompt: a user message carrying text and no
+    tool_result block (tool results ride in user-role messages too)."""
+    if msg.get("role") != "user":
+        return False
+    content = msg.get("content")
+    if isinstance(content, str):
+        return bool(content.strip())
+    if not isinstance(content, list):
+        return False
+    has_text = False
+    for block in content:
+        if not isinstance(block, dict):
+            continue
+        if block.get("type") == "tool_result":
+            return False
+        if block.get("type") == "text" and str(block.get("text", "")).strip():
+            has_text = True
+    return has_text
+
+
+def _turn_shape(messages: list[dict]) -> dict:
+    """Prompt/tool-call shape of a conversation.
+
+    Returns user_prompts (genuine prompts), tool_calls (all tool_use blocks),
+    tool_calls_this_turn (tool_use blocks since the latest prompt) and
+    prompt_indices (message index of each prompt, oldest first). Recorded per
+    request so calls-between-prompts can be measured, and used for
+    turn-aware protection.
+    """
+    prompt_indices: list[int] = []
+    tool_calls = 0
+    this_turn = 0
+    for idx, msg in enumerate(messages):
+        if _is_user_prompt(msg):
+            prompt_indices.append(idx)
+            this_turn = 0
+            continue
+        if msg.get("role") != "assistant":
+            continue
+        content = msg.get("content")
+        if isinstance(content, list):
+            n_calls = sum(
+                1 for b in content
+                if isinstance(b, dict) and b.get("type") == "tool_use"
+            )
+            tool_calls += n_calls
+            this_turn += n_calls
+    return {
+        "user_prompts": len(prompt_indices),
+        "tool_calls": tool_calls,
+        "tool_calls_this_turn": this_turn,
+        "prompt_indices": prompt_indices,
+    }
+
+
 def _has_cache_control(msg: dict) -> bool:
     """Return True if any content block in *msg* carries a cache_control key."""
     content = msg.get("content")
@@ -3977,6 +4039,8 @@ def _compress_messages_inline(
     loop_multiplier = 3
     image_offload_budget_bytes = 0
     head_protect = 1
+    protect_turns = 0
+    turn_max_messages = 40
     if config is not None:
         comp = getattr(config, "compression", None)
         if comp is not None:
@@ -3984,6 +4048,8 @@ def _compress_messages_inline(
             loop_multiplier = getattr(comp, "loop_detected_protect_multiplier", loop_multiplier)
             image_offload_budget_bytes = getattr(comp, "image_offload_budget_bytes", 0)
             head_protect = getattr(comp, "head_protect_window", head_protect)
+            protect_turns = getattr(comp, "protect_user_turns", 0)
+            turn_max_messages = getattr(comp, "protect_turn_max_messages", 40)
 
     is_looping = _detect_compression_loop(messages)
     if is_looping:
@@ -3995,10 +4061,33 @@ def _compress_messages_inline(
 
     protect_cutoff = max(n - protect_window, 0)
 
+    # Turn-aware protection: a message window counts API messages, but one
+    # user prompt can be followed by dozens of tool calls (two messages
+    # each), so also shield everything since the Nth-latest prompt, bounded
+    # by turn_max_messages.
+    shape = _turn_shape(messages)
+    turn_protected = 0
+    if protect_turns > 0 and shape["prompt_indices"]:
+        prompts = shape["prompt_indices"]
+        turn_start = prompts[-min(protect_turns, len(prompts))]
+        turn_cutoff = max(turn_start, n - turn_max_messages, 0)
+        if turn_cutoff < protect_cutoff:
+            turn_protected = protect_cutoff - turn_cutoff
+            protect_cutoff = turn_cutoff
+
     if stats is not None:
         stats["msgs_total"] = n
         stats["protected_recency"] = n - protect_cutoff
         stats["loop_detected"] = is_looping
+        if turn_protected:
+            stats["protected_turn"] = turn_protected
+        # Nested dict: _summarize_compression's skip totals ignore it; the
+        # calls-per-prompt summary reads it.
+        stats["turn"] = {
+            "user_prompts": shape["user_prompts"],
+            "tool_calls": shape["tool_calls"],
+            "tool_calls_this_turn": shape["tool_calls_this_turn"],
+        }
 
     mode_b = None
     if compress_tool_results:

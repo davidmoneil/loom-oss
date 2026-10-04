@@ -120,6 +120,14 @@ class CompressionConfig(BaseModel):
     image_offload_budget_bytes: int = 0
     # Leading messages (founding task framing) never compressed.
     head_protect_window: int = 1
+    # Turn-aware recency protection: everything from the Nth-most-recent
+    # genuine user prompt (a user message with text and no tool_result) on is
+    # never compressed, so one prompt followed by many tool calls keeps all of
+    # its results. 0 disables it (only tool_result_protect_window applies).
+    protect_user_turns: int = 0
+    # Cap on how many trailing messages turn protection may shield, so one
+    # very long agentic turn can't switch compression off entirely.
+    protect_turn_max_messages: int = 40
     # Heavy tier (age_ratio >= 0.7) normally replaces content with a status
     # stub. Below this token estimate the stub saves little and destroys
     # small-but-load-bearing content, so compress_light is used instead.

@@ -210,4 +210,47 @@ def _summarize_compression(records: list[dict], days: int) -> dict:
         "by_day": sorted(by_day.values(), key=lambda d: d["day"]),
         "by_block_type": dict(sorted(by_block_type.items())),
         "skip_reasons": skip_reasons_totals,
+        "calls_per_prompt": _calls_per_prompt(records),
+    }
+
+
+def _calls_per_prompt(records: list[dict]) -> dict:
+    """Tool calls made between consecutive user prompts.
+
+    Each request row carries ``skip_reasons.turn`` (user_prompts,
+    tool_calls_this_turn). Rows of one session that share a user_prompts
+    count belong to the same turn; the turn's size is the largest
+    tool_calls_this_turn seen for it. Rows without a session id can't be
+    grouped and are skipped.
+    """
+    turns: dict[tuple, int] = {}
+    for r in records:
+        sid = r.get("session_id")
+        raw = r.get("skip_reasons")
+        if not sid or not raw:
+            continue
+        try:
+            turn = json.loads(raw).get("turn")
+        except (TypeError, ValueError, AttributeError):
+            continue
+        if not isinstance(turn, dict):
+            continue
+        key = (sid, turn.get("user_prompts", 0))
+        calls = int(turn.get("tool_calls_this_turn", 0) or 0)
+        if calls > turns.get(key, -1):
+            turns[key] = calls
+    sizes = sorted(turns.values())
+    if not sizes:
+        return {"turns": 0, "sessions": 0, "avg": 0.0, "p50": 0, "p90": 0, "max": 0}
+
+    def _pct(q: float) -> int:
+        return sizes[min(len(sizes) - 1, int(q * (len(sizes) - 1) + 0.5))]
+
+    return {
+        "turns": len(sizes),
+        "sessions": len({k[0] for k in turns}),
+        "avg": round(statistics.mean(sizes), 2),
+        "p50": _pct(0.5),
+        "p90": _pct(0.9),
+        "max": sizes[-1],
     }
