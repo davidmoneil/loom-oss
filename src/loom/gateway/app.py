@@ -21,6 +21,7 @@ affected feature degrades gracefully rather than crashing the process.
 from __future__ import annotations
 
 import asyncio
+import contextvars
 import dataclasses
 import gzip
 import hashlib
@@ -299,6 +300,17 @@ def _extract_skill(messages: Optional[list[dict]]) -> Optional[str]:
     return None
 
 
+# Caller attribution (persona / job) from X-Loom-Persona / X-Loom-Job headers,
+# set per request by the HTTP middleware and read when metrics are recorded.
+_caller_attr: contextvars.ContextVar[tuple[Optional[str], Optional[str]]] = (
+    contextvars.ContextVar("loom_caller_attr", default=(None, None))
+)
+
+
+def _header_attr(request: Request, name: str) -> Optional[str]:
+    return request.headers.get(name, "").strip()[:128] or None
+
+
 def _record_request(
     state: GatewayState,
     *,
@@ -332,6 +344,7 @@ def _record_request(
     """Persist + audit a completed request. Never raises into the request path."""
     tokens_in, tokens_out, cache_read, cache_creation = _extract_tokens(usage)
     skill = _extract_skill(messages)
+    persona, job = _caller_attr.get()
     skip_reasons_json = (
         json.dumps(skip_reasons, separators=(",", ":")) if skip_reasons else None
     )
@@ -1577,6 +1590,9 @@ def create_app() -> FastAPI:
     @app.middleware("http")
     async def rate_limit_middleware(request: Request, call_next):
         path = request.url.path
+        _caller_attr.set(
+            (_header_attr(request, "x-loom-persona"), _header_attr(request, "x-loom-job"))
+        )
         if is_public_path(path):
             return await call_next(request)
 

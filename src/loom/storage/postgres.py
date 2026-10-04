@@ -20,7 +20,7 @@ logger = get_logger("loom.storage.postgres")
 import hashlib
 import secrets
 
-SCHEMA_VERSION = 16
+SCHEMA_VERSION = 17
 
 
 class PostgresStorage:
@@ -334,6 +334,12 @@ class PostgresStorage:
             # Set once at session creation and never overwritten (see touch_session).
             conn.execute("ALTER TABLE sessions ADD COLUMN IF NOT EXISTS session_name TEXT")
 
+        if current < 17:
+            # Caller attribution: persona + job (X-Loom-Persona / X-Loom-Job).
+            conn.execute("ALTER TABLE metrics ADD COLUMN IF NOT EXISTS persona TEXT")
+            conn.execute("ALTER TABLE metrics ADD COLUMN IF NOT EXISTS job TEXT")
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_metrics_persona ON metrics (persona)")
+
         if current < SCHEMA_VERSION:
             conn.execute(
                 "INSERT INTO schema_version (version, applied_at) VALUES (%s, %s) "
@@ -395,6 +401,8 @@ class PostgresStorage:
         cache_read_tokens: int = 0,
         cache_creation_tokens: int = 0,
         skill: Optional[str] = None,
+        persona: Optional[str] = None,
+        job: Optional[str] = None,
         tier: Optional[str] = None,
         skip_reasons: Optional[str] = None,
         tokens_before: int = 0,
@@ -409,8 +417,8 @@ class PostgresStorage:
                 latency_ms, cost_estimate, compressed, compression_ratio,
                 message_count, source, tokens_saved, session_id,
                 status_code, cache_read_tokens, cache_creation_tokens, skill,
-                tier, skip_reasons, tokens_before, tokens_after, by_block_type
-            ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                persona, job, tier, skip_reasons, tokens_before, tokens_after, by_block_type
+            ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
             """,
             (
                 time.time(),
@@ -433,6 +441,8 @@ class PostgresStorage:
                 cache_read_tokens,
                 cache_creation_tokens,
                 skill,
+                persona,
+                job,
                 tier,
                 skip_reasons,
                 tokens_before,

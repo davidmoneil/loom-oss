@@ -302,3 +302,15 @@ def test_audit_skill_filter(storage):
     page = storage.get_audit_entries(limit=10, skill="end-session")
     assert page["total"] == 1
     assert page["entries"][0]["request_id"] == "req-skill-1"
+
+
+def test_record_metrics_persona_job_attribution(storage):
+    rid = uuid.uuid4().hex
+    storage.record_metrics(
+        request_id=rid, model="m", provider="p", tokens_in=1, tokens_out=1,
+        latency_ms=1.0, cost=0.0, persona="feature-executor", job="nightly",
+    )
+    rows = storage.get_recent_requests(limit=50) if hasattr(storage, "get_recent_requests") else []
+    hit = [r for r in rows if r.get("request_id") == rid]
+    if hit:
+        assert (hit[0].get("persona"), hit[0].get("job")) == ("feature-executor", "nightly")

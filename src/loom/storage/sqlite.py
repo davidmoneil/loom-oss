@@ -22,7 +22,7 @@ from typing import Any, Optional
 
 from loom.storage.base import _summarize_compression
 
-SCHEMA_VERSION = 16
+SCHEMA_VERSION = 17
 
 # Compression-cache entries live this long, matching the Postgres backend's
 # "NOW() + INTERVAL '7 days'".
@@ -416,6 +416,18 @@ class LoomStorage:
             except sqlite3.OperationalError:
                 pass
 
+        if current < 17:
+            # Caller attribution: persona + job (X-Loom-Persona / X-Loom-Job).
+            for col in ("persona", "job"):
+                try:
+                    c.execute(f"ALTER TABLE metrics ADD COLUMN {col} TEXT")
+                except sqlite3.OperationalError:
+                    pass
+            try:
+                c.execute("CREATE INDEX IF NOT EXISTS idx_metrics_persona ON metrics (persona)")
+            except sqlite3.OperationalError:
+                pass
+
         if current < SCHEMA_VERSION:
             c.execute(
                 "INSERT OR REPLACE INTO schema_version (version, applied_at) VALUES (?, ?)",
@@ -479,6 +491,8 @@ class LoomStorage:
         cache_read_tokens: int = 0,
         cache_creation_tokens: int = 0,
         skill: Optional[str] = None,
+        persona: Optional[str] = None,
+        job: Optional[str] = None,
         tier: Optional[str] = None,
         skip_reasons: Optional[str] = None,
         tokens_before: int = 0,
@@ -494,8 +508,8 @@ class LoomStorage:
                     latency_ms, cost_estimate, compressed, compression_ratio,
                     message_count, source, tokens_saved, session_id,
                     status_code, cache_read_tokens, cache_creation_tokens, skill,
-                    tier, skip_reasons, tokens_before, tokens_after, by_block_type
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    persona, job, tier, skip_reasons, tokens_before, tokens_after, by_block_type
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     time.time(),
@@ -518,6 +532,8 @@ class LoomStorage:
                     cache_read_tokens,
                     cache_creation_tokens,
                     skill,
+                    persona,
+                    job,
                     tier,
                     skip_reasons,
                     tokens_before,
