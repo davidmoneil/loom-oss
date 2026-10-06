@@ -152,6 +152,11 @@ class RateLimitSinkConfig(BaseModel):
     table: str = "api_headers"
     source: str = "loom-oss"
     queue_size: int = 1000
+    # Also write the credential type to a dedicated ``auth_type`` column. Off by
+    # default: the live table has no such column, so the type rides inside
+    # ``raw_headers`` ("x-loom-auth-type") instead. Needs
+    # ALTER TABLE <table> ADD COLUMN auth_type text;
+    auth_type_column: bool = False
 
 
 class ObservabilityConfig(BaseModel):

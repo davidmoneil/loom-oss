@@ -77,6 +77,7 @@ class AuditLogger:
         client_job: Optional[str] = None,
         cache_read_tokens: int = 0,
         cache_creation_tokens: int = 0,
+        auth_type: Optional[str] = None,
     ) -> None:
         record = {
             "ts": _utc_iso(),
@@ -102,6 +103,8 @@ class AuditLogger:
             "upstream_request_id": upstream_request_id or "",
             "client_app": client_app or "",
             "client_job": client_job or "",
+            # "oauth" (Claude Max) / "api_key" (console key) / None; label only.
+            "auth_type": auth_type,
         }
         if cache_read_tokens or cache_creation_tokens:
             record["cache_read_tokens"] = cache_read_tokens
