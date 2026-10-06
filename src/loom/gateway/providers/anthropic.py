@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import asyncio
 import re
-from typing import AsyncIterator
+from typing import Any, AsyncIterator, Callable
 
 import httpx
 
@@ -166,6 +166,42 @@ def _extract_ratelimit_headers(resp: httpx.Response) -> dict:
     return out
 
 
+AUTH_TYPE_KEY = "auth_type"
+AUTH_OAUTH = "oauth"
+AUTH_API_KEY = "api_key"
+
+
+def _auth_type_from_headers(headers: dict[str, str]) -> str | None:
+    """Return ``oauth`` or ``api_key`` from the headers ``_headers`` built.
+
+    Only the label is kept; the credential value is never read out of the dict.
+    """
+    for name in headers:
+        lname = name.lower()
+        if lname == "authorization":
+            return AUTH_OAUTH
+        if lname == "x-api-key":
+            return AUTH_API_KEY
+    return None
+
+
+def _snapshot(resp: httpx.Response, hdrs: dict[str, str]) -> dict:
+    """Rate-limit snapshot for one upstream response plus the credential type used."""
+    snap = _extract_ratelimit_headers(resp)
+    snap[AUTH_TYPE_KEY] = _auth_type_from_headers(hdrs)
+    return snap
+
+
+def _notify_429(hook: Callable[[dict], Any] | None, snap: dict, status_code: int) -> None:
+    """Tell the gateway about a 429 attempt. Never raises into the request path."""
+    if hook is None or status_code != 429:
+        return
+    try:
+        hook(dict(snap))
+    except Exception:
+        pass
+
+
 class AnthropicBackend(ProviderBackend):
     name = "anthropic"
     _last_ratelimit: dict = {}
@@ -226,6 +262,7 @@ class AnthropicBackend(ProviderBackend):
         inbound_headers: dict[str, str] | None = None,
         query_string: str = "",
         raw_body: dict | None = None,
+        on_429: Callable[[dict], Any] | None = None,
         **kwargs,
     ) -> dict | AsyncIterator[bytes]:
         """Normalize a chat completion request into Anthropic's Messages API body shape.
@@ -249,8 +286,8 @@ class AnthropicBackend(ProviderBackend):
             body["stream"] = stream
 
         if stream:
-            return self._stream(body, api_key, inbound_headers, query_string)
-        return await self._complete(body, api_key, inbound_headers, query_string)
+            return self._stream(body, api_key, inbound_headers, query_string, on_429)
+        return await self._complete(body, api_key, inbound_headers, query_string, on_429)
 
     async def count_tokens(
         self, body: dict, inbound_headers: dict[str, str]
@@ -294,6 +331,7 @@ class AnthropicBackend(ProviderBackend):
         api_key: str,
         inbound_headers: dict[str, str] | None = None,
         query_string: str = "",
+        on_429: Callable[[dict], Any] | None = None,
     ) -> dict:
         """Send a non-streaming Messages API request, applying the bounded 429 retry policy.
 
@@ -323,10 +361,12 @@ class AnthropicBackend(ProviderBackend):
                     req.url, type(exc).__name__, exc,
                 )
                 raise ProviderError(f"anthropic request failed: {exc}") from exc
-            self._last_ratelimit = _extract_ratelimit_headers(resp)
+            snap = _snapshot(resp, hdrs)
+            self._last_ratelimit = snap
             if resp.status_code == 429 and attempt < _MAX_429_RETRIES:
                 retry_after = _short_retry_after(resp)
                 if retry_after is not None:
+                    _notify_429(on_429, snap, resp.status_code)
                     attempt += 1
                     _log.warning(
                         "upstream 429 — retrying once after %.1fs", retry_after,
@@ -342,11 +382,13 @@ class AnthropicBackend(ProviderBackend):
                      if k.lower() != "x-api-key" and k.lower() != "authorization"},
                     payload,
                 )
-                raise ProviderError(
+                err = ProviderError(
                     f"anthropic returned {resp.status_code}",
                     status_code=resp.status_code,
                     payload=payload,
                 )
+                err.ratelimit = snap
+                raise err
             return resp.json()
 
     async def _stream(
@@ -355,6 +397,7 @@ class AnthropicBackend(ProviderBackend):
         api_key: str,
         inbound_headers: dict[str, str] | None = None,
         query_string: str = "",
+        on_429: Callable[[dict], Any] | None = None,
     ) -> AsyncIterator[bytes]:
         """Stream a Messages API response, retrying once on a 429 or a pre-data connection failure.
 
@@ -374,16 +417,19 @@ class AnthropicBackend(ProviderBackend):
         while True:
             yielded_any = False
             try:
+                req_headers = self._headers(api_key, inbound_headers)
                 async with client.stream(
                     "POST",
                     url,
                     json=body,
-                    headers=self._headers(api_key, inbound_headers),
+                    headers=req_headers,
                 ) as resp:
-                    self._last_ratelimit = _extract_ratelimit_headers(resp)
+                    snap = _snapshot(resp, req_headers)
+                    self._last_ratelimit = snap
                     if resp.status_code == 429 and attempt < _MAX_429_RETRIES:
                         retry_after = _short_retry_after(resp)
                         if retry_after is not None:
+                            _notify_429(on_429, snap, resp.status_code)
                             await resp.aread()
                             attempt += 1
                             _log.warning(
@@ -402,11 +448,13 @@ class AnthropicBackend(ProviderBackend):
                              if k.lower() != "x-api-key" and k.lower() != "authorization"},
                             payload,
                         )
-                        raise ProviderError(
+                        err = ProviderError(
                             f"anthropic stream returned {resp.status_code}",
                             status_code=resp.status_code,
                             payload=payload,
                         )
+                        err.ratelimit = snap
+                        raise err
                     async for chunk in resp.aiter_raw():
                         if chunk:
                             yielded_any = True

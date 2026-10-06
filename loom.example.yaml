@@ -129,6 +129,13 @@ observability:
   #   table: api_headers
   #   source: loom-oss                   # value of the table's `source` column
   #   queue_size: 1000                   # rows buffered in memory; overflow is dropped
+  #   # Credential type of each upstream call ("oauth" = Claude Max subscription,
+  #   # "api_key" = API console key). By default it is stored inside raw_headers
+  #   # as {"x-loom-auth-type": "oauth"|"api_key"}, no schema change needed:
+  #   #   SELECT * FROM api_headers WHERE raw_headers->>'x-loom-auth-type' = 'oauth';
+  #   # For a real column, run this yourself first, then set auth_type_column: true:
+  #   #   ALTER TABLE api_headers ADD COLUMN auth_type text;
+  #   auth_type_column: false
 
 # Shadow-mode ML classifier, compared against the rule-based DetectionEngine
 # on every /v1/detect call (and, passively, real /v1/chat/completions

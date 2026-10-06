@@ -46,6 +46,12 @@ COLUMNS = (
     "stop_reason", "response_ms",
 )
 
+# Optional extra column, only inserted when ``auth_type_column`` is enabled
+# (the target table must have it: ALTER TABLE ... ADD COLUMN auth_type text).
+AUTH_TYPE_COLUMN = "auth_type"
+# Default carrier needing no schema change: a key inside ``raw_headers``.
+AUTH_TYPE_RAW_KEY = "x-loom-auth-type"
+
 
 def _int(val: Any) -> Optional[int]:
     if val is None or isinstance(val, bool):
@@ -91,10 +97,24 @@ def build_row(
     cost_usd: Optional[float] = None,
     latency_ms: Optional[float] = None,
     stop_reason: Optional[str] = None,
+    auth_type: Optional[str] = None,
+    auth_type_column: bool = False,
 ) -> dict:
-    """Map a loom ratelimit snapshot + request metadata onto the table columns."""
+    """Map a loom ratelimit snapshot + request metadata onto the table columns.
+
+    ``auth_type`` (``oauth`` / ``api_key`` / None) is carried inside
+    ``raw_headers`` under ``x-loom-auth-type`` so the live table needs no
+    schema change; with ``auth_type_column`` it is also returned under ``auth_type``
+    for the optional dedicated column.
+    """
     rl = ratelimit or {}
+    if auth_type is None:
+        auth_type = rl.get("auth_type")
     raw = rl.get("raw_headers")
+    if auth_type in ("oauth", "api_key"):
+        raw = {**(raw or {}), AUTH_TYPE_RAW_KEY: auth_type}
+    else:
+        auth_type = None
     row = {
         "request_id": rl.get("upstream_request_id"),
         "method": method,
@@ -120,6 +140,8 @@ def build_row(
         "stop_reason": stop_reason,
         "response_ms": _int(latency_ms),
     }
+    if auth_type_column:
+        row[AUTH_TYPE_COLUMN] = auth_type
     for bucket in ("requests", "tokens", "input_tokens", "output_tokens"):
         row[f"rl_{bucket}_limit"] = _int(rl.get(f"ratelimit_{bucket}_limit"))
         row[f"rl_{bucket}_remaining"] = _int(rl.get(f"ratelimit_{bucket}_remaining"))
@@ -138,10 +160,12 @@ class RateLimitSink:
         queue_size: int = 1000,
         connect: Optional[Callable[[str], Any]] = None,
         start: bool = True,
+        auth_type_column: bool = False,
     ) -> None:
         if not _IDENT_RE.match(table):
             raise ValueError(f"invalid ratelimit sink table name: {table!r}")
         self._dsn = dsn
+        self._auth_type_column = auth_type_column
         self.table = table
         self.source = source
         self._connect = connect or self._default_connect
@@ -150,9 +174,10 @@ class RateLimitSink:
         self._last_warn = 0.0
         self._stop = threading.Event()
         self.dropped = 0
+        cols = COLUMNS + ((AUTH_TYPE_COLUMN,) if auth_type_column else ())
         self._sql = "INSERT INTO {} ({}) VALUES ({})".format(
-            table, ", ".join(COLUMNS), ", ".join(
-                f"%({c})s::jsonb" if c == "raw_headers" else f"%({c})s" for c in COLUMNS
+            table, ", ".join(cols), ", ".join(
+                f"%({c})s::jsonb" if c == "raw_headers" else f"%({c})s" for c in cols
             ),
         )
         self._thread: Optional[threading.Thread] = None
@@ -181,7 +206,9 @@ class RateLimitSink:
         """Queue one row. Accepts the keyword arguments of :func:`build_row`
         (minus ``source``, which comes from config)."""
         try:
-            row = build_row(source=self.source, **fields)
+            row = build_row(
+                source=self.source, auth_type_column=self._auth_type_column, **fields,
+            )
             self._queue.put_nowait(row)
         except queue.Full:
             self.dropped += 1
@@ -255,6 +282,7 @@ def build_sink(cfg: Any) -> Optional[RateLimitSink]:
             return None
         return RateLimitSink(
             dsn=dsn, table=cfg.table, source=cfg.source, queue_size=cfg.queue_size,
+            auth_type_column=bool(getattr(cfg, "auth_type_column", False)),
         )
     except Exception as exc:
         _log.warning("ratelimit sink disabled: %s", type(exc).__name__)

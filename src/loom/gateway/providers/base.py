@@ -28,6 +28,9 @@ class ProviderError(Exception):
         self.payload = payload or {
             "error": {"message": message, "type": "provider_error"}
         }
+        # Rate-limit snapshot of the upstream response that caused this error
+        # (set by the Anthropic backend; None otherwise). Never client-visible.
+        self.ratelimit: dict | None = None
 
 
 class ProviderBackend(ABC):

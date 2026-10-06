@@ -33,7 +33,7 @@ import time
 import urllib.parse
 import uuid
 from contextlib import asynccontextmanager
-from typing import Any, AsyncIterator, Optional
+from typing import Any, AsyncIterator, Callable, Optional
 
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
@@ -404,10 +404,15 @@ def _record_request(
     # Sink-only extras ride on the ratelimit snapshot; keep them out of the
     # audit row and the rate_limits table.
     upstream_request_id = None
+    auth_type = None
     sink_rl = ratelimit
     if ratelimit:
         upstream_request_id = ratelimit.get("upstream_request_id")
-        ratelimit = {k: v for k, v in ratelimit.items() if k not in _SINK_ONLY_KEYS}
+        # "oauth" / "api_key" label only; "auth_type" alone is not a snapshot,
+        # so it never makes an otherwise header-less response look like one.
+        auth_type = ratelimit.get("auth_type")
+        sink_rl = {k: v for k, v in ratelimit.items() if k != "auth_type"} or None
+        ratelimit = {k: v for k, v in (sink_rl or {}).items() if k not in _SINK_ONLY_KEYS}
     skill = _extract_skill(messages)
     skip_reasons_json = (
         json.dumps(skip_reasons, separators=(",", ":")) if skip_reasons else None
@@ -485,6 +490,7 @@ def _record_request(
                 upstream_request_id=upstream_request_id,
                 client_app=client_app,
                 client_job=client_job,
+                auth_type=auth_type,
             )
             if ratelimit:
                 audit_kwargs["ratelimit"] = ratelimit
@@ -527,6 +533,7 @@ def _record_request(
                 cost_usd=cost,
                 latency_ms=latency_ms,
                 stop_reason=stop_reason,
+                auth_type=auth_type,
             )
         except Exception:
             pass
@@ -566,6 +573,101 @@ def _record_request(
             )
         except Exception:
             pass
+
+
+def _record_upstream_429(
+    state: GatewayState,
+    *,
+    request_id: str,
+    path: str,
+    source: str,
+    provider: str,
+    model: Optional[str],
+    requested_model: Optional[str],
+    ratelimit: Optional[dict],
+    latency_ms: float,
+    method: str = "POST",
+    session_id: Optional[str] = None,
+    client_app: Optional[str] = None,
+    client_job: Optional[str] = None,
+) -> None:
+    """Record one upstream 429 attempt: an audit row plus a sink row.
+
+    Used for the intermediate 429 of a retried call and for a terminal 429 that
+    ends in a ProviderError. Writes no metrics/routing rows (the final attempt
+    owns those) and never raises into the request path.
+    """
+    try:
+        snap = dict(ratelimit or {})
+        auth_type = snap.pop("auth_type", None)
+        upstream_request_id = snap.get("upstream_request_id")
+        audit_rl = {k: v for k, v in snap.items() if k not in _SINK_ONLY_KEYS}
+        if state.audit is not None:
+            try:
+                kwargs: dict = dict(
+                    request_id=request_id,
+                    method=method,
+                    path=path,
+                    source=source,
+                    model=model,
+                    requested_model=requested_model,
+                    provider=provider,
+                    status_code=429,
+                    latency_ms=latency_ms,
+                    session_id=session_id,
+                    upstream_request_id=upstream_request_id,
+                    client_app=client_app,
+                    client_job=client_job,
+                    auth_type=auth_type,
+                )
+                if audit_rl:
+                    kwargs["ratelimit"] = audit_rl
+                state.audit.log_request(**kwargs)
+            except Exception:
+                pass
+        if state.ratelimit_sink is not None and provider == "anthropic":
+            try:
+                state.ratelimit_sink.emit(
+                    method=method,
+                    path=path,
+                    status_code=429,
+                    model=model,
+                    ratelimit=snap,
+                    latency_ms=latency_ms,
+                    auth_type=auth_type,
+                )
+            except Exception:
+                pass
+    except Exception:
+        pass
+
+
+def _make_429_hook(
+    state: GatewayState,
+    *,
+    request_id: str,
+    path: str,
+    source: str,
+    provider: str,
+    model: Optional[str],
+    requested_model: Optional[str],
+    t0: float,
+    session_id: Optional[str],
+    client_app: Optional[str],
+    client_job: Optional[str],
+) -> Callable[[dict], None]:
+    """Build the per-request callback the Anthropic backend calls on a retried 429."""
+
+    def _hook(snapshot: dict) -> None:
+        _record_upstream_429(
+            state, request_id=request_id, path=path, source=source,
+            provider=provider, model=model, requested_model=requested_model,
+            ratelimit=snapshot,
+            latency_ms=round((time.monotonic() - t0) * 1000, 2),
+            session_id=session_id, client_app=client_app, client_job=client_job,
+        )
+
+    return _hook
 
 
 def _audit_error(state: GatewayState, request_id: str, path: str, source: str, status_code: int) -> None:
@@ -1827,6 +1929,16 @@ def create_app() -> FastAPI:
                     _tally(gw.comp_by_type, k, v["before"], v["after"])
                 _fold_skip_stats(gw.comp_skip_stats, comp_stats)
 
+            if getattr(backend, "name", "") == "anthropic":
+                forward["on_429"] = _make_429_hook(
+                    gw, request_id=request_id, path="/v1/chat/completions",
+                    source=source, provider=provider_name, model=model_cfg.model_id,
+                    requested_model=body.get("model"), t0=t0,
+                    session_id=session_id if session_id != "unknown" else None,
+                    client_app=_client_identity(request.headers)[0],
+                    client_job=_client_identity(request.headers)[1],
+                )
+
             result = await backend.chat_completion(
                 model=model_cfg.model_id,
                 messages=messages,
@@ -1887,7 +1999,21 @@ def create_app() -> FastAPI:
             normalized = _scan_response(gw, normalized, provider_name, model_cfg.model_id, source)
             return JSONResponse(normalized, headers={"X-Loom-Request-Id": request_id})
         except ProviderError as exc:
-            _audit_error(gw, request_id, "/v1/chat/completions", source, exc.status_code)
+            if exc.status_code == 429 and exc.ratelimit:
+                try:
+                    _record_upstream_429(
+                        gw, request_id=request_id, path="/v1/chat/completions",
+                        source=source, provider=provider_name, model=model_cfg.model_id,
+                        requested_model=body.get("model"), ratelimit=exc.ratelimit,
+                        latency_ms=round((time.monotonic() - t0) * 1000, 2),
+                        session_id=session_id if session_id != "unknown" else None,
+                        client_app=_client_identity(request.headers)[0],
+                        client_job=_client_identity(request.headers)[1],
+                    )
+                except Exception:
+                    _audit_error(gw, request_id, "/v1/chat/completions", source, exc.status_code)
+            else:
+                _audit_error(gw, request_id, "/v1/chat/completions", source, exc.status_code)
             return _error_response(exc, request_id)
         except Exception as exc:  # never crash
             _audit_error(gw, request_id, "/v1/chat/completions", source, 500)
@@ -2088,6 +2214,16 @@ def create_app() -> FastAPI:
                 for k, v in comp_by_type.items():
                     _tally(gw.comp_by_type, k, v["before"], v["after"])
                 _fold_skip_stats(gw.comp_skip_stats, comp_stats)
+            cc_extra: dict = {}
+            if getattr(backend, "name", "") == "anthropic":
+                cc_extra["on_429"] = _make_429_hook(
+                    gw, request_id=request_id, path="/v1/messages",
+                    source=source, provider=provider_name, model=actual_model,
+                    requested_model=body.get("model"), t0=t0,
+                    session_id=session_id if session_id != "unknown" else None,
+                    client_app=_client_identity(request.headers)[0],
+                    client_job=_client_identity(request.headers)[1],
+                )
             try:
                 result = await asyncio.wait_for(
                     backend.chat_completion(
@@ -2098,6 +2234,7 @@ def create_app() -> FastAPI:
                         inbound_headers=inbound_hdrs,
                         query_string=request.url.query or "",
                         raw_body=body,
+                        **cc_extra,
                     ),
                     timeout=_UPSTREAM_TIMEOUT_SECONDS,
                 )
@@ -2163,7 +2300,21 @@ def create_app() -> FastAPI:
             result = _scan_response(gw, result, provider_name, model, source)
             return JSONResponse(result, headers={"X-Loom-Request-Id": request_id})
         except ProviderError as exc:
-            _audit_error(gw, request_id, "/v1/messages", source, exc.status_code)
+            if exc.status_code == 429 and exc.ratelimit:
+                try:
+                    _record_upstream_429(
+                        gw, request_id=request_id, path="/v1/messages",
+                        source=source, provider=provider_name, model=actual_model,
+                        requested_model=body.get("model"), ratelimit=exc.ratelimit,
+                        latency_ms=round((time.monotonic() - t0) * 1000, 2),
+                        session_id=session_id if session_id != "unknown" else None,
+                        client_app=_client_identity(request.headers)[0],
+                        client_job=_client_identity(request.headers)[1],
+                    )
+                except Exception:
+                    _audit_error(gw, request_id, "/v1/messages", source, exc.status_code)
+            else:
+                _audit_error(gw, request_id, "/v1/messages", source, exc.status_code)
             return _error_response(exc, request_id)
         except Exception as exc:
             _audit_error(gw, request_id, "/v1/messages", source, 500)
