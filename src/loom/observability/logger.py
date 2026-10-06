@@ -72,6 +72,11 @@ class AuditLogger:
         ratelimit: Optional[dict] = None,
         session_id: Optional[str] = None,
         skip_reasons: Optional[str] = None,
+        upstream_request_id: Optional[str] = None,
+        client_app: Optional[str] = None,
+        client_job: Optional[str] = None,
+        cache_read_tokens: int = 0,
+        cache_creation_tokens: int = 0,
     ) -> None:
         record = {
             "ts": _utc_iso(),
@@ -92,7 +97,15 @@ class AuditLogger:
             "routing_reason": routing_reason,
             "status_code": status_code,
             "session_id": session_id,
+            # Join fields: Anthropic's own request id, the client app family
+            # and the optional x-nexus-job tag ("" when absent).
+            "upstream_request_id": upstream_request_id or "",
+            "client_app": client_app or "",
+            "client_job": client_job or "",
         }
+        if cache_read_tokens or cache_creation_tokens:
+            record["cache_read_tokens"] = cache_read_tokens
+            record["cache_creation_tokens"] = cache_creation_tokens
         if ratelimit:
             record["ratelimit"] = ratelimit
         if skip_reasons:

@@ -117,6 +117,18 @@ storage:
 observability:
   audit_log_path: logs/audit.jsonl
   metrics_log_path: logs/metrics.jsonl
+  # Optional: write one row per upstream Anthropic response (rate-limit
+  # headers + token usage, cost, latency, stop_reason; no prompt/response
+  # content, no request headers) into a Postgres table you create. Off by
+  # default. Needs `pip install "psycopg[binary]"`. Non-blocking and
+  # fail-open: if the database is down, requests still succeed and a single
+  # warning per minute is logged. The DSN is read from the env var below.
+  # ratelimit_sink:
+  #   enabled: false
+  #   dsn_env: LOOM_RATELIMIT_SINK_DSN   # e.g. postgresql://user:pass@host:5432/dbname
+  #   table: api_headers
+  #   source: loom-oss                   # value of the table's `source` column
+  #   queue_size: 1000                   # rows buffered in memory; overflow is dropped
 
 # Shadow-mode ML classifier, compared against the rule-based DetectionEngine
 # on every /v1/detect call (and, passively, real /v1/chat/completions
