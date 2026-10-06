@@ -86,6 +86,7 @@ export const api = {
     });
     return getJSON(`/api/audit?${q.toString()}`);
   },
+  requestTags: (hours = 24) => getJSON(`/api/request-tags?hours=${hours}`),
   auditContent: (requestId) => getJSON(`/api/audit/${requestId}/content`),
   scannerRules: () => getJSON("/api/scanner/rules"),
   scannerStats: () => getJSON("/api/scanner/stats"),

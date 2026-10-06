@@ -78,6 +78,7 @@ class AuditLogger:
         cache_read_tokens: int = 0,
         cache_creation_tokens: int = 0,
         auth_type: Optional[str] = None,
+        tags: Optional[dict] = None,
     ) -> None:
         record = {
             "ts": _utc_iso(),
@@ -109,6 +110,8 @@ class AuditLogger:
         if cache_read_tokens or cache_creation_tokens:
             record["cache_read_tokens"] = cache_read_tokens
             record["cache_creation_tokens"] = cache_creation_tokens
+        if tags:
+            record["tags"] = tags
         if ratelimit:
             record["ratelimit"] = ratelimit
         if skip_reasons:

@@ -22,7 +22,14 @@ from typing import Any, Optional
 
 from loom.storage.base import _summarize_compression
 
-SCHEMA_VERSION = 16
+from loom.observability.request_tags import (
+    aggregate_by_tag,
+    parse_tag_filter,
+    parse_tags_json,
+    tag_like_pattern,
+)
+
+SCHEMA_VERSION = 17
 
 # Compression-cache entries live this long, matching the Postgres backend's
 # "NOW() + INTERVAL '7 days'".
@@ -416,6 +423,24 @@ class LoomStorage:
             except sqlite3.OperationalError:
                 pass
 
+        if current < 17:
+            # Request tags (JSON text on metrics) and rate-limit split by
+            # credential type: auth_type plus the unified 5h/7d windows.
+            for table, col, typ in (
+                ("metrics", "tags", "TEXT"),
+                ("rate_limits", "auth_type", "TEXT"),
+                ("rate_limits", "util_5h", "REAL"),
+                ("rate_limits", "util_7d", "REAL"),
+                ("rate_limits", "status_5h", "TEXT"),
+                ("rate_limits", "status_7d", "TEXT"),
+                ("rate_limits", "unified_status", "TEXT"),
+                ("rate_limits", "retry_after", "TEXT"),
+            ):
+                try:
+                    c.execute(f"ALTER TABLE {table} ADD COLUMN {col} {typ}")
+                except sqlite3.OperationalError:
+                    pass
+
         if current < SCHEMA_VERSION:
             c.execute(
                 "INSERT OR REPLACE INTO schema_version (version, applied_at) VALUES (?, ?)",
@@ -484,6 +509,7 @@ class LoomStorage:
         tokens_before: int = 0,
         tokens_after: int = 0,
         by_block_type: Optional[str] = None,
+        tags: Optional[str] = None,
     ) -> None:
         with self._write_lock:
             self.conn.execute(
@@ -494,8 +520,8 @@ class LoomStorage:
                     latency_ms, cost_estimate, compressed, compression_ratio,
                     message_count, source, tokens_saved, session_id,
                     status_code, cache_read_tokens, cache_creation_tokens, skill,
-                    tier, skip_reasons, tokens_before, tokens_after, by_block_type
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    tier, skip_reasons, tokens_before, tokens_after, by_block_type, tags
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     time.time(),
@@ -523,6 +549,7 @@ class LoomStorage:
                     tokens_before,
                     tokens_after,
                     by_block_type,
+                    tags,
                 ),
             )
             self._schedule_flush()
@@ -533,6 +560,7 @@ class LoomStorage:
         provider: str,
         model: Optional[str] = None,
         ratelimit: Optional[dict] = None,
+        auth_type: Optional[str] = None,
     ) -> None:
         if not ratelimit:
             return
@@ -546,8 +574,10 @@ class LoomStorage:
                     input_tokens_limit, input_tokens_remaining,
                     output_tokens_limit, output_tokens_remaining,
                     tokens_utilization, input_tokens_utilization,
-                    output_tokens_utilization
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    output_tokens_utilization,
+                    auth_type, util_5h, util_7d, status_5h, status_7d,
+                    unified_status, retry_after
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     time.time(),
@@ -565,6 +595,13 @@ class LoomStorage:
                     ratelimit.get("ratelimit_tokens_utilization"),
                     ratelimit.get("ratelimit_input_tokens_utilization"),
                     ratelimit.get("ratelimit_output_tokens_utilization"),
+                    auth_type,
+                    ratelimit.get("ratelimit_unified_5h_utilization"),
+                    ratelimit.get("ratelimit_unified_7d_utilization"),
+                    ratelimit.get("ratelimit_unified_5h_status"),
+                    ratelimit.get("ratelimit_unified_7d_status"),
+                    ratelimit.get("ratelimit_unified_status"),
+                    ratelimit.get("ratelimit_retry_after"),
                 ),
             )
             self._schedule_flush()
@@ -1001,6 +1038,15 @@ class LoomStorage:
         ).fetchall()
         by_task_type = {r["task_type"]: r["n"] for r in task_rows}
 
+        tag_rows = self.conn.execute(
+            "SELECT tags, cost_estimate, tokens_in, tokens_out FROM metrics "
+            "WHERE timestamp >= ? AND tags IS NOT NULL",
+            (since,),
+        ).fetchall()
+        by_tag = aggregate_by_tag(
+            (r["tags"], r["cost_estimate"], r["tokens_in"], r["tokens_out"]) for r in tag_rows
+        )
+
         return {
             "window_hours": hours,
             "interval_minutes": bucket_seconds // 60,
@@ -1008,6 +1054,7 @@ class LoomStorage:
             "by_model": by_model,
             "by_source": by_source,
             "by_task_type": by_task_type,
+            "by_tag": by_tag,
         }
 
     def get_audit_entries(
@@ -1019,6 +1066,7 @@ class LoomStorage:
         status: Optional[str] = None,
         search: Optional[str] = None,
         skill: Optional[str] = None,
+        tag: Optional[str] = None,
     ) -> dict:
         limit = max(1, min(int(limit), 500))
         offset = max(0, int(offset))
@@ -1031,6 +1079,10 @@ class LoomStorage:
         if skill:
             where.append("m.skill = ?")
             params.append(skill)
+        parsed_tag = parse_tag_filter(tag)
+        if parsed_tag:
+            where.append("m.tags LIKE ? ESCAPE '!'")
+            params.append(tag_like_pattern(*parsed_tag))
         if source:
             where.append("COALESCE(m.source, 'default') = ?")
             params.append(source)
@@ -1081,7 +1133,8 @@ class LoomStorage:
                 m.cache_read_tokens AS cache_read_tokens,
                 m.cache_creation_tokens AS cache_creation_tokens,
                 m.skill            AS skill,
-                s.session_name     AS session_name
+                s.session_name     AS session_name,
+                m.tags             AS tags
             FROM metrics m
             LEFT JOIN routing_decisions r ON m.request_id = r.request_id
             LEFT JOIN sessions s ON m.session_id = s.session_id
@@ -1116,6 +1169,7 @@ class LoomStorage:
                 "cache_creation_tokens": r["cache_creation_tokens"] or 0,
                 "skill": r["skill"] if r["skill"] else None,
                 "session_name": r["session_name"] if r["session_name"] else None,
+                "tags": parse_tags_json(r["tags"]),
             }
             for r in rows
         ]
@@ -1159,32 +1213,43 @@ class LoomStorage:
         return _summarize_compression(records, days)
 
     # ------------------------------------------------------------------ rate limits
-    def get_rate_limit_current(self, provider: str = "anthropic") -> Optional[dict]:
+    def get_rate_limit_current(
+        self, provider: str = "anthropic", auth_type: Optional[str] = None
+    ) -> Optional[dict]:
+        """Latest rate-limit snapshot. ``auth_type`` ("oauth" / "api_key")
+        restricts to one credential type; None means the latest of any."""
+        clause = " AND auth_type = ?" if auth_type else ""
+        params: tuple = (provider, auth_type) if auth_type else (provider,)
         row = self.conn.execute(
-            """
+            f"""
             SELECT timestamp, request_id, provider, model,
                    requests_limit, requests_remaining,
                    tokens_limit, tokens_remaining,
                    input_tokens_limit, input_tokens_remaining,
                    output_tokens_limit, output_tokens_remaining,
                    tokens_utilization, input_tokens_utilization,
-                   output_tokens_utilization
+                   output_tokens_utilization,
+                   auth_type, util_5h, util_7d, status_5h, status_7d,
+                   unified_status, retry_after
             FROM rate_limits
-            WHERE provider = ?
+            WHERE provider = ?{clause}
             ORDER BY timestamp DESC LIMIT 1
             """,
-            (provider,),
+            params,
         ).fetchone()
         if row is None:
             return None
         return dict(row)
 
     def get_rate_limit_trend(
-        self, hours: int = 48, provider: str = "anthropic"
+        self, hours: int = 48, provider: str = "anthropic",
+        auth_type: Optional[str] = None,
     ) -> list[dict]:
         since = time.time() - hours * 3600
+        clause = " AND auth_type = ?" if auth_type else ""
+        params: tuple = (since, provider, auth_type) if auth_type else (since, provider)
         rows = self.conn.execute(
-            """
+            f"""
             SELECT
                 strftime('%Y-%m-%dT%H:00:00Z', timestamp, 'unixepoch') AS hour,
                 AVG(tokens_utilization) AS avg_tokens_util,
@@ -1192,13 +1257,16 @@ class LoomStorage:
                 AVG(output_tokens_utilization) AS avg_output_util,
                 MAX(tokens_utilization) AS max_tokens_util,
                 MIN(tokens_remaining) AS min_tokens_remaining,
-                COUNT(*) AS samples
+                COUNT(*) AS samples,
+                AVG(util_5h) AS avg_5h,
+                AVG(util_7d) AS avg_7d,
+                MAX(util_5h) AS max_5h
             FROM rate_limits
-            WHERE timestamp >= ? AND provider = ?
+            WHERE timestamp >= ? AND provider = ?{clause}
             GROUP BY hour
             ORDER BY hour ASC
             """,
-            (since, provider),
+            params,
         ).fetchall()
         return [dict(r) for r in rows]
 

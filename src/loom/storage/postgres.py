@@ -20,7 +20,14 @@ logger = get_logger("loom.storage.postgres")
 import hashlib
 import secrets
 
-SCHEMA_VERSION = 16
+from loom.observability.request_tags import (
+    aggregate_by_tag,
+    parse_tag_filter,
+    parse_tags_json,
+    tag_like_pattern,
+)
+
+SCHEMA_VERSION = 17
 
 
 class PostgresStorage:
@@ -334,6 +341,21 @@ class PostgresStorage:
             # Set once at session creation and never overwritten (see touch_session).
             conn.execute("ALTER TABLE sessions ADD COLUMN IF NOT EXISTS session_name TEXT")
 
+        if current < 17:
+            # Request tags (JSON text on metrics) and rate-limit split by
+            # credential type: auth_type plus the unified 5h/7d windows.
+            conn.execute("ALTER TABLE metrics ADD COLUMN IF NOT EXISTS tags TEXT")
+            for col, typ in (
+                ("auth_type", "TEXT"),
+                ("util_5h", "DOUBLE PRECISION"),
+                ("util_7d", "DOUBLE PRECISION"),
+                ("status_5h", "TEXT"),
+                ("status_7d", "TEXT"),
+                ("unified_status", "TEXT"),
+                ("retry_after", "TEXT"),
+            ):
+                conn.execute(f"ALTER TABLE rate_limits ADD COLUMN IF NOT EXISTS {col} {typ}")
+
         if current < SCHEMA_VERSION:
             conn.execute(
                 "INSERT INTO schema_version (version, applied_at) VALUES (%s, %s) "
@@ -400,6 +422,7 @@ class PostgresStorage:
         tokens_before: int = 0,
         tokens_after: int = 0,
         by_block_type: Optional[str] = None,
+        tags: Optional[str] = None,
     ) -> None:
         self.conn.execute(
             """
@@ -409,8 +432,8 @@ class PostgresStorage:
                 latency_ms, cost_estimate, compressed, compression_ratio,
                 message_count, source, tokens_saved, session_id,
                 status_code, cache_read_tokens, cache_creation_tokens, skill,
-                tier, skip_reasons, tokens_before, tokens_after, by_block_type
-            ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                tier, skip_reasons, tokens_before, tokens_after, by_block_type, tags
+            ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
             """,
             (
                 time.time(),
@@ -438,6 +461,7 @@ class PostgresStorage:
                 tokens_before,
                 tokens_after,
                 by_block_type,
+                tags,
             ),
         )
 
@@ -447,6 +471,7 @@ class PostgresStorage:
         provider: str,
         model: Optional[str] = None,
         ratelimit: Optional[dict] = None,
+        auth_type: Optional[str] = None,
     ) -> None:
         if not ratelimit:
             return
@@ -459,8 +484,10 @@ class PostgresStorage:
                 input_tokens_limit, input_tokens_remaining,
                 output_tokens_limit, output_tokens_remaining,
                 tokens_utilization, input_tokens_utilization,
-                output_tokens_utilization
-            ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                output_tokens_utilization,
+                auth_type, util_5h, util_7d, status_5h, status_7d,
+                unified_status, retry_after
+            ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
             """,
             (
                 time.time(),
@@ -478,6 +505,13 @@ class PostgresStorage:
                 ratelimit.get("ratelimit_tokens_utilization"),
                 ratelimit.get("ratelimit_input_tokens_utilization"),
                 ratelimit.get("ratelimit_output_tokens_utilization"),
+                auth_type,
+                ratelimit.get("ratelimit_unified_5h_utilization"),
+                ratelimit.get("ratelimit_unified_7d_utilization"),
+                ratelimit.get("ratelimit_unified_5h_status"),
+                ratelimit.get("ratelimit_unified_7d_status"),
+                ratelimit.get("ratelimit_unified_status"),
+                ratelimit.get("ratelimit_retry_after"),
             ),
         )
 
@@ -965,6 +999,13 @@ class PostgresStorage:
         ).fetchall()
         by_task_type = {r[0]: r[1] for r in task_rows}
 
+        tag_rows = self.conn.execute(
+            "SELECT tags, cost_estimate, tokens_in, tokens_out FROM metrics "
+            "WHERE timestamp >= %s AND tags IS NOT NULL",
+            (since,),
+        ).fetchall()
+        by_tag = aggregate_by_tag(tag_rows)
+
         return {
             "window_hours": hours,
             "interval_minutes": bucket_seconds // 60,
@@ -972,6 +1013,7 @@ class PostgresStorage:
             "by_model": by_model,
             "by_source": by_source,
             "by_task_type": by_task_type,
+            "by_tag": by_tag,
         }
 
     def get_audit_entries(
@@ -983,6 +1025,7 @@ class PostgresStorage:
         status: Optional[str] = None,
         search: Optional[str] = None,
         skill: Optional[str] = None,
+        tag: Optional[str] = None,
     ) -> dict:
         limit = max(1, min(int(limit), 500))
         offset = max(0, int(offset))
@@ -995,6 +1038,10 @@ class PostgresStorage:
         if skill:
             where.append("m.skill = %s")
             params.append(skill)
+        parsed_tag = parse_tag_filter(tag)
+        if parsed_tag:
+            where.append("m.tags LIKE %s ESCAPE '!'")
+            params.append(tag_like_pattern(*parsed_tag))
         if source:
             where.append("COALESCE(m.source, 'default') = %s")
             params.append(source)
@@ -1045,7 +1092,8 @@ class PostgresStorage:
                 m.cache_read_tokens,
                 m.cache_creation_tokens,
                 m.skill,
-                s.session_name
+                s.session_name,
+                m.tags
             FROM metrics m
             LEFT JOIN routing_decisions r ON m.request_id = r.request_id
             LEFT JOIN sessions s ON m.session_id = s.session_id
@@ -1078,6 +1126,7 @@ class PostgresStorage:
                 "cache_creation_tokens": r[17] or 0,
                 "skill": r[18] if r[18] else None,
                 "session_name": r[19] if r[19] else None,
+                "tags": parse_tags_json(r[20]),
             }
             for r in rows
         ]
@@ -1085,21 +1134,29 @@ class PostgresStorage:
         return {"total": total, "offset": offset, "limit": limit, "entries": entries}
 
     # ------------------------------------------------------------------ rate limits
-    def get_rate_limit_current(self, provider: str = "anthropic") -> Optional[dict]:
+    def get_rate_limit_current(
+        self, provider: str = "anthropic", auth_type: Optional[str] = None
+    ) -> Optional[dict]:
+        """Latest rate-limit snapshot. ``auth_type`` ("oauth" / "api_key")
+        restricts to one credential type; None means the latest of any."""
+        clause = " AND auth_type = %s" if auth_type else ""
+        params: tuple = (provider, auth_type) if auth_type else (provider,)
         row = self.conn.execute(
-            """
+            f"""
             SELECT timestamp, request_id, provider, model,
                    requests_limit, requests_remaining,
                    tokens_limit, tokens_remaining,
                    input_tokens_limit, input_tokens_remaining,
                    output_tokens_limit, output_tokens_remaining,
                    tokens_utilization, input_tokens_utilization,
-                   output_tokens_utilization
+                   output_tokens_utilization,
+                   auth_type, util_5h, util_7d, status_5h, status_7d,
+                   unified_status, retry_after
             FROM rate_limits
-            WHERE provider = %s
+            WHERE provider = %s{clause}
             ORDER BY timestamp DESC LIMIT 1
             """,
-            (provider,),
+            params,
         ).fetchone()
         if row is None:
             return None
@@ -1111,15 +1168,25 @@ class PostgresStorage:
             "output_tokens_limit", "output_tokens_remaining",
             "tokens_utilization", "input_tokens_utilization",
             "output_tokens_utilization",
+            "auth_type",
+            "util_5h",
+            "util_7d",
+            "status_5h",
+            "status_7d",
+            "unified_status",
+            "retry_after",
         ]
         return dict(zip(cols, row))
 
     def get_rate_limit_trend(
-        self, hours: int = 48, provider: str = "anthropic"
+        self, hours: int = 48, provider: str = "anthropic",
+        auth_type: Optional[str] = None,
     ) -> list[dict]:
         since = time.time() - hours * 3600
+        clause = " AND auth_type = %s" if auth_type else ""
+        params: tuple = (since, provider, auth_type) if auth_type else (since, provider)
         rows = self.conn.execute(
-            """
+            f"""
             SELECT
                 to_char(date_trunc('hour', to_timestamp(timestamp)),
                         'YYYY-MM-DD"T"HH24:00:00"Z"') AS hour,
@@ -1128,13 +1195,16 @@ class PostgresStorage:
                 AVG(output_tokens_utilization) AS avg_output_util,
                 MAX(tokens_utilization) AS max_tokens_util,
                 MIN(tokens_remaining) AS min_tokens_remaining,
-                COUNT(*) AS samples
+                COUNT(*) AS samples,
+                AVG(util_5h) AS avg_5h,
+                AVG(util_7d) AS avg_7d,
+                MAX(util_5h) AS max_5h
             FROM rate_limits
-            WHERE timestamp >= %s AND provider = %s
+            WHERE timestamp >= %s AND provider = %s{clause}
             GROUP BY hour
             ORDER BY hour ASC
             """,
-            (since, provider),
+            params,
         ).fetchall()
         return [
             {
@@ -1145,6 +1215,9 @@ class PostgresStorage:
                 "max_tokens_util": float(r[4]) if r[4] is not None else None,
                 "min_tokens_remaining": int(r[5]) if r[5] is not None else None,
                 "samples": r[6],
+                "avg_5h": float(r[7]) if r[7] is not None else None,
+                "avg_7d": float(r[8]) if r[8] is not None else None,
+                "max_5h": float(r[9]) if r[9] is not None else None,
             }
             for r in rows
         ]

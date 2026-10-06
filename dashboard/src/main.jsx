@@ -12,6 +12,7 @@ import Models from "./pages/Models.jsx";
 import Scanner from "./pages/Scanner.jsx";
 import Governor from "./pages/Governor.jsx";
 import RateLimits from "./pages/RateLimits.jsx";
+import Tags from "./pages/Tags.jsx";
 import Routing from "./pages/Routing.jsx";
 import Settings from "./pages/Settings.jsx";
 import "./index.css";
@@ -31,6 +32,7 @@ ReactDOM.createRoot(document.getElementById("root")).render(
           <Route path="/scanner" element={<Scanner />} />
           <Route path="/governor" element={<Governor />} />
           <Route path="/rate-limits" element={<RateLimits />} />
+          <Route path="/tags" element={<Tags />} />
           <Route path="/routing" element={<Routing />} />
           <Route path="/settings" element={<Settings />} />
           <Route path="*" element={<Navigate to="/" replace />} />

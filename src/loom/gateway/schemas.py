@@ -9,7 +9,7 @@ an accurate top-level contract, not runtime validation of every field.
 
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, Optional
 
 from pydantic import BaseModel, ConfigDict
 
@@ -170,8 +170,16 @@ class GovernorOverrideDeleteResponse(ObservabilityResponse):
 
 class RateLimitResponse(ObservabilityResponse):
     provider: str
-    current: dict[str, Any] = {}
-    trend: dict[str, Any] = {}
+    current: Optional[dict[str, Any]] = None
+    trend: Any = []
+    # Per credential type: {"oauth": {current, trend}, "api_key": {...}}
+    by_auth_type: dict[str, Any] = {}
+
+
+class RequestTagsResponse(ObservabilityResponse):
+    enabled: bool
+    configured: list[dict[str, Any]] = []
+    seen_headers: list[dict[str, Any]] = []
 
 
 class ErrorResponse(ObservabilityResponse):
