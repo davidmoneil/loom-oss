@@ -250,3 +250,29 @@ because the old table predated the current schema).
 4. After restart, verify continuity:
    `curl -s localhost:4444/api/metrics?hours=168 | jq .metrics.request_count`
    — a sudden 0 means the gateway is reading the wrong database.
+
+## Rate-limit sink (`api_headers` in the `pulse` database)
+
+Since 2026-10-06 the gateway also writes one row per upstream Anthropic response into `api_headers` in the **`pulse`** database on postgres-unified. That is the table the Nexus Budget page and `ratelimit-poll.sh` read. This replaces the homelab mitmproxy "api-gateway" capture; see AIProjects-6aeb for the cut-over.
+
+| Piece | Where | Tracked in git? |
+|---|---|---|
+| `observability.ratelimit_sink` block (`enabled: true`, `dsn_env: LOOM_RATELIMIT_SINK_DSN`, `table: api_headers`, `source: loom-oss`) | `loom.homelab.yaml` | No (local) |
+| `LOOM_RATELIMIT_SINK_DSN` | `.env.homelab`: the same server and user as `LOOM_POSTGRES_DSN`, database `/pulse` | No (secret) |
+
+These two files are local, so **a rebuild from a fresh clone loses them**. On a new machine, re-add the yaml block and the env line. The env line can be created from the existing DSN without printing it: copy `LOOM_POSTGRES_DSN`'s value with the database path changed to `/pulse`.
+
+- This is a **second, separate DSN**, and that is deliberate. The storage DSN (`loom` database, see the section above) is unaffected. Don't merge the two.
+- **Each row is labelled by credential type.** The label is `raw_headers->>'x-loom-auth-type'`: `oauth` means the Claude Max subscription, which carries the unified 5h/7d utilisation; `api_key` means the API console key, which carries per-minute limits and is prepaid.
+- **429 responses are recorded as well**, both retried and terminal.
+- **The sink is fail-open.** If the database is down, the gateway logs at most one warning per minute and every request still succeeds.
+
+**Verify after a deploy:**
+```
+docker exec postgres-unified psql -U <user> -d pulse -At -c \
+  "SELECT count(*), max(ts), string_agg(DISTINCT raw_headers->>'x-loom-auth-type', ',') FROM api_headers WHERE source='loom-oss' AND ts > now() - interval '10 minutes'"
+```
+
+**Turn it off:** set `enabled: false` under `ratelimit_sink` in `loom.homelab.yaml`, then `docker compose -f docker-compose.homelab.yml up -d --no-deps --force-recreate loom`.
+
+**Rollback image:** `loom-oss-loom:pre-2026-10-06-sink` is the build from before #130 and #132. Run `docker tag loom-oss-loom:pre-2026-10-06-sink loom-oss-loom`, then recreate as above.
