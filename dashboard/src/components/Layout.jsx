@@ -14,6 +14,7 @@ const NAV = [
   { to: "/audit", label: "Audit", icon: ListIcon },
   { to: "/scanner", label: "Data Protection", icon: ShieldIcon },
   { to: "/governor", label: "Governor", icon: GaugeIcon },
+  { to: "/tags", label: "Tags", icon: ListIcon },
   { to: "/rate-limits", label: "Rate Limits", icon: SpeedIcon },
   { to: "/routing", label: "Routing", icon: RouteIcon },
   { to: "/settings", label: "Settings", icon: CogIcon },

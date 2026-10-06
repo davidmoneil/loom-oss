@@ -60,6 +60,7 @@ export default function RateLimits() {
   const range = useTimeRange({ defaultAmount: 48, defaultUnit: "hours" });
   const { hours, rangeLabel } = range;
   const [data, setData] = useState(null);
+  const [view, setView] = useState("oauth");
   const [loading, setLoading] = useState(true);
   const [updatedAt, setUpdatedAt] = useState(null);
   const [error, setError] = useState(null);
@@ -84,8 +85,13 @@ export default function RateLimits() {
     return () => clearInterval(id);
   }, [load]);
 
-  const current = data?.current;
-  const trend = (data?.trend || []).map((t) => ({
+  // Split by credential type: oauth (subscription 5h/7d windows) vs api_key
+  // (per-minute request/token limits). Falls back to the combined view for
+  // older gateways that do not return by_auth_type.
+  const split = data?.by_auth_type?.[view];
+  const current = split ? split.current : data?.current;
+  const rawTrend = split ? split.trend : data?.trend;
+  const trend = (rawTrend || []).map((t) => ({
     label: hours <= 48 ? fmtTimeShort(new Date(t.hour).getTime() / 1000) : fmtDateShort(new Date(t.hour).getTime() / 1000),
     avg_5h: t.avg_5h != null ? +(t.avg_5h * 100).toFixed(1) : null,
     avg_7d: t.avg_7d != null ? +(t.avg_7d * 100).toFixed(1) : null,
@@ -98,6 +104,18 @@ export default function RateLimits() {
       <Header title="Rate Limits" updatedAt={updatedAt} error={error} onRefresh={load}>
         <TimeRangeControl range={range} quickPicks={QUICK_PICKS} />
       </Header>
+
+      <div className="mt-4 flex gap-2">
+        {[["oauth", "Subscription (oauth) - 5h / 7d"], ["api_key", "API key - per minute"]].map(([k, label]) => (
+          <button
+            key={k}
+            onClick={() => setView(k)}
+            className={`rounded-md border px-3 py-1.5 text-xs font-semibold ${view === k ? "border-accent bg-accent/20 text-white" : "border-border bg-card text-gray-400"}`}
+          >
+            {label}
+          </button>
+        ))}
+      </div>
 
       {!loading && !current && !error && (
         <div className="mt-6 rounded-lg border border-border bg-card p-8 text-center text-sm text-gray-400">
@@ -141,11 +159,23 @@ export default function RateLimits() {
               Current Utilization
               <WidgetInfo text={WIDGET_DESCRIPTIONS["rateLimits.currentUtilization"]} />
             </h3>
-              <div className="space-y-3">
-                {pctBar(current.util_5h, "5-hour window")}
-                {pctBar(current.util_7d, "7-day window", "#10b981")}
-              </div>
-              <div className="mt-4 flex items-center gap-3">
+              {view === "api_key" ? (
+                <div className="space-y-3">
+                  {pctBar(current.tokens_utilization, "Tokens per minute")}
+                  {pctBar(current.input_tokens_utilization, "Input tokens per minute", "#10b981")}
+                  {pctBar(current.output_tokens_utilization, "Output tokens per minute", "#8b5cf6")}
+                  <div className="text-xs text-gray-400">
+                    Requests remaining: <span className="font-mono text-white">{current.requests_remaining ?? "—"}</span>
+                    {current.requests_limit != null ? ` / ${current.requests_limit}` : ""}
+                  </div>
+                </div>
+              ) : (
+                <div className="space-y-3">
+                  {pctBar(current.util_5h, "5-hour window")}
+                  {pctBar(current.util_7d, "7-day window", "#10b981")}
+                </div>
+              )}
+              <div className={`mt-4 items-center gap-3 ${view === "api_key" ? "hidden" : "flex"}`}>
                 <span className="text-xs text-gray-400">Status 5h:</span>
                 {statusBadge(current.status_5h)}
                 <span className="text-xs text-gray-400">Status 7d:</span>

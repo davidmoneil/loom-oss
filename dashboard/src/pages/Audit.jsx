@@ -21,12 +21,14 @@ export default function Audit() {
   // Filter inputs (search is debounced into `filters`).
   const [searchInput, setSearchInput] = useState("");
   const [skillInput, setSkillInput] = useState("");
+  const [tagInput, setTagInput] = useState("");
   const [filters, setFilters] = useState({
     search: "",
     model: "",
     source: "",
     status: "",
     skill: "",
+    tag: "",
   });
 
   // Expand state
@@ -58,6 +60,14 @@ export default function Audit() {
     return () => clearTimeout(id);
   }, [skillInput]);
 
+  useEffect(() => {
+    const id = setTimeout(
+      () => setFilters((f) => ({ ...f, tag: tagInput })),
+      300
+    );
+    return () => clearTimeout(id);
+  }, [tagInput]);
+
   const load = useCallback(async () => {
     setLoading(true);
     try {
@@ -69,6 +79,7 @@ export default function Audit() {
         status: filters.status,
         search: filters.search,
         skill: filters.skill,
+        tag: filters.tag,
       });
       setEntries(data.entries || []);
       setTotal(data.total || 0);
@@ -166,6 +177,12 @@ export default function Audit() {
           placeholder="Skill (e.g. end-session)"
           className="w-[180px] rounded-md border border-border bg-card px-3 py-2 text-sm text-gray-200 placeholder-gray-500 focus:border-accent focus:outline-none"
         />
+        <input
+          value={tagInput}
+          onChange={(e) => setTagInput(e.target.value)}
+          placeholder="Tag (name:value)"
+          className="w-[180px] rounded-md border border-border bg-card px-3 py-2 text-sm text-gray-200 placeholder-gray-500 focus:border-accent focus:outline-none"
+        />
       </div>
 
       <div className="mt-4 overflow-x-auto rounded-lg border border-border">
@@ -179,6 +196,7 @@ export default function Audit() {
               <Th>Routed To</Th>
               <Th>Task</Th>
               <Th>Skill</Th>
+              <Th>Tags</Th>
               <Th className="text-right">Tokens (in/out)</Th>
               <Th className="text-right">Request Time</Th>
               <Th className="text-right">Cost</Th>
@@ -231,6 +249,9 @@ export default function Audit() {
                   <Td className="font-medium text-gray-100">{e.model_used}</Td>
                   <Td>{e.task_type}</Td>
                   <Td className="text-gray-300">{e.skill || "—"}</Td>
+                  <Td className="text-gray-300">
+                    {Object.entries(e.tags || {}).map(([k, v]) => `${k}:${v}`).join(" ") || "—"}
+                  </Td>
                   <Td className="text-right tabular-nums text-gray-300">
                     <div>{fmtNumber(e.tokens_in)} / {fmtNumber(e.tokens_out)}</div>
                     {(e.cache_read_tokens > 0 || e.cache_creation_tokens > 0) && (
