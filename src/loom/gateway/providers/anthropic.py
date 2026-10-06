@@ -8,6 +8,7 @@ via the ``x-api-key`` header plus a pinned ``anthropic-version``.
 from __future__ import annotations
 
 import asyncio
+import re
 from typing import AsyncIterator
 
 import httpx
@@ -88,6 +89,18 @@ _RATELIMIT_HEADER_MAP = {
     "anthropic-ratelimit-unified-fallback-percentage": "ratelimit_unified_fallback_percentage",
 }
 
+# Keys added by _extract_ratelimit_headers that only the optional rate-limit
+# sink consumes; the audit row and rate_limits table never see them.
+UPSTREAM_REQUEST_ID_KEY = "upstream_request_id"
+RAW_HEADERS_KEY = "raw_headers"
+SINK_ONLY_KEYS = frozenset({
+    UPSTREAM_REQUEST_ID_KEY,
+    RAW_HEADERS_KEY,
+    "ratelimit_unified_7d_model_name",
+    "ratelimit_unified_7d_model_utilization",
+})
+_UNIFIED_7D_MODEL_RE = re.compile(r"^anthropic-ratelimit-unified-7d_(\w+)-utilization$")
+
 _STR_KEYS = frozenset(
     k for k in _RATELIMIT_HEADER_MAP.values()
     if k.endswith("_reset") or k.endswith("_status") or k.endswith("_reason")
@@ -129,6 +142,26 @@ def _extract_ratelimit_headers(resp: httpx.Response) -> dict:
         u5h = out.get("ratelimit_unified_5h_utilization")
         if isinstance(u5h, (int, float)):
             out["ratelimit_tokens_utilization"] = round(u5h / 100, 4)
+
+    # Sink-only extras (stripped before the audit row / rate_limits table):
+    # Anthropic's own request id and the non-secret response headers.
+    rid = resp.headers.get("request-id")
+    if rid:
+        out[UPSTREAM_REQUEST_ID_KEY] = rid
+    raw: dict = {}
+    for name, value in resp.headers.items():
+        lname = name.lower()
+        if lname.startswith("anthropic-") or lname in ("request-id", "retry-after"):
+            raw[lname] = value
+            m = _UNIFIED_7D_MODEL_RE.match(lname)
+            if m:
+                out["ratelimit_unified_7d_model_name"] = m.group(1)
+                try:
+                    out["ratelimit_unified_7d_model_utilization"] = float(value)
+                except (ValueError, TypeError):
+                    pass
+    if raw:
+        out[RAW_HEADERS_KEY] = raw
 
     return out
 

@@ -87,6 +87,11 @@ except Exception:  # pragma: no cover - degraded mode
     AuditLogger = None  # type: ignore
 
 try:
+    from loom.observability.ratelimit_sink import build_sink as _build_ratelimit_sink
+except Exception:  # pragma: no cover - degraded mode
+    _build_ratelimit_sink = None  # type: ignore
+
+try:
     from loom.routing.engine import RoutingEngine  # type: ignore
 except Exception:  # pragma: no cover - degraded mode
     RoutingEngine = None  # type: ignore
@@ -167,6 +172,7 @@ class GatewayState:
         self.model_index: dict[str, tuple[str, ModelConfig]] = {}
         self.storage: Optional[LoomStorage] = None
         self.audit: Any = None
+        self.ratelimit_sink: Any = None
         self.routing: Any = None
         self.detection: Any = None
         self.laya_shadow: Any = None
@@ -300,6 +306,66 @@ def _extract_skill(messages: Optional[list[dict]]) -> Optional[str]:
     return None
 
 
+try:
+    from loom.gateway.providers.anthropic import SINK_ONLY_KEYS as _SINK_ONLY_KEYS
+except Exception:  # pragma: no cover
+    _SINK_ONLY_KEYS = frozenset()
+
+_UA_FAMILIES = (
+    ("claude-cli", "claude-cli"),
+    ("claude-code", "claude-cli"),
+    ("claude-sdk", "sdk-cli"),
+    ("anthropic", "sdk-cli"),
+    ("curl", "curl"),
+    ("python", "python"),
+    ("node", "node"),
+    ("go-http", "go"),
+)
+
+
+def _client_identity(headers: Any) -> tuple[str, str]:
+    """Return (client_app, client_job) from request headers.
+
+    client_app is the client's ``x-app`` header, else a short user-agent
+    family (never the full UA string). client_job is the optional
+    ``x-nexus-job`` header, empty when absent. Never raises.
+    """
+    try:
+        app = (headers.get("x-app") or "").strip()[:64]
+        if not app:
+            ua = (headers.get("user-agent") or "").lower()
+            for needle, family in _UA_FAMILIES:
+                if needle in ua:
+                    app = family
+                    break
+            else:
+                app = "unknown" if ua else ""
+        job = (headers.get("x-nexus-job") or "").strip()[:128]
+        return app, job
+    except Exception:
+        return "", ""
+
+
+def _stream_stop_reason(lines: list[str]) -> Optional[str]:
+    """Last Anthropic ``stop_reason`` found in SSE data lines, if any."""
+    found = None
+    for line in lines:
+        if not line.startswith("data: ") or "stop_reason" not in line:
+            continue
+        try:
+            event = json.loads(line[6:].strip())
+        except (json.JSONDecodeError, ValueError):
+            continue
+        if not isinstance(event, dict):
+            continue
+        sr = (event.get("delta") or {}).get("stop_reason") or (
+            (event.get("message") or {}).get("stop_reason")
+        )
+        if sr:
+            found = sr
+    return found
+
+
 def _record_request(
     state: GatewayState,
     *,
@@ -329,9 +395,19 @@ def _record_request(
     tokens_before: int = 0,
     tokens_after: int = 0,
     by_block_type: Optional[str] = None,
+    client_app: Optional[str] = None,
+    client_job: Optional[str] = None,
+    stop_reason: Optional[str] = None,
 ) -> None:
     """Persist + audit a completed request. Never raises into the request path."""
     tokens_in, tokens_out, cache_read, cache_creation = _extract_tokens(usage)
+    # Sink-only extras ride on the ratelimit snapshot; keep them out of the
+    # audit row and the rate_limits table.
+    upstream_request_id = None
+    sink_rl = ratelimit
+    if ratelimit:
+        upstream_request_id = ratelimit.get("upstream_request_id")
+        ratelimit = {k: v for k, v in ratelimit.items() if k not in _SINK_ONLY_KEYS}
     skill = _extract_skill(messages)
     skip_reasons_json = (
         json.dumps(skip_reasons, separators=(",", ":")) if skip_reasons else None
@@ -406,6 +482,9 @@ def _record_request(
                 routing_reason=routing_reason,
                 status_code=status_code,
                 session_id=session_id,
+                upstream_request_id=upstream_request_id,
+                client_app=client_app,
+                client_job=client_job,
             )
             if ratelimit:
                 audit_kwargs["ratelimit"] = ratelimit
@@ -428,6 +507,26 @@ def _record_request(
                 tokens_out=tokens_out,
                 latency_ms=latency_ms,
                 cost_estimate=cost,
+            )
+        except Exception:
+            pass
+
+    if state.ratelimit_sink is not None and sink_rl and provider == "anthropic":
+        try:
+            state.ratelimit_sink.emit(
+                method=method,
+                path=path,
+                status_code=status_code,
+                model=model,
+                ratelimit=sink_rl,
+                # tokens_in includes cache tokens; the table stores the raw split
+                tokens_in=max(tokens_in - cache_read - cache_creation, 0),
+                tokens_out=tokens_out,
+                cache_creation_tokens=cache_creation,
+                cache_read_tokens=cache_read,
+                cost_usd=cost,
+                latency_ms=latency_ms,
+                stop_reason=stop_reason,
             )
         except Exception:
             pass
@@ -1299,8 +1398,13 @@ async def _wrapped_stream(
             pass
 
     rl = getattr(backend, "_last_ratelimit", None) if backend else None
+    try:
+        stream_stop_reason = _stream_stop_reason(collected_lines) if collected_lines else None
+    except Exception:
+        stream_stop_reason = None
     _record_request(
         state,
+        stop_reason=stream_stop_reason,
         status_code=status,
         latency_ms=round((time.monotonic() - t0) * 1000, 2),
         usage=stream_usage,
@@ -1396,6 +1500,14 @@ async def lifespan(app: FastAPI):
             )
         except Exception:
             state.audit = None
+
+    if _build_ratelimit_sink is not None:
+        try:
+            state.ratelimit_sink = _build_ratelimit_sink(
+                getattr(state.config.observability, "ratelimit_sink", None)
+            )
+        except Exception:
+            state.ratelimit_sink = None
 
     if RoutingEngine is not None:
         try:
@@ -1509,6 +1621,11 @@ async def lifespan(app: FastAPI):
         if state.laya_shadow is not None:
             try:
                 state.laya_shadow.close()
+            except Exception:
+                pass
+        if state.ratelimit_sink is not None:
+            try:
+                state.ratelimit_sink.close()
             except Exception:
                 pass
 
@@ -1737,6 +1854,8 @@ def create_app() -> FastAPI:
                 "session_id": session_id if session_id != "unknown" else None,
                 "tokens_before": comp_before,
                 "tokens_after": comp_after,
+                "client_app": _client_identity(request.headers)[0],
+                "client_job": _client_identity(request.headers)[1],
                 "by_block_type": (
                     json.dumps(comp_by_type, separators=(",", ":")) if comp_by_type else None
                 ),
@@ -2011,6 +2130,8 @@ def create_app() -> FastAPI:
                 "session_id": session_id if session_id != "unknown" else None,
                 "tokens_before": comp_before,
                 "tokens_after": comp_after,
+                "client_app": _client_identity(request.headers)[0],
+                "client_job": _client_identity(request.headers)[1],
                 "by_block_type": (
                     json.dumps(comp_by_type, separators=(",", ":")) if comp_by_type else None
                 ),
@@ -2036,6 +2157,7 @@ def create_app() -> FastAPI:
                 response_text=resp_text,
                 ratelimit=rl,
                 skip_reasons=comp_stats,
+                stop_reason=result.get("stop_reason") if isinstance(result, dict) else None,
                 **meta,
             )
             result = _scan_response(gw, result, provider_name, model, source)

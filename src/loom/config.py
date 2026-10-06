@@ -140,9 +140,24 @@ class StorageConfig(BaseModel):
     postgres_dsn: str = ""
 
 
+class RateLimitSinkConfig(BaseModel):
+    """Optional Postgres sink for upstream Anthropic rate-limit headers.
+
+    Off by default. The DSN is never stored in config: ``dsn_env`` names the
+    environment variable that holds it.
+    """
+
+    enabled: bool = False
+    dsn_env: str = "LOOM_RATELIMIT_SINK_DSN"
+    table: str = "api_headers"
+    source: str = "loom-oss"
+    queue_size: int = 1000
+
+
 class ObservabilityConfig(BaseModel):
     audit_log_path: str = "logs/audit.jsonl"
     metrics_log_path: str = "logs/metrics.jsonl"
+    ratelimit_sink: RateLimitSinkConfig = Field(default_factory=RateLimitSinkConfig)
 
 
 class LayaShadowConfig(BaseModel):
