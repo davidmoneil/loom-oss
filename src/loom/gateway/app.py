@@ -43,6 +43,11 @@ from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from loom import __version__
 from loom.config import LoomConfig, ModelConfig, SourcePolicy
+from loom.observability.request_tags import (
+    HeaderObserver,
+    RequestTagsMiddleware,
+    current_tags,
+)
 from loom.gateway.auth import check_request_auth, gateway_keys_exist, is_public_path
 from loom.logging_setup import configure_logging, get_logger
 from loom.netcheck import UnsafeURLError, validate_outbound_url
@@ -70,6 +75,7 @@ from loom.gateway.schemas import (
     MetricsTimeseriesResponse,
     ModelListResponse,
     RateLimitResponse,
+    RequestTagsResponse,
     RoutingStatsResponse,
     RoutingTableResponse,
     ScannerRuleUpdateResponse,
@@ -180,6 +186,7 @@ class GatewayState:
         self.variants: Any = None
         self.scanner: Any = None
         self.governor: Any = None
+        self.header_observer: Any = HeaderObserver()
 
     def build_backend(self, provider_name: str, api_base: str) -> ProviderBackend:
         name = provider_name.lower()
@@ -398,9 +405,15 @@ def _record_request(
     client_app: Optional[str] = None,
     client_job: Optional[str] = None,
     stop_reason: Optional[str] = None,
+    tags: Optional[dict] = None,
 ) -> None:
     """Persist + audit a completed request. Never raises into the request path."""
     tokens_in, tokens_out, cache_read, cache_creation = _extract_tokens(usage)
+    if tags is None:
+        tags = current_tags.get()
+    tags_json = (
+        json.dumps(tags, separators=(",", ":"), sort_keys=True) if tags else None
+    )
     # Sink-only extras ride on the ratelimit snapshot; keep them out of the
     # audit row and the rate_limits table.
     upstream_request_id = None
@@ -444,6 +457,7 @@ def _record_request(
                 tokens_before=tokens_before,
                 tokens_after=tokens_after,
                 by_block_type=by_block_type,
+                tags=tags_json,
             )
         except Exception:
             pass
@@ -465,6 +479,7 @@ def _record_request(
                     provider=provider,
                     model=model,
                     ratelimit=ratelimit,
+                    auth_type=auth_type,
                 )
             except Exception:
                 pass
@@ -492,6 +507,8 @@ def _record_request(
                 client_job=client_job,
                 auth_type=auth_type,
             )
+            if tags:
+                audit_kwargs["tags"] = tags
             if ratelimit:
                 audit_kwargs["ratelimit"] = ratelimit
             if skip_reasons_json:
@@ -620,6 +637,9 @@ def _record_upstream_429(
                     client_job=client_job,
                     auth_type=auth_type,
                 )
+                tags = current_tags.get()
+                if tags:
+                    kwargs["tags"] = tags
                 if audit_rl:
                     kwargs["ratelimit"] = audit_rl
                 state.audit.log_request(**kwargs)
@@ -1788,6 +1808,8 @@ def create_app() -> FastAPI:
             allow_headers=["*"],
             expose_headers=["X-Loom-Request-Id", "X-Loom-Session-Id"],
         )
+
+    app.add_middleware(RequestTagsMiddleware, get_state=lambda: app.state.gateway)
 
     rate_limiter = _RateLimiter(
         max_requests=config.server.rate_limit_requests,
@@ -3013,6 +3035,7 @@ def create_app() -> FastAPI:
             "by_model": {},
             "by_source": {},
             "by_task_type": {},
+            "by_tag": {},
         }
         if gw.storage is None:
             return empty
@@ -3039,6 +3062,7 @@ def create_app() -> FastAPI:
         status: Optional[str] = None,
         search: Optional[str] = None,
         skill: Optional[str] = None,
+        tag: Optional[str] = None,
     ):
         gw = state()
         if gw.storage is None:
@@ -3053,6 +3077,7 @@ def create_app() -> FastAPI:
                     status=status,
                     search=search,
                     skill=skill,
+                    tag=tag,
                 )
             )
             # Contract aliases (docs/observability-api.md) alongside the
@@ -3530,9 +3555,53 @@ def create_app() -> FastAPI:
         try:
             current = gw.storage.get_rate_limit_current(provider)
             trend = gw.storage.get_rate_limit_trend(hours, provider)
+            # Split by credential type: "oauth" carries the 5h/7d subscription
+            # windows, "api_key" the per-minute request/token limits.
+            by_auth_type = {}
+            for kind in ("oauth", "api_key"):
+                by_auth_type[kind] = {
+                    "current": gw.storage.get_rate_limit_current(provider, kind),
+                    "trend": gw.storage.get_rate_limit_trend(hours, provider, kind),
+                }
         except Exception as exc:
             return JSONResponse({"error": str(exc)}, status_code=500)
-        return {"current": current, "trend": trend, "provider": provider}
+        return {
+            "current": current,
+            "trend": trend,
+            "provider": provider,
+            "by_auth_type": by_auth_type,
+        }
+
+    # ----------------------------------------------------------- request tags
+    @app.get(
+        "/api/request-tags",
+        response_model=RequestTagsResponse,
+        tags=["observability"],
+        summary="Request-tag configuration and recently seen header names",
+    )
+    async def api_request_tags(hours: int = 24):
+        """Configured tags plus header *names* (never values) seen recently,
+        so an operator can choose which headers to turn into tags. Credential
+        headers are never listed."""
+        from loom.observability.request_tags import build_header_map
+
+        gw = state()
+        cfg = gw.config.request_tags
+        observer = gw.header_observer
+        seen = observer.snapshot(hours) if (cfg.enabled and observer) else []
+        configured = build_header_map(cfg.headers)
+        return {
+            "enabled": cfg.enabled,
+            "configured": [
+                {"header": h, "tag": t} for h, t in sorted(configured.items())
+            ],
+            "max_value_length": cfg.max_value_length,
+            "max_tags": cfg.max_tags,
+            "window_hours": hours,
+            "seen_headers": [
+                {**row, "tag": configured.get(row["name"])} for row in seen
+            ],
+        }
 
     # ----------------------------------------------------------- dashboard (SPA)
     # Mounted LAST so API routes always take priority over the static catch-all.

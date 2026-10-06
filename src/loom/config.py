@@ -159,6 +159,21 @@ class RateLimitSinkConfig(BaseModel):
     auth_type_column: bool = False
 
 
+class RequestTagsConfig(BaseModel):
+    """Capture selected request headers as per-request tags (off by default).
+
+    ``headers`` maps an incoming header name to the tag name it becomes.
+    Credential-bearing headers (authorization, x-api-key, cookie, anything
+    whose name contains key/token/secret/auth) are never captured, even if
+    listed here. Tag names: lowercase letters, digits, ``_ . -``, max 32 chars.
+    """
+
+    enabled: bool = False
+    headers: dict[str, str] = Field(default_factory=dict)
+    max_value_length: int = 128
+    max_tags: int = 8
+
+
 class ObservabilityConfig(BaseModel):
     audit_log_path: str = "logs/audit.jsonl"
     metrics_log_path: str = "logs/metrics.jsonl"
@@ -245,6 +260,7 @@ class LoomConfig(BaseModel):
     observability: ObservabilityConfig = Field(default_factory=ObservabilityConfig)
     scanner: ScannerConfig = Field(default_factory=ScannerConfig)
     laya_shadow: LayaShadowConfig = Field(default_factory=LayaShadowConfig)
+    request_tags: RequestTagsConfig = Field(default_factory=RequestTagsConfig)
 
     # ------------------------------------------------------------------ loaders
     @classmethod

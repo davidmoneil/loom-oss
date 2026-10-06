@@ -137,6 +137,22 @@ observability:
   #   #   ALTER TABLE api_headers ADD COLUMN auth_type text;
   #   auth_type_column: false
 
+# Request tags: capture selected incoming request headers as per-request tags.
+# Tags are stored with each request (audit + metrics), can be filtered in
+# /api/audit?tag=job:nightly, and grouped in /api/metrics/timeseries (by_tag).
+# The dashboard's Tags page lists header NAMES seen recently (never values) so
+# you can pick headers to add here. Off by default.
+# Credential headers (authorization, x-api-key, cookie, proxy-authorization,
+# x-loom-gateway-key, and any header name containing key/token/secret/auth) are
+# never captured or listed, even if configured.
+# request_tags:
+#   enabled: false
+#   headers:                # incoming header -> tag name
+#     x-loom-job: job
+#     x-loom-project: project
+#   max_value_length: 128   # values are trimmed to this and stripped of control chars
+#   max_tags: 8             # tags kept per request
+
 # Shadow-mode ML classifier, compared against the rule-based DetectionEngine
 # on every /v1/detect call (and, passively, real /v1/chat/completions
 # traffic). Off by default — this is an observability/eval feature, not a
