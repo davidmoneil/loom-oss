@@ -6,6 +6,7 @@ import {
   YAxis,
   CartesianGrid,
   Tooltip,
+  Legend,
 } from "recharts";
 import StatCard from "../components/StatCard.jsx";
 import Chart, { axisProps, tooltipStyle } from "../components/Chart.jsx";
@@ -19,6 +20,8 @@ const QUICK_PICKS = [
   { label: "24h", amount: 24, unit: "hours" },
   { label: "48h", amount: 48, unit: "hours" },
   { label: "7d", amount: 7, unit: "days" },
+  { label: "30d", amount: 30, unit: "days" },
+  { label: "90d", amount: 90, unit: "days" },
 ];
 
 const STATUS_COLORS = {
@@ -222,8 +225,9 @@ export default function RateLimits() {
             <YAxis domain={[0, 100]} unit="%" {...axisProps} />
             <Tooltip
               {...tooltipStyle}
-              formatter={(v) => [`${v}%`]}
+              formatter={(v, name) => [`${v}%`, name]}
             />
+            <Legend wrapperStyle={{ fontSize: 12 }} />
             <Area type="monotone" dataKey="avg_5h" name="Avg 5h" stroke="#3b82f6" fill="url(#rl5h)" strokeWidth={2} />
             <Area type="monotone" dataKey="avg_7d" name="Avg 7d" stroke="#10b981" fill="url(#rl7d)" strokeWidth={2} />
             <Area type="monotone" dataKey="max_5h" name="Peak 5h" stroke="#ef4444" fill="none" strokeWidth={1} strokeDasharray="4 4" />
