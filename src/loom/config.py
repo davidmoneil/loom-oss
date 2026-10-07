@@ -178,6 +178,9 @@ class ObservabilityConfig(BaseModel):
     audit_log_path: str = "logs/audit.jsonl"
     metrics_log_path: str = "logs/metrics.jsonl"
     ratelimit_sink: RateLimitSinkConfig = Field(default_factory=RateLimitSinkConfig)
+    # Optional friendly names for credentials on the Rate Limits page, keyed by
+    # the non-reversible credential fingerprint (``credential_id``).
+    credential_names: dict[str, str] = Field(default_factory=dict)
 
 
 class LayaShadowConfig(BaseModel):

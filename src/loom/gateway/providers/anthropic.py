@@ -8,6 +8,7 @@ via the ``x-api-key`` header plus a pinned ``anthropic-version``.
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import re
 from typing import Any, AsyncIterator, Callable
 
@@ -185,10 +186,27 @@ def _auth_type_from_headers(headers: dict[str, str]) -> str | None:
     return None
 
 
+CREDENTIAL_ID_KEY = "credential_id"
+
+
+def _credential_id_from_headers(headers: dict[str, str]) -> str | None:
+    """Non-reversible fingerprint (sha256 prefix) of the credential in ``headers``.
+
+    Identifies which key/account a request used without storing the value.
+    """
+    for name, value in headers.items():
+        lname = name.lower()
+        if lname in ("authorization", "x-api-key") and value:
+            token = value.split(None, 1)[1] if lname == "authorization" and " " in value else value
+            return hashlib.sha256(token.encode("utf-8")).hexdigest()[:8]
+    return None
+
+
 def _snapshot(resp: httpx.Response, hdrs: dict[str, str]) -> dict:
     """Rate-limit snapshot for one upstream response plus the credential type used."""
     snap = _extract_ratelimit_headers(resp)
     snap[AUTH_TYPE_KEY] = _auth_type_from_headers(hdrs)
+    snap[CREDENTIAL_ID_KEY] = _credential_id_from_headers(hdrs)
     return snap
 
 

@@ -64,6 +64,7 @@ export default function RateLimits() {
   const { hours, rangeLabel } = range;
   const [data, setData] = useState(null);
   const [view, setView] = useState("oauth");
+  const [credential, setCredential] = useState("");
   const [loading, setLoading] = useState(true);
   const [updatedAt, setUpdatedAt] = useState(null);
   const [error, setError] = useState(null);
@@ -71,7 +72,7 @@ export default function RateLimits() {
   const load = useCallback(async () => {
     setLoading(true);
     try {
-      const d = await api.rateLimits(hours);
+      const d = await api.rateLimits(hours, credential);
       setData(d);
       setUpdatedAt(new Date());
       setError(null);
@@ -80,7 +81,7 @@ export default function RateLimits() {
     } finally {
       setLoading(false);
     }
-  }, [hours]);
+  }, [hours, credential]);
 
   useEffect(() => {
     load();
@@ -108,7 +109,7 @@ export default function RateLimits() {
         <TimeRangeControl range={range} quickPicks={QUICK_PICKS} />
       </Header>
 
-      <div className="mt-4 flex gap-2">
+      <div className="mt-4 flex items-center gap-2">
         {[["oauth", "Subscription (oauth) - 5h / 7d"], ["api_key", "API key - per minute"]].map(([k, label]) => (
           <button
             key={k}
@@ -118,6 +119,21 @@ export default function RateLimits() {
             {label}
           </button>
         ))}
+        <select
+          value={credential}
+          onChange={(e) => setCredential(e.target.value)}
+          className="ml-auto rounded-md border border-border bg-card px-2 py-1.5 text-xs text-gray-300"
+          aria-label="Account / API key"
+        >
+          <option value="">All accounts / keys</option>
+          {(data?.credentials || [])
+            .filter((c) => c.auth_type === view)
+            .map((c) => (
+              <option key={c.credential_id} value={c.credential_id}>
+                {c.name}
+              </option>
+            ))}
+        </select>
       </div>
 
       {!loading && !current && !error && (

@@ -29,13 +29,27 @@ from loom.observability.request_tags import (
     tag_like_pattern,
 )
 
-SCHEMA_VERSION = 17
+SCHEMA_VERSION = 18
 
 # Compression-cache entries live this long, matching the Postgres backend's
 # "NOW() + INTERVAL '7 days'".
 CACHE_TTL_SECONDS = 7 * 86400
 
 _FLUSH_INTERVAL_SECONDS = 2.0
+
+
+def _rate_limit_filter(
+    auth_type: Optional[str], credential_id: Optional[str]
+) -> tuple[str, tuple]:
+    """WHERE-clause suffix and params narrowing rate_limits by type and/or credential."""
+    clause, params = "", []
+    if auth_type:
+        clause += " AND auth_type = ?"
+        params.append(auth_type)
+    if credential_id:
+        clause += " AND credential_id = ?"
+        params.append(credential_id)
+    return clause, tuple(params)
 
 
 class LoomStorage:
@@ -441,6 +455,14 @@ class LoomStorage:
                 except sqlite3.OperationalError:
                     pass
 
+        if current < 18:
+            # Which key/account a rate-limit sample belongs to: a sha256-prefix
+            # fingerprint of the credential, never the value.
+            try:
+                c.execute("ALTER TABLE rate_limits ADD COLUMN credential_id TEXT")
+            except sqlite3.OperationalError:
+                pass
+
         if current < SCHEMA_VERSION:
             c.execute(
                 "INSERT OR REPLACE INTO schema_version (version, applied_at) VALUES (?, ?)",
@@ -561,6 +583,7 @@ class LoomStorage:
         model: Optional[str] = None,
         ratelimit: Optional[dict] = None,
         auth_type: Optional[str] = None,
+        credential_id: Optional[str] = None,
     ) -> None:
         if not ratelimit:
             return
@@ -576,8 +599,8 @@ class LoomStorage:
                     tokens_utilization, input_tokens_utilization,
                     output_tokens_utilization,
                     auth_type, util_5h, util_7d, status_5h, status_7d,
-                    unified_status, retry_after
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    unified_status, retry_after, credential_id
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     time.time(),
@@ -602,6 +625,7 @@ class LoomStorage:
                     ratelimit.get("ratelimit_unified_7d_status"),
                     ratelimit.get("ratelimit_unified_status"),
                     ratelimit.get("ratelimit_retry_after"),
+                    credential_id,
                 ),
             )
             self._schedule_flush()
@@ -1214,12 +1238,15 @@ class LoomStorage:
 
     # ------------------------------------------------------------------ rate limits
     def get_rate_limit_current(
-        self, provider: str = "anthropic", auth_type: Optional[str] = None
+        self,
+        provider: str = "anthropic",
+        auth_type: Optional[str] = None,
+        credential_id: Optional[str] = None,
     ) -> Optional[dict]:
         """Latest rate-limit snapshot. ``auth_type`` ("oauth" / "api_key")
         restricts to one credential type; None means the latest of any."""
-        clause = " AND auth_type = ?" if auth_type else ""
-        params: tuple = (provider, auth_type) if auth_type else (provider,)
+        clause, extra = _rate_limit_filter(auth_type, credential_id)
+        params: tuple = (provider, *extra)
         row = self.conn.execute(
             f"""
             SELECT timestamp, request_id, provider, model,
@@ -1230,7 +1257,7 @@ class LoomStorage:
                    tokens_utilization, input_tokens_utilization,
                    output_tokens_utilization,
                    auth_type, util_5h, util_7d, status_5h, status_7d,
-                   unified_status, retry_after
+                   unified_status, retry_after, credential_id
             FROM rate_limits
             WHERE provider = ?{clause}
             ORDER BY timestamp DESC LIMIT 1
@@ -1241,13 +1268,28 @@ class LoomStorage:
             return None
         return dict(row)
 
+    def get_rate_limit_credentials(self, provider: str = "anthropic") -> list[dict]:
+        """Distinct credentials seen for ``provider`` with their credential type."""
+        rows = self.conn.execute(
+            """
+            SELECT credential_id, auth_type, MAX(timestamp) AS last_seen
+            FROM rate_limits
+            WHERE provider = ? AND credential_id IS NOT NULL
+            GROUP BY credential_id, auth_type
+            ORDER BY last_seen DESC
+            """,
+            (provider,),
+        ).fetchall()
+        return [dict(r) for r in rows]
+
     def get_rate_limit_trend(
         self, hours: int = 48, provider: str = "anthropic",
         auth_type: Optional[str] = None,
+        credential_id: Optional[str] = None,
     ) -> list[dict]:
         since = time.time() - hours * 3600
-        clause = " AND auth_type = ?" if auth_type else ""
-        params: tuple = (since, provider, auth_type) if auth_type else (since, provider)
+        clause, extra = _rate_limit_filter(auth_type, credential_id)
+        params: tuple = (since, provider, *extra)
         rows = self.conn.execute(
             f"""
             SELECT

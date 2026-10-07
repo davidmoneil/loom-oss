@@ -174,6 +174,8 @@ class RateLimitResponse(ObservabilityResponse):
     trend: Any = []
     # Per credential type: {"oauth": {current, trend}, "api_key": {...}}
     by_auth_type: dict[str, Any] = {}
+    # Known credentials (fingerprint + display name) for the dashboard dropdown.
+    credentials: list[dict[str, Any]] = []
 
 
 class RequestTagsResponse(ObservabilityResponse):
