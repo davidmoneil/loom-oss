@@ -27,7 +27,21 @@ from loom.observability.request_tags import (
     tag_like_pattern,
 )
 
-SCHEMA_VERSION = 17
+SCHEMA_VERSION = 18
+
+
+def _rate_limit_filter(
+    auth_type: Optional[str], credential_id: Optional[str]
+) -> tuple[str, tuple]:
+    """WHERE-clause suffix and params narrowing rate_limits by type and/or credential."""
+    clause, params = "", []
+    if auth_type:
+        clause += " AND auth_type = %s"
+        params.append(auth_type)
+    if credential_id:
+        clause += " AND credential_id = %s"
+        params.append(credential_id)
+    return clause, tuple(params)
 
 
 class PostgresStorage:
@@ -356,6 +370,11 @@ class PostgresStorage:
             ):
                 conn.execute(f"ALTER TABLE rate_limits ADD COLUMN IF NOT EXISTS {col} {typ}")
 
+        if current < 18:
+            # Which key/account a rate-limit sample belongs to: a sha256-prefix
+            # fingerprint of the credential, never the value.
+            conn.execute("ALTER TABLE rate_limits ADD COLUMN IF NOT EXISTS credential_id TEXT")
+
         if current < SCHEMA_VERSION:
             conn.execute(
                 "INSERT INTO schema_version (version, applied_at) VALUES (%s, %s) "
@@ -472,6 +491,7 @@ class PostgresStorage:
         model: Optional[str] = None,
         ratelimit: Optional[dict] = None,
         auth_type: Optional[str] = None,
+        credential_id: Optional[str] = None,
     ) -> None:
         if not ratelimit:
             return
@@ -486,8 +506,8 @@ class PostgresStorage:
                 tokens_utilization, input_tokens_utilization,
                 output_tokens_utilization,
                 auth_type, util_5h, util_7d, status_5h, status_7d,
-                unified_status, retry_after
-            ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                unified_status, retry_after, credential_id
+            ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
             """,
             (
                 time.time(),
@@ -512,6 +532,7 @@ class PostgresStorage:
                 ratelimit.get("ratelimit_unified_7d_status"),
                 ratelimit.get("ratelimit_unified_status"),
                 ratelimit.get("ratelimit_retry_after"),
+                credential_id,
             ),
         )
 
@@ -1135,12 +1156,15 @@ class PostgresStorage:
 
     # ------------------------------------------------------------------ rate limits
     def get_rate_limit_current(
-        self, provider: str = "anthropic", auth_type: Optional[str] = None
+        self,
+        provider: str = "anthropic",
+        auth_type: Optional[str] = None,
+        credential_id: Optional[str] = None,
     ) -> Optional[dict]:
         """Latest rate-limit snapshot. ``auth_type`` ("oauth" / "api_key")
         restricts to one credential type; None means the latest of any."""
-        clause = " AND auth_type = %s" if auth_type else ""
-        params: tuple = (provider, auth_type) if auth_type else (provider,)
+        clause, extra = _rate_limit_filter(auth_type, credential_id)
+        params: tuple = (provider, *extra)
         row = self.conn.execute(
             f"""
             SELECT timestamp, request_id, provider, model,
@@ -1151,7 +1175,7 @@ class PostgresStorage:
                    tokens_utilization, input_tokens_utilization,
                    output_tokens_utilization,
                    auth_type, util_5h, util_7d, status_5h, status_7d,
-                   unified_status, retry_after
+                   unified_status, retry_after, credential_id
             FROM rate_limits
             WHERE provider = %s{clause}
             ORDER BY timestamp DESC LIMIT 1
@@ -1175,16 +1199,34 @@ class PostgresStorage:
             "status_7d",
             "unified_status",
             "retry_after",
+            "credential_id",
         ]
         return dict(zip(cols, row))
+
+    def get_rate_limit_credentials(self, provider: str = "anthropic") -> list[dict]:
+        """Distinct credentials seen for ``provider`` with their credential type."""
+        rows = self.conn.execute(
+            """
+            SELECT credential_id, auth_type, MAX(timestamp) AS last_seen
+            FROM rate_limits
+            WHERE provider = %s AND credential_id IS NOT NULL
+            GROUP BY credential_id, auth_type
+            ORDER BY last_seen DESC
+            """,
+            (provider,),
+        ).fetchall()
+        return [
+            {"credential_id": r[0], "auth_type": r[1], "last_seen": r[2]} for r in rows
+        ]
 
     def get_rate_limit_trend(
         self, hours: int = 48, provider: str = "anthropic",
         auth_type: Optional[str] = None,
+        credential_id: Optional[str] = None,
     ) -> list[dict]:
         since = time.time() - hours * 3600
-        clause = " AND auth_type = %s" if auth_type else ""
-        params: tuple = (since, provider, auth_type) if auth_type else (since, provider)
+        clause, extra = _rate_limit_filter(auth_type, credential_id)
+        params: tuple = (since, provider, *extra)
         rows = self.conn.execute(
             f"""
             SELECT

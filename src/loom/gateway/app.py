@@ -418,13 +418,17 @@ def _record_request(
     # audit row and the rate_limits table.
     upstream_request_id = None
     auth_type = None
+    credential_id = None
     sink_rl = ratelimit
     if ratelimit:
         upstream_request_id = ratelimit.get("upstream_request_id")
         # "oauth" / "api_key" label only; "auth_type" alone is not a snapshot,
         # so it never makes an otherwise header-less response look like one.
         auth_type = ratelimit.get("auth_type")
-        sink_rl = {k: v for k, v in ratelimit.items() if k != "auth_type"} or None
+        credential_id = ratelimit.get("credential_id")
+        sink_rl = {
+            k: v for k, v in ratelimit.items() if k not in ("auth_type", "credential_id")
+        } or None
         ratelimit = {k: v for k, v in (sink_rl or {}).items() if k not in _SINK_ONLY_KEYS}
     skill = _extract_skill(messages)
     skip_reasons_json = (
@@ -480,6 +484,7 @@ def _record_request(
                     model=model,
                     ratelimit=ratelimit,
                     auth_type=auth_type,
+                    credential_id=credential_id,
                 )
             except Exception:
                 pass
@@ -617,6 +622,7 @@ def _record_upstream_429(
     try:
         snap = dict(ratelimit or {})
         auth_type = snap.pop("auth_type", None)
+        snap.pop("credential_id", None)
         upstream_request_id = snap.get("upstream_request_id")
         audit_rl = {k: v for k, v in snap.items() if k not in _SINK_ONLY_KEYS}
         if state.audit is not None:
@@ -3548,21 +3554,32 @@ def create_app() -> FastAPI:
         tags=["observability"],
         summary="Unified provider rate-limit headers (current + trend)",
     )
-    async def api_rate_limits(hours: int = 48, provider: str = "anthropic"):
+    async def api_rate_limits(
+        hours: int = 48, provider: str = "anthropic", credential: Optional[str] = None
+    ):
         gw = state()
         if gw.storage is None:
             return JSONResponse({"error": "storage not available"}, status_code=503)
         try:
-            current = gw.storage.get_rate_limit_current(provider)
-            trend = gw.storage.get_rate_limit_trend(hours, provider)
+            current = gw.storage.get_rate_limit_current(provider, credential_id=credential)
+            trend = gw.storage.get_rate_limit_trend(hours, provider, credential_id=credential)
             # Split by credential type: "oauth" carries the 5h/7d subscription
             # windows, "api_key" the per-minute request/token limits.
             by_auth_type = {}
             for kind in ("oauth", "api_key"):
                 by_auth_type[kind] = {
-                    "current": gw.storage.get_rate_limit_current(provider, kind),
-                    "trend": gw.storage.get_rate_limit_trend(hours, provider, kind),
+                    "current": gw.storage.get_rate_limit_current(
+                        provider, kind, credential_id=credential
+                    ),
+                    "trend": gw.storage.get_rate_limit_trend(
+                        hours, provider, kind, credential_id=credential
+                    ),
                 }
+            names = dict(getattr(gw.config.observability, "credential_names", {}) or {})
+            credentials = [
+                {**c, "name": names.get(c["credential_id"]) or c["credential_id"]}
+                for c in gw.storage.get_rate_limit_credentials(provider)
+            ]
         except Exception as exc:
             return JSONResponse({"error": str(exc)}, status_code=500)
         return {
@@ -3570,6 +3587,7 @@ def create_app() -> FastAPI:
             "trend": trend,
             "provider": provider,
             "by_auth_type": by_auth_type,
+            "credentials": credentials,
         }
 
     # ----------------------------------------------------------- request tags
