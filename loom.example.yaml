@@ -54,6 +54,15 @@ providers:
     # GET /v1/endpoint-limits
     max_concurrency: 2
     queue_timeout_seconds: 60
+    # Optional requests-per-minute budget (sliding 60 s window) for the same
+    # endpoint. Concurrency caps simultaneous work; this caps how often work
+    # starts, so a fast sequential caller cannot keep the GPU busy forever.
+    # Shared like max_concurrency (lowest non-null wins). Over budget, a request
+    # waits up to queue_timeout_seconds, then gets 429 endpoint_rate_limited
+    # with a Retry-After header. Omit for no rate limit. Live-editable (no
+    # restart for a provider that already has a limit):
+    #   PATCH /api/config/providers/ollama  {"max_requests_per_minute": 6}
+    # max_requests_per_minute: 6
     models:
       - model_id: qwen2.5:7b
         display_name: qwen2.5:7b
@@ -177,6 +186,9 @@ observability:
 #   timeout_seconds: 2.0
 #   allow_private_url: false           # opt in to a non-loopback LAN sidecar
 #   sample_rate: 1.0                   # fraction of eligible calls to shadow
+#   sources: [headless]                # only shadow these request sources; omit = all
+#                                      # (live: PATCH /api/config/laya-shadow
+#                                      #  {"sample_rate": 0.1, "sources": ["headless"]})
 #   max_prompt_chars: 4000             # skip prompts longer than this
 #   cache_size: 512                    # prompt-hash -> result cache entries
 #   log_path: logs/laya_shadow.jsonl

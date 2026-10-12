@@ -3,6 +3,9 @@
 ## Unreleased
 
 ### Features
+- **Local-box rate budget**: `providers[].max_requests_per_minute` adds a sliding 60 s start-rate budget next to `max_concurrency` (shared per endpoint, lowest non-null wins). Over budget, requests wait up to `queue_timeout_seconds`, then get 429 `endpoint_rate_limited` with `Retry-After`. `GET /v1/endpoint-limits` reports `max_requests_per_minute`, `requests_last_minute` and `rate_limited`. Off by default.
+- **laya shadow scoping**: `laya_shadow.sources` restricts shadowing to listed request sources (default: all).
+- **Live edit**: `GET/PATCH /api/config/providers/{provider}` (`max_concurrency`, `queue_timeout_seconds`, `max_requests_per_minute`) and `GET/PATCH /api/config/laya-shadow` (`enabled`, `sample_rate`, `sources`) apply without a restart (in-memory, like the compression PATCH). Dashboard controls not yet built.
 - **Tool-block compression**: text inside `tool_result` blocks is now compressed in place — block structure (`tool_use_id`, `is_error`, list shape, non-text sub-blocks) is always preserved, and `tool_use` inputs are never touched. Previously any message containing tool blocks was skipped entirely, which left agentic sessions (Claude Code, SDK agents) at ~2% compression; tool results are typically 80–90% of their token volume. Opt out with `compression.tool_results: false`.
 - **ModeB segment pre-pass**: large tool outputs get summary+pointer compression for recognized segments (logs, error stacks, JSON arrays, repeated patterns) before graduated compression.
 - **Per-block-type savings**: `/health` `compression.by_block_type` breaks tokens before/after/saved down by `tool_result` / `text` / `tool_use` / `message`.

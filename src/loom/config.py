@@ -44,6 +44,9 @@ class ProviderConfig(BaseModel):
     # each separate box is limited separately. See loom/gateway/endpoint_limits.py.
     max_concurrency: Optional[int] = None
     queue_timeout_seconds: float = 30.0
+    # Requests-per-minute budget (sliding 60 s window) for the same endpoint.
+    # None = no rate limit. Shared like max_concurrency; lowest non-null wins.
+    max_requests_per_minute: Optional[int] = None
 
     def get_model(self, model_id: str) -> Optional[ModelConfig]:
         for model in self.models:
@@ -213,6 +216,8 @@ class LayaShadowConfig(BaseModel):
     allow_private_url: bool = False
     # Fraction of eligible calls to also shadow through laya (cost control).
     sample_rate: float = 1.0
+    # Only shadow requests whose source is listed. None = all sources.
+    sources: Optional[list[str]] = None
     # Prompts longer than this (chars) are skipped: the rule engine's
     # length-based escalation is already reliable there, and laya's
     # benchmarked value is specifically on short prompts.

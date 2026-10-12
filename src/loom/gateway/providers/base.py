@@ -31,6 +31,8 @@ class ProviderError(Exception):
         # Rate-limit snapshot of the upstream response that caused this error
         # (set by the Anthropic backend; None otherwise). Never client-visible.
         self.ratelimit: dict | None = None
+        # Extra response headers for the client (e.g. Retry-After on 429).
+        self.headers: dict | None = None
 
 
 class ProviderBackend(ABC):

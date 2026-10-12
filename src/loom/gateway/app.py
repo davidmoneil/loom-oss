@@ -924,6 +924,9 @@ def _shadow_observe(gw: Any, request_id: str, source: str, messages: list) -> No
     """
     if gw.laya_shadow is None:
         return
+    allowed = getattr(gw.laya_shadow, "sources", None)
+    if allowed is not None and source not in allowed:
+        return
     try:
         prompt = _latest_user_text(messages)
         if not prompt:
@@ -1200,7 +1203,9 @@ def _error_response(exc: Exception, request_id: str, status: int = 500) -> JSONR
         payload.setdefault("error", {})
         if isinstance(payload.get("error"), dict):
             payload["error"].setdefault("request_id", request_id)
-        return JSONResponse(payload, status_code=exc.status_code)
+        return JSONResponse(
+            payload, status_code=exc.status_code, headers=getattr(exc, "headers", None) or None
+        )
     get_logger("loom.gateway").exception("Unhandled error (request_id=%s)", request_id)
     return JSONResponse(
         {
@@ -1579,7 +1584,8 @@ async def lifespan(app: FastAPI):
         if hasattr(backend, "set_config_models") and provider.models:
             backend.set_config_models([m.model_id for m in provider.models])
         limit = state.endpoint_limiter.register(
-            provider.name, provider.api_base, provider.max_concurrency, provider.queue_timeout_seconds
+            provider.name, provider.api_base, provider.max_concurrency, provider.queue_timeout_seconds,
+            provider.max_requests_per_minute,
         )
         state.backends[provider.name] = LimitedBackend(backend, limit) if limit else backend
 
@@ -1696,6 +1702,7 @@ async def lifespan(app: FastAPI):
                 max_prompt_chars=state.config.laya_shadow.max_prompt_chars,
                 cache_size=state.config.laya_shadow.cache_size,
                 log_path=state.config.laya_shadow.log_path,
+                sources=state.config.laya_shadow.sources,
             )
         except Exception:
             state.laya_shadow = None
@@ -3408,6 +3415,139 @@ def create_app() -> FastAPI:
         prov.models.remove(model)
         gw.index_models()
         return _models_list_payload(gw.config)
+
+    # ------------------------------- runtime-editable local-box protections
+    # Like the compression PATCH, these change live in-memory state; they are
+    # not written back to loom.yaml. Put the same values in the YAML to keep
+    # them across a restart.
+    def _provider_limits_payload(gw, prov) -> dict:
+        lim = gw.endpoint_limiter.get(prov.api_base)
+        return {
+            "provider": prov.name,
+            "max_concurrency": prov.max_concurrency,
+            "queue_timeout_seconds": prov.queue_timeout_seconds,
+            "max_requests_per_minute": prov.max_requests_per_minute,
+            "endpoint": lim.snapshot() if lim else None,
+        }
+
+    @app.get("/api/config/providers/{provider}", tags=["observability"],
+             summary="Provider endpoint limits (concurrency, queue timeout, rate budget)")
+    async def api_get_provider_limits(provider: str):
+        gw = state()
+        prov = _find_provider(gw, provider)
+        if prov is None:
+            return JSONResponse({"error": f"provider '{provider}' not found"}, status_code=404)
+        return _provider_limits_payload(gw, prov)
+
+    @app.patch("/api/config/providers/{provider}", tags=["observability"],
+               summary="Update a provider's endpoint limits live (no restart)")
+    async def api_update_provider_limits(provider: str, request: Request):
+        gw = state()
+        try:
+            body = await request.json()
+        except Exception:
+            return JSONResponse({"error": "invalid JSON"}, status_code=400)
+        if not isinstance(body, dict):
+            return JSONResponse({"error": "invalid JSON"}, status_code=400)
+        prov = _find_provider(gw, provider)
+        if prov is None:
+            return JSONResponse({"error": f"provider '{provider}' not found"}, status_code=404)
+        updates: dict = {}
+        for key in ("max_concurrency", "max_requests_per_minute"):
+            if key in body:
+                val = body[key]
+                if val is None or (isinstance(val, int) and not isinstance(val, bool) and val >= 0):
+                    updates[key] = val or None  # null / 0 = unlimited
+                else:
+                    return JSONResponse({"error": f"{key} must be a non-negative integer or null"},
+                                        status_code=400)
+        if "queue_timeout_seconds" in body:
+            val = body["queue_timeout_seconds"]
+            if isinstance(val, bool) or not isinstance(val, (int, float)) or val <= 0:
+                return JSONResponse({"error": "queue_timeout_seconds must be a positive number"},
+                                    status_code=400)
+            updates["queue_timeout_seconds"] = float(min(val, 600.0))
+        if not updates:
+            return JSONResponse({"error": "no valid fields"}, status_code=400)
+        for k, v in updates.items():
+            setattr(prov, k, v)
+        lim = gw.endpoint_limiter.get(prov.api_base)
+        restart_required = False
+        if lim is not None:
+            # Recompute the shared budget: strictest value across providers on this box.
+            from loom.gateway.endpoint_limits import endpoint_key
+            key = endpoint_key(prov.api_base)
+            peers = [p for p in gw.config.providers if endpoint_key(p.api_base) == key]
+            conc = [p.max_concurrency for p in peers if p.max_concurrency]
+            rate = [p.max_requests_per_minute for p in peers if p.max_requests_per_minute]
+            lim.reconfigure(min(conc) if conc else None,
+                            min(p.queue_timeout_seconds for p in peers),
+                            min(rate) if rate else None)
+        elif prov.max_concurrency or prov.max_requests_per_minute:
+            # This endpoint had no limiter at startup; backends are wrapped at boot.
+            restart_required = True
+        out = _provider_limits_payload(gw, prov)
+        out["restart_required"] = restart_required
+        if restart_required:
+            out["note"] = ("config updated, but this provider had no limit at startup; "
+                           "restart the gateway to start enforcing it")
+        return out
+
+    def _laya_payload(gw) -> dict:
+        cfg = gw.config.laya_shadow
+        return {"enabled": cfg.enabled, "running": gw.laya_shadow is not None,
+                "sample_rate": cfg.sample_rate, "sources": cfg.sources}
+
+    @app.get("/api/config/laya-shadow", tags=["observability"],
+             summary="laya shadow-mode scoping (enabled, sample_rate, sources)")
+    async def api_get_laya_shadow():
+        return _laya_payload(state())
+
+    @app.patch("/api/config/laya-shadow", tags=["observability"],
+               summary="Update laya shadow scoping live (sample_rate, sources)")
+    async def api_update_laya_shadow(request: Request):
+        gw = state()
+        try:
+            body = await request.json()
+        except Exception:
+            return JSONResponse({"error": "invalid JSON"}, status_code=400)
+        if not isinstance(body, dict):
+            return JSONResponse({"error": "invalid JSON"}, status_code=400)
+        updates: dict = {}
+        if "enabled" in body:
+            if not isinstance(body["enabled"], bool):
+                return JSONResponse({"error": "enabled must be a boolean"}, status_code=400)
+            updates["enabled"] = body["enabled"]
+        if "sample_rate" in body:
+            val = body["sample_rate"]
+            if isinstance(val, bool) or not isinstance(val, (int, float)) or not 0 <= val <= 1:
+                return JSONResponse({"error": "sample_rate must be a number between 0 and 1"},
+                                    status_code=400)
+            updates["sample_rate"] = float(val)
+        if "sources" in body:
+            val = body["sources"]
+            if val is not None and not (isinstance(val, list) and all(isinstance(x, str) for x in val)):
+                return JSONResponse({"error": "sources must be a list of strings or null"},
+                                    status_code=400)
+            updates["sources"] = val
+        if not updates:
+            return JSONResponse({"error": "no valid fields"}, status_code=400)
+        cfg = gw.config.laya_shadow
+        for k, v in updates.items():
+            setattr(cfg, k, v)
+        client = gw.laya_shadow
+        if client is not None:
+            client.sample_rate = cfg.sample_rate
+            client.sources = list(cfg.sources) if cfg.sources is not None else None
+        out = _laya_payload(gw)
+        out["restart_required"] = bool(cfg.enabled and client is None)
+        if out["restart_required"]:
+            out["note"] = ("laya shadow was not started at boot; restart the gateway "
+                           "to create the client (sample_rate/sources are saved)")
+        elif client is not None and not cfg.enabled:
+            out["note"] = ("enabled=false is recorded but the running client keeps shadowing "
+                           "until restart; set sample_rate to 0 to stop it now")
+        return out
 
     # -------------------------------------------------------- gateway key management
     @app.post(
