@@ -6,6 +6,11 @@ budget, and a second box gets its own. A request waits up to
 ``queue_timeout_seconds`` for a slot, then fails with 429 so the caller can
 retry later instead of piling more work onto a busy GPU.
 
+An optional ``max_requests_per_minute`` adds a sliding 60 s start-rate budget
+(shared the same way); over budget, a request waits for the window up to
+``queue_timeout_seconds`` and then fails with 429 ``endpoint_rate_limited`` and
+a ``Retry-After`` header.
+
 Streaming responses hold their slot until the stream is fully consumed or
 closed.
 """
@@ -13,11 +18,17 @@ closed.
 from __future__ import annotations
 
 import asyncio
+import math
+import time
+from collections import deque
 from dataclasses import dataclass, field
 from typing import Any, AsyncIterator, Optional
 from urllib.parse import urlparse
 
 from loom.gateway.providers.base import ProviderBackend, ProviderError
+
+
+RATE_WINDOW_SECONDS = 60.0
 
 
 def endpoint_key(api_base: str) -> str:
@@ -29,51 +40,139 @@ def endpoint_key(api_base: str) -> str:
 
 @dataclass
 class EndpointLimit:
+    """One endpoint's budget: a concurrency cap and/or a requests-per-minute cap.
+
+    Either may be ``None`` (unlimited). Concurrency bounds simultaneous work;
+    the rate budget bounds how often work *starts* in any sliding 60 s window,
+    which concurrency alone cannot do for a fast sequential caller.
+    """
+
     key: str
-    max_concurrency: int
+    max_concurrency: Optional[int]
     queue_timeout_seconds: float
+    max_requests_per_minute: Optional[int] = None
     providers: list[str] = field(default_factory=list)
     in_flight: int = 0
     waiting: int = 0
     served: int = 0
     rejected: int = 0
-    _sem: Optional[asyncio.Semaphore] = None
+    rate_limited: int = 0
+    _starts: deque = field(default_factory=deque)
+    _waiters: deque = field(default_factory=deque)
 
-    @property
-    def sem(self) -> asyncio.Semaphore:
-        # Created lazily so it binds to the running event loop.
-        if self._sem is None:
-            self._sem = asyncio.Semaphore(self.max_concurrency)
-        return self._sem
+    # ------------------------------------------------------------ helpers
+    def _prune(self, now: float) -> None:
+        while self._starts and now - self._starts[0] >= RATE_WINDOW_SECONDS:
+            self._starts.popleft()
+
+    def _wake(self, everyone: bool = False) -> None:
+        while self._waiters:
+            fut = self._waiters.popleft()
+            if not fut.done():
+                fut.set_result(None)
+                if not everyone:
+                    return
+
+    def reconfigure(self, max_concurrency: Optional[int], queue_timeout_seconds: float,
+                    max_requests_per_minute: Optional[int]) -> None:
+        """Apply new limits to a live endpoint (in-flight requests are unaffected)."""
+        self.max_concurrency = max_concurrency or None
+        self.queue_timeout_seconds = queue_timeout_seconds
+        self.max_requests_per_minute = max_requests_per_minute or None
+        self._wake(everyone=True)
+
+    # ------------------------------------------------------------ acquire
+    async def _acquire_concurrency(self, deadline: float) -> None:
+        loop = asyncio.get_running_loop()
+        while self.max_concurrency and self.in_flight >= self.max_concurrency:
+            remaining = deadline - loop.time()
+            fut = loop.create_future()
+            self._waiters.append(fut)
+            try:
+                if remaining <= 0:
+                    raise asyncio.TimeoutError
+                await asyncio.wait_for(fut, timeout=remaining)
+            except asyncio.TimeoutError:
+                self.rejected += 1
+                raise ProviderError(
+                    f"local endpoint {self.key} is at its concurrency limit "
+                    f"({self.max_concurrency}); retry later",
+                    status_code=429,
+                    payload={"error": {"type": "endpoint_busy", "endpoint": self.key,
+                                       "message": "upstream concurrency limit reached; retry later"}},
+                ) from None
+            finally:
+                if fut in self._waiters:
+                    self._waiters.remove(fut)
+
+    async def _acquire_rate(self, deadline: float) -> None:
+        loop = asyncio.get_running_loop()
+        while True:
+            limit = self.max_requests_per_minute
+            if not limit:
+                return
+            now = time.monotonic()
+            self._prune(now)
+            if len(self._starts) < limit:
+                self._starts.append(now)
+                return
+            retry_after = self._starts[0] + RATE_WINDOW_SECONDS - now
+            remaining = deadline - loop.time()
+            if remaining <= 0:
+                self.rate_limited += 1
+                secs = max(1, math.ceil(retry_after))
+                err = ProviderError(
+                    f"local endpoint {self.key} is over its rate budget "
+                    f"({limit}/min); retry in {secs}s",
+                    status_code=429,
+                    payload={"error": {"type": "endpoint_rate_limited", "endpoint": self.key,
+                                       "max_requests_per_minute": limit,
+                                       "retry_after_seconds": secs,
+                                       "message": "upstream request rate budget reached; retry later"}},
+                )
+                err.headers = {"Retry-After": str(secs)}
+                raise err
+            await asyncio.sleep(max(0.0, min(retry_after, remaining)))
 
     async def acquire(self) -> None:
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + self.queue_timeout_seconds
         self.waiting += 1
         try:
-            await asyncio.wait_for(self.sem.acquire(), timeout=self.queue_timeout_seconds)
-        except asyncio.TimeoutError:
-            self.rejected += 1
-            raise ProviderError(
-                f"local endpoint {self.key} is at its concurrency limit "
-                f"({self.max_concurrency}); retry later",
-                status_code=429,
-                payload={"error": {"type": "endpoint_busy", "endpoint": self.key,
-                                   "message": "upstream concurrency limit reached; retry later"}},
-            ) from None
+            await self._acquire_concurrency(deadline)
+            # Hold the concurrency slot (reserved below) while waiting for the
+            # rate window so a waiter cannot be overtaken past the cap.
+            self.in_flight += 1
+            try:
+                await self._acquire_rate(deadline)
+            except BaseException:
+                self.in_flight -= 1
+                self._wake()
+                raise
         finally:
             self.waiting -= 1
-        self.in_flight += 1
 
     def release(self) -> None:
         self.in_flight -= 1
         self.served += 1
-        self.sem.release()
+        self._wake()
 
     def snapshot(self) -> dict[str, Any]:
+        self._prune(time.monotonic())
         return {"endpoint": self.key, "providers": self.providers,
                 "max_concurrency": self.max_concurrency,
                 "queue_timeout_seconds": self.queue_timeout_seconds,
+                "max_requests_per_minute": self.max_requests_per_minute,
+                "requests_last_minute": len(self._starts),
                 "in_flight": self.in_flight, "waiting": self.waiting,
-                "served": self.served, "rejected": self.rejected}
+                "served": self.served, "rejected": self.rejected,
+                "rate_limited": self.rate_limited}
+
+
+def _strictest(a: Optional[int], b: Optional[int]) -> Optional[int]:
+    """Lowest non-null value; None only if both are None."""
+    vals = [v for v in (a, b) if v]
+    return min(vals) if vals else None
 
 
 class EndpointLimiter:
@@ -82,17 +181,25 @@ class EndpointLimiter:
     def __init__(self) -> None:
         self._limits: dict[str, EndpointLimit] = {}
 
+    def get(self, api_base: str) -> Optional[EndpointLimit]:
+        return self._limits.get(endpoint_key(api_base))
+
     def register(self, provider: str, api_base: str, max_concurrency: Optional[int],
-                 queue_timeout_seconds: float) -> Optional[EndpointLimit]:
-        if not max_concurrency:
+                 queue_timeout_seconds: float,
+                 max_requests_per_minute: Optional[int] = None) -> Optional[EndpointLimit]:
+        if not max_concurrency and not max_requests_per_minute:
             return None
         key = endpoint_key(api_base)
         lim = self._limits.get(key)
         if lim is None:
-            lim = self._limits[key] = EndpointLimit(key, max_concurrency, queue_timeout_seconds)
+            lim = self._limits[key] = EndpointLimit(
+                key, max_concurrency or None, queue_timeout_seconds,
+                max_requests_per_minute or None)
         else:
             # Several providers on one box: the strictest setting wins.
-            lim.max_concurrency = min(lim.max_concurrency, max_concurrency)
+            lim.max_concurrency = _strictest(lim.max_concurrency, max_concurrency)
+            lim.max_requests_per_minute = _strictest(lim.max_requests_per_minute,
+                                                     max_requests_per_minute)
             lim.queue_timeout_seconds = min(lim.queue_timeout_seconds, queue_timeout_seconds)
         lim.providers.append(provider)
         return lim

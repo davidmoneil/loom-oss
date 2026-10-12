@@ -298,3 +298,63 @@ def test_shadow_observe_skips_tool_result_turns_and_reminders():
         {"role": "user", "content": [{"type": "tool_result", "tool_use_id": "t1", "content": "file body"}]},
     ])
     assert sh.calls[0]["prompt"] == "refactor the parser"
+
+
+# --------------------------------------------------------------------------- #
+#  sources scoping + live PATCH
+# --------------------------------------------------------------------------- #
+
+def test_sources_config_default_is_all():
+    assert LayaShadowConfig().sources is None
+
+
+def test_shadow_observe_skips_source_outside_sources():
+    sh = _RecordingShadow()
+    sh.sources = ["headless"]
+    gw = _FakeGateway(shadow=sh)
+    msgs = [{"role": "user", "content": "hello there"}]
+    _observe(gw, msgs, source="default")
+    assert sh.calls == []
+    _observe(gw, msgs, source="headless")
+    assert len(sh.calls) == 1 and sh.calls[0]["source"] == "headless"
+
+
+def test_shadow_observe_sources_none_shadows_everything():
+    sh = _RecordingShadow()
+    sh.sources = None
+    _observe(_FakeGateway(shadow=sh), [{"role": "user", "content": "hi"}], source="default")
+    assert len(sh.calls) == 1
+
+
+def test_laya_patch_updates_live_client_and_validates(tmp_path):
+    from fastapi.testclient import TestClient
+    from loom.gateway.app import app
+    gw = app.state.gateway
+    prev_cfg, prev_client = gw.config, gw.laya_shadow
+    client = _client(log_path=str(tmp_path / "l.jsonl"))
+    try:
+        gw.config = LoomConfig()
+        gw.laya_shadow = client
+        http = TestClient(app)
+        r = http.patch("/api/config/laya-shadow",
+                       json={"sample_rate": 0.1, "sources": ["headless"]})
+        assert r.status_code == 200, r.text
+        assert r.json()["restart_required"] is False
+        assert client.sample_rate == 0.1 and client.sources == ["headless"]
+        assert gw.config.laya_shadow.sources == ["headless"]
+        assert http.get("/api/config/laya-shadow").json()["sources"] == ["headless"]
+
+        assert http.patch("/api/config/laya-shadow", json={"sample_rate": 2}).status_code == 400
+        assert http.patch("/api/config/laya-shadow", json={"sources": "x"}).status_code == 400
+        assert http.patch("/api/config/laya-shadow", json={}).status_code == 400
+
+        r = http.patch("/api/config/laya-shadow", json={"sources": None})
+        assert client.sources is None
+
+        # enabling with no running client -> restart note
+        gw.laya_shadow = None
+        r = http.patch("/api/config/laya-shadow", json={"enabled": True})
+        assert r.json()["restart_required"] is True and "restart" in r.json()["note"]
+    finally:
+        gw.config, gw.laya_shadow = prev_cfg, prev_client
+        client.close()

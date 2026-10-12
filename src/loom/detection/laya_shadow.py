@@ -103,12 +103,16 @@ class LayaShadowClient:
         max_prompt_chars: int = 4000,
         cache_size: int = 512,
         log_path: str = "logs/laya_shadow.jsonl",
+        sources: Optional[list[str]] = None,
     ) -> None:
         self.url = url.rstrip("/")
         self.checkpoint = checkpoint
         self.timeout_seconds = timeout_seconds
         self.allow_private_url = allow_private_url
         self.sample_rate = max(0.0, min(1.0, sample_rate))
+        # None = shadow every source; otherwise only listed sources (the
+        # gateway filters on this before calling shadow()). Live-editable.
+        self.sources = list(sources) if sources is not None else None
         # laya's benchmarked value is specifically on short prompts; long
         # prompts already escalate correctly on length alone (see
         # DetectionEngine.LONG_PROMPT_TOKENS), so skip them here rather than

@@ -128,3 +128,174 @@ def test_passthrough_methods_unlimited():
 def test_config_defaults_unlimited():
     p = ProviderConfig(name="x", api_base="http://x")
     assert p.max_concurrency is None and p.queue_timeout_seconds == 30.0
+
+
+# ------------------------------------------------------------------ rate budget
+def test_config_rate_default_is_none():
+    assert ProviderConfig(name="x", api_base="http://x").max_requests_per_minute is None
+
+
+def test_rate_only_provider_registers_and_snapshot_shows_it():
+    lim = EndpointLimiter()
+    a = lim.register("p", "http://box:9292/v1", None, 5, 6)
+    assert a is not None and a.max_concurrency is None
+    snap = lim.snapshot()[0]
+    assert snap["max_requests_per_minute"] == 6 and snap["rate_limited"] == 0
+
+
+def test_rate_budget_lowest_non_null_wins_when_sharing():
+    lim = EndpointLimiter()
+    a = lim.register("a", "http://box:9292/v1", 3, 30, None)
+    b = lim.register("b", "http://box:9292/v1", 3, 30, 10)
+    c = lim.register("c", "http://box:9292/v1", 3, 30, 6)
+    assert a is b is c and a.max_requests_per_minute == 6
+
+
+def test_seventh_request_in_window_gets_429_with_retry_after():
+    async def go():
+        inner = _SlowBackend(delay=0)
+        limit = EndpointLimiter().register("fake", inner.api_base, None, 0.05, 6)
+        be = LimitedBackend(inner, limit)
+        for _ in range(6):
+            assert await be.chat_completion("m", [], "k") == {"ok": True}
+        with pytest.raises(ProviderError) as ei:
+            await be.chat_completion("m", [], "k")
+        return ei.value, limit
+
+    err, limit = asyncio.run(go())
+    assert err.status_code == 429
+    assert err.payload["error"]["type"] == "endpoint_rate_limited"
+    assert 1 <= int(err.headers["Retry-After"]) <= 60
+    assert limit.rate_limited == 1 and limit.rejected == 0 and limit.in_flight == 0
+    assert limit.snapshot()["requests_last_minute"] == 6
+
+
+def test_rate_waits_for_window_then_succeeds(monkeypatch):
+    import loom.gateway.endpoint_limits as el
+    monkeypatch.setattr(el, "RATE_WINDOW_SECONDS", 0.2)
+
+    async def go():
+        inner = _SlowBackend(delay=0)
+        limit = EndpointLimiter().register("fake", inner.api_base, None, 5, 2)
+        be = LimitedBackend(inner, limit)
+        t0 = asyncio.get_running_loop().time()
+        for _ in range(3):
+            await be.chat_completion("m", [], "k")
+        return asyncio.get_running_loop().time() - t0, limit
+
+    elapsed, limit = asyncio.run(go())
+    assert elapsed >= 0.19 and limit.rate_limited == 0 and limit.served == 3
+
+
+def test_no_limits_configured_behaves_as_before():
+    lim = EndpointLimiter()
+    assert lim.register("x", "http://box:1/v1", None, 30, None) is None
+    assert lim.snapshot() == []
+
+
+def test_failed_rate_acquire_releases_concurrency_slot():
+    async def go():
+        inner = _SlowBackend(delay=0)
+        limit = EndpointLimiter().register("fake", inner.api_base, 1, 0.05, 1)
+        be = LimitedBackend(inner, limit)
+        await be.chat_completion("m", [], "k")
+        with pytest.raises(ProviderError):
+            await be.chat_completion("m", [], "k")
+        return limit
+
+    limit = asyncio.run(go())
+    assert limit.in_flight == 0 and limit.waiting == 0
+
+
+def test_reconfigure_live_changes_limits():
+    async def go():
+        inner = _SlowBackend(delay=0)
+        limit = EndpointLimiter().register("fake", inner.api_base, 1, 0.05, 1)
+        be = LimitedBackend(inner, limit)
+        await be.chat_completion("m", [], "k")
+        limit.reconfigure(1, 0.05, 5)
+        await be.chat_completion("m", [], "k")
+        limit.reconfigure(None, 0.05, None)
+        for _ in range(10):
+            await be.chat_completion("m", [], "k")
+        return limit
+
+    limit = asyncio.run(go())
+    assert limit.served == 12 and limit.max_requests_per_minute is None
+
+
+# ------------------------------------------------------------------ API
+def _api_client():
+    from fastapi.testclient import TestClient
+    from loom.config import LoomConfig
+    from loom.gateway.app import app
+    gw = app.state.gateway
+    return TestClient(app), gw
+
+
+def test_provider_patch_updates_live_limiter_and_http_429_has_retry_after():
+    from loom.config import LoomConfig
+    client, gw = _api_client()
+    prev_cfg, prev_lim = gw.config, gw.endpoint_limiter
+    try:
+        gw.config = LoomConfig(providers=[
+            ProviderConfig(name="box", api_base="http://box:9292/v1", max_concurrency=2),
+            ProviderConfig(name="cloud", api_base="https://api.example.com/v1"),
+        ])
+        gw.endpoint_limiter = EndpointLimiter()
+        gw.endpoint_limiter.register("box", "http://box:9292/v1", 2, 30.0)
+
+        r = client.patch("/api/config/providers/box",
+                         json={"max_requests_per_minute": 6, "queue_timeout_seconds": 5,
+                               "max_concurrency": 3})
+        assert r.status_code == 200, r.text
+        body = r.json()
+        assert body["restart_required"] is False
+        assert body["endpoint"]["max_requests_per_minute"] == 6
+        assert body["endpoint"]["max_concurrency"] == 3
+        assert body["endpoint"]["queue_timeout_seconds"] == 5.0
+        assert gw.config.providers[0].max_requests_per_minute == 6
+        assert gw.endpoint_limiter.get("http://box:9292/v1").max_requests_per_minute == 6
+
+        # null clears the rate budget live
+        r = client.patch("/api/config/providers/box", json={"max_requests_per_minute": None})
+        assert r.json()["endpoint"]["max_requests_per_minute"] is None
+        assert client.get("/api/config/providers/box").json()["max_concurrency"] == 3
+
+        # validation + unknown provider
+        assert client.patch("/api/config/providers/box",
+                            json={"max_requests_per_minute": -1}).status_code == 400
+        assert client.patch("/api/config/providers/box", json={"nope": 1}).status_code == 400
+        assert client.patch("/api/config/providers/zzz", json={"max_concurrency": 1}).status_code == 404
+
+        # provider with no limiter at startup: saved, restart flagged
+        r = client.patch("/api/config/providers/cloud", json={"max_requests_per_minute": 10})
+        assert r.json()["restart_required"] is True
+    finally:
+        gw.config, gw.endpoint_limiter = prev_cfg, prev_lim
+
+
+def test_error_response_carries_retry_after_header():
+    from loom.gateway.app import _error_response
+    err = ProviderError("x", status_code=429)
+    err.headers = {"Retry-After": "7"}
+    resp = _error_response(err, "rid")
+    assert resp.status_code == 429 and resp.headers["retry-after"] == "7"
+
+
+def test_provider_patch_rejects_non_finite_queue_timeout():
+    from loom.config import LoomConfig
+    client, gw = _api_client()
+    prev_cfg, prev_lim = gw.config, gw.endpoint_limiter
+    try:
+        gw.config = LoomConfig(providers=[
+            ProviderConfig(name="box", api_base="http://box:9292/v1", max_concurrency=2)])
+        gw.endpoint_limiter = EndpointLimiter()
+        gw.endpoint_limiter.register("box", "http://box:9292/v1", 2, 30.0)
+        for bad in ("NaN", "Infinity"):
+            r = client.patch("/api/config/providers/box", content=f'{{"queue_timeout_seconds": {bad}}}',
+                             headers={"Content-Type": "application/json"})
+            assert r.status_code == 400, (bad, r.text)
+        assert client.get("/api/config/providers/box").json()["queue_timeout_seconds"] == 30.0
+    finally:
+        gw.config, gw.endpoint_limiter = prev_cfg, prev_lim
