@@ -740,7 +740,8 @@ function LayaShadowSettings({ saving, setSaving, setError, flashSuccess }) {
     try {
       const d = await api.updateLayaShadow(updates);
       apply(d);
-      flashSuccess(d.restart_required ? "Saved; restart the gateway to start laya shadow" : msg);
+      // The note covers restart-required and "disabled but still shadowing until restart".
+      flashSuccess(d.note || msg);
     } catch (e) {
       setError(e.message || "Failed to update laya shadow scope");
     } finally {
