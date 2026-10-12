@@ -47,6 +47,13 @@ providers:
   # On host: use http://localhost:11434
   - name: ollama
     api_base: "http://host.docker.internal:11434"
+    # Optional per-endpoint concurrency budget for local model boxes. Providers
+    # with the same host:port share one budget (strictest wins); each separate
+    # box is limited on its own. Requests wait up to queue_timeout_seconds for a
+    # slot, then get 429. Omit for cloud APIs (unlimited). Live state:
+    # GET /v1/endpoint-limits
+    max_concurrency: 2
+    queue_timeout_seconds: 60
     models:
       - model_id: qwen2.5:7b
         display_name: qwen2.5:7b

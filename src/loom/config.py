@@ -39,6 +39,11 @@ class ProviderConfig(BaseModel):
     name: str
     api_base: str
     models: list[ModelConfig] = Field(default_factory=list)
+    # Concurrency budget for this provider's upstream endpoint (host:port).
+    # None = unlimited (cloud APIs). Providers on the same box share one budget;
+    # each separate box is limited separately. See loom/gateway/endpoint_limits.py.
+    max_concurrency: Optional[int] = None
+    queue_timeout_seconds: float = 30.0
 
     def get_model(self, model_id: str) -> Optional[ModelConfig]:
         for model in self.models:
