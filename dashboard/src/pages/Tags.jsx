@@ -38,7 +38,16 @@ export default function Tags() {
 
   return (
     <div className="p-6">
-      <Header title="Request Tags" updatedAt={updatedAt} error={error} onRefresh={load}>
+      <Header
+        title={
+          <span className="flex items-center gap-3">
+            Request Tags
+            <span className="rounded-full border border-amber-500/40 bg-amber-500/10 px-2 py-0.5 text-xs font-medium uppercase tracking-wide text-amber-300">
+              In planning
+            </span>
+          </span>
+        }
+        updatedAt={updatedAt} error={error} onRefresh={load}>
         <select
           value={hours}
           onChange={(e) => setHours(Number(e.target.value))}
@@ -49,6 +58,28 @@ export default function Tags() {
           <option value={168}>7d</option>
         </select>
       </Header>
+
+      <div className="mt-6 rounded-lg border border-amber-500/30 bg-amber-500/5 p-4 text-sm text-gray-300">
+        <p className="mb-2 font-medium text-amber-300">In planning: this page works but is not finished.</p>
+        <p className="mb-2">
+          <span className="text-gray-200">What it does today.</span> The gateway copies selected request
+          headers onto each request as tags, so usage can be grouped by them. The mapping lives in{" "}
+          <code>request_tags</code> in the gateway YAML (here: <code>x-loom-job</code> → job,{" "}
+          <code>x-loom-project</code> → project, <code>x-loom-persona</code> → persona, sent by Nexus jobs).
+          The left table lists header names the gateway has seen, so you can pick new ones to tag; the
+          right table shows requests and cost per tag value.
+        </p>
+        <p className="mb-1 text-gray-200">Not done yet:</p>
+        <ul className="ml-5 list-disc space-y-1 text-gray-400">
+          <li>Tags can only be added or removed in the YAML, then a restart. There is no editor here yet.</li>
+          <li>"Header names seen" is kept in memory and starts empty after every gateway restart.</li>
+          <li>
+            Request source (<code>x-loom-source</code>) is a built-in field, not a tag, so it is not
+            grouped here. See requests by source on the Metrics and Costs pages. The header only shows in
+            the left table when a client sends it; requests without it count as <code>default</code>.
+          </li>
+        </ul>
+      </div>
 
       {tags && !tags.enabled && (
         <div className="mt-6 rounded-lg border border-border bg-card p-6 text-sm text-gray-400">
