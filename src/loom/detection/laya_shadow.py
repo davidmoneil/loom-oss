@@ -38,14 +38,24 @@ from loom.netcheck import UnsafeURLError, validate_outbound_url
 
 logger = logging.getLogger(__name__)
 
-# Mirrors laya-eval/bench.py's LAYA_QUESTIONS, kept in sync so shadow-mode
-# comparisons stay apples-to-apples with the offline eval harness.
+# Bump when LAYA_QUESTIONS changes so log rows from different question sets
+# are never compared as one series.
+#   1: tier choice + needs_reasoning noul (noul separated 7/12 on a probe)
+#   2: needs_reasoning -> reasoning_depth score, cut at REASONING_CUTOFF
+LAYA_QUESTION_VERSION = 2
+
+# Score at or above this means "needs extended reasoning". The 2026-10-12
+# probe (12 crafted asks) separated 12/12 with a gap between 1.22 and 1.76.
+REASONING_CUTOFF = 1.5
+
+# Question design rules (score + cutoff over noul, field names in backticks):
+# AIProjects .claude/context/patterns/laya-question-design.md
 LAYA_QUESTIONS: dict[str, Any] = {
     "tier": {
         "type": "choice",
         "instructions": (
-            "Which language-model tier should handle this request? Choose "
-            "the cheapest tier that can answer it correctly."
+            "Which language-model tier should handle the request in `request`? "
+            "Choose the cheapest tier that can answer it correctly."
         ),
         "criteria": {
             "economy": "trivial lookup, formatting, translation, or a one-line factual answer; no reasoning needed",
@@ -53,9 +63,15 @@ LAYA_QUESTIONS: dict[str, Any] = {
             "premium": "multi-step reasoning, architecture, tradeoff analysis, proofs, or long-horizon planning",
         },
     },
-    "needs_reasoning": {
-        "type": "noul",
-        "instructions": "Does answering this request require extended step-by-step reasoning?",
+    "reasoning_depth": {
+        "type": "score",
+        "instructions": "How much step-by-step reasoning does answering `request` need?",
+        "criteria": [
+            "none: a lookup, one-liner or mechanical edit",
+            "a little: a short explanation or a single clear fix",
+            "a lot: several dependent steps, debugging or comparing options",
+            "deep: design, proof, root-cause analysis or long-horizon planning",
+        ],
     },
 }
 
@@ -173,7 +189,7 @@ class LayaShadowClient:
                 self._record(
                     request_id, source, prompt_hash, rule_tier, rule_confidence,
                     cached["laya_tier"], cached["laya_probabilities"],
-                    cached["laya_needs_reasoning"], latency_ms=0.0, cached=True,
+                    cached["laya_reasoning_score"], latency_ms=0.0, cached=True,
                 )
             )
             return
@@ -199,7 +215,7 @@ class LayaShadowClient:
             answers = resp.json()["answers"]
             laya_tier = answers["tier"]["choice"]
             laya_probabilities = answers["tier"].get("probabilities")
-            needs_reasoning = answers.get("needs_reasoning", {}).get("noul")
+            reasoning_score = answers.get("reasoning_depth", {}).get("score")
         except Exception:
             # Unreachable, slow, or malformed sidecar response — this must
             # never surface to the request path. Debug, not warning: an
@@ -213,13 +229,13 @@ class LayaShadowClient:
             {
                 "laya_tier": laya_tier,
                 "laya_probabilities": laya_probabilities,
-                "laya_needs_reasoning": needs_reasoning,
+                "laya_reasoning_score": reasoning_score,
             },
         )
         self._write(
             self._record(
                 request_id, source, prompt_hash, rule_tier, rule_confidence,
-                laya_tier, laya_probabilities, needs_reasoning,
+                laya_tier, laya_probabilities, reasoning_score,
                 latency_ms=round(latency_ms, 1), cached=False,
             )
         )
@@ -233,7 +249,7 @@ class LayaShadowClient:
         rule_confidence: Optional[float],
         laya_tier: Optional[str],
         laya_probabilities: Any,
-        laya_needs_reasoning: Any,
+        laya_reasoning_score: Optional[float],
         latency_ms: float,
         cached: bool,
     ) -> dict[str, Any]:
@@ -242,11 +258,16 @@ class LayaShadowClient:
             "request_id": request_id,
             "source": source,
             "prompt_hash": prompt_hash,
+            "question_version": LAYA_QUESTION_VERSION,
             "rule_tier": rule_tier,
             "rule_confidence": rule_confidence,
             "laya_tier": laya_tier,
             "laya_probabilities": laya_probabilities,
-            "laya_needs_reasoning": laya_needs_reasoning,
+            "laya_reasoning_score": laya_reasoning_score,
+            "laya_needs_reasoning": (
+                laya_reasoning_score >= REASONING_CUTOFF
+                if isinstance(laya_reasoning_score, (int, float)) else None
+            ),
             "agree": (laya_tier == rule_tier) if rule_tier is not None else None,
             "laya_latency_ms": latency_ms,
             "cached": cached,
