@@ -126,6 +126,13 @@ export const api = {
     deleteJSON(
       `/api/config/providers/${encodeURIComponent(provider)}/models/${encodeURIComponent(modelId)}`
     ),
+  providerLimits: (provider) =>
+    getJSON(`/api/config/providers/${encodeURIComponent(provider)}`),
+  updateProviderLimits: (provider, updates) =>
+    patchJSON(`/api/config/providers/${encodeURIComponent(provider)}`, updates),
+  layaShadow: () => getJSON("/api/config/laya-shadow"),
+  updateLayaShadow: (updates) => patchJSON("/api/config/laya-shadow", updates),
+  endpointLimits: () => getJSON("/v1/endpoint-limits"),
   gatewayKeys: () => getJSON("/api/config/gateway-keys"),
   createGatewayKey: (name) => postJSON("/api/config/gateway-keys", { name }),
   toggleGatewayKey: (id, enabled) =>

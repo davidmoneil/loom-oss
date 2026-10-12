@@ -299,6 +299,21 @@ export default function Settings() {
         flashSuccess={flashSuccess}
       />
 
+      {/* Local box limits + laya scope */}
+      <BoxLimitsSettings
+        providers={providers}
+        saving={saving}
+        setSaving={setSaving}
+        setError={setError}
+        flashSuccess={flashSuccess}
+      />
+      <LayaShadowSettings
+        saving={saving}
+        setSaving={setSaving}
+        setError={setError}
+        flashSuccess={flashSuccess}
+      />
+
       {/* Compression */}
       <CompressionSettings
         config={config}
@@ -551,6 +566,248 @@ function ApiAccessSettings({ saving, setSaving, setError, flashSuccess }) {
         >
           Create Key
         </button>
+      </div>
+    </div>
+  );
+}
+
+const RUNTIME_ONLY_NOTE =
+  "Applies live but is held in memory only; put the same values in the YAML to keep them across a restart.";
+
+// Empty string / 0 = unlimited (sent as null).
+function parseLimit(text) {
+  const t = String(text).trim();
+  if (t === "") return null;
+  const n = Number(t);
+  return Number.isInteger(n) && n >= 0 ? n : undefined;
+}
+
+function BoxLimitCard({ provider, counters, saving, setSaving, setError, flashSuccess, onSaved }) {
+  const [limits, setLimits] = useState(null);
+  const [form, setForm] = useState({ conc: "", rate: "", timeout: "" });
+
+  const load = useCallback(() => {
+    api.providerLimits(provider)
+      .then((d) => {
+        setLimits(d);
+        setForm({
+          conc: d.max_concurrency ?? "",
+          rate: d.max_requests_per_minute ?? "",
+          timeout: d.queue_timeout_seconds ?? "",
+        });
+      })
+      .catch(() => setLimits(null));
+  }, [provider]);
+
+  useEffect(() => {
+    load();
+  }, [load]);
+
+  async function save() {
+    const conc = parseLimit(form.conc);
+    const rate = parseLimit(form.rate);
+    const timeout = Number(form.timeout);
+    if (conc === undefined || rate === undefined || !(timeout > 0)) {
+      setError("Limits must be whole numbers (blank = unlimited); queue timeout must be positive.");
+      return;
+    }
+    setSaving(true);
+    setError(null);
+    try {
+      const d = await api.updateProviderLimits(provider, {
+        max_concurrency: conc,
+        max_requests_per_minute: rate,
+        queue_timeout_seconds: timeout,
+      });
+      setLimits(d);
+      flashSuccess(d.note || `Updated limits for "${provider}"`);
+      onSaved();
+    } catch (e) {
+      setError(e.message || "Failed to update provider limits");
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  if (!limits) return null;
+  const c = counters || limits.endpoint || {};
+  const field = "w-20 rounded border border-border bg-gray-800 px-2 py-1 text-right text-sm text-white";
+
+  return (
+    <div className="rounded border border-border/50 bg-gray-800/30 px-4 py-3">
+      <div className="mb-2 flex items-center justify-between">
+        <span className="font-mono text-sm font-medium text-white">{provider}</span>
+        <span className="text-xs text-gray-500">
+          {c.requests_last_minute ?? 0} req/min &middot; {c.in_flight ?? 0} in flight &middot;{" "}
+          {c.waiting ?? 0} waiting &middot; {c.rate_limited ?? 0} rate-limited &middot;{" "}
+          {c.rejected ?? 0} rejected
+        </span>
+      </div>
+      <div className="flex flex-wrap items-end gap-4">
+        <label className="text-xs text-gray-400">
+          Max concurrency
+          <input type="number" min="0" placeholder="∞" value={form.conc} disabled={saving}
+            onChange={(e) => setForm({ ...form, conc: e.target.value })} className={`ml-2 ${field}`} />
+        </label>
+        <label className="text-xs text-gray-400">
+          Max requests/min
+          <input type="number" min="0" placeholder="∞" value={form.rate} disabled={saving}
+            onChange={(e) => setForm({ ...form, rate: e.target.value })} className={`ml-2 ${field}`} />
+        </label>
+        <label className="text-xs text-gray-400">
+          Queue timeout (s)
+          <input type="number" min="1" max="600" value={form.timeout} disabled={saving}
+            onChange={(e) => setForm({ ...form, timeout: e.target.value })} className={`ml-2 ${field}`} />
+        </label>
+        <button
+          onClick={save}
+          disabled={saving}
+          className="rounded bg-accent px-3 py-1.5 text-sm font-medium text-white hover:opacity-90 disabled:opacity-50"
+        >
+          Save
+        </button>
+      </div>
+    </div>
+  );
+}
+
+function BoxLimitsSettings({ providers, saving, setSaving, setError, flashSuccess }) {
+  const [counters, setCounters] = useState({});
+
+  const refreshCounters = useCallback(() => {
+    api.endpointLimits()
+      .then((d) => {
+        const byProvider = {};
+        (d.endpoints || []).forEach((ep) =>
+          (ep.providers || []).forEach((p) => { byProvider[p] = ep; })
+        );
+        setCounters(byProvider);
+      })
+      .catch(() => {});
+  }, []);
+
+  useEffect(() => {
+    refreshCounters();
+    const t = setInterval(refreshCounters, 5000);
+    return () => clearInterval(t);
+  }, [refreshCounters]);
+
+  if (providers.length === 0) return null;
+
+  return (
+    <div className="mb-6 rounded-lg border border-border bg-card p-5">
+      <h2 className="mb-2 text-sm font-semibold uppercase text-gray-400">Box Rate Budget</h2>
+      <p className="mb-4 text-xs text-gray-500">
+        Per-provider concurrency, request-rate and queue limits that protect local model boxes.
+        Blank = unlimited. {RUNTIME_ONLY_NOTE}
+      </p>
+      <div className="space-y-3">
+        {providers.map((p) => (
+          <BoxLimitCard
+            key={p.name}
+            provider={p.name}
+            counters={counters[p.name]}
+            saving={saving}
+            setSaving={setSaving}
+            setError={setError}
+            flashSuccess={flashSuccess}
+            onSaved={refreshCounters}
+          />
+        ))}
+      </div>
+    </div>
+  );
+}
+
+function LayaShadowSettings({ saving, setSaving, setError, flashSuccess }) {
+  const [laya, setLaya] = useState(null);
+  const [rate, setRate] = useState("");
+  const [sources, setSources] = useState("");
+
+  const apply = useCallback((d) => {
+    setLaya(d);
+    setRate(d.sample_rate ?? "");
+    setSources(d.sources ? d.sources.join(", ") : "");
+  }, []);
+
+  useEffect(() => {
+    api.layaShadow().then(apply).catch(() => setLaya(null));
+  }, [apply]);
+
+  async function patch(updates, msg) {
+    setSaving(true);
+    setError(null);
+    try {
+      const d = await api.updateLayaShadow(updates);
+      apply(d);
+      // The note covers restart-required and "disabled but still shadowing until restart".
+      flashSuccess(d.note || msg);
+    } catch (e) {
+      setError(e.message || "Failed to update laya shadow scope");
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  function saveScope() {
+    const r = Number(rate);
+    if (rate === "" || !(r >= 0 && r <= 1)) {
+      setError("Sample rate must be a number between 0 and 1.");
+      return;
+    }
+    const list = sources.split(",").map((s) => s.trim()).filter(Boolean);
+    // Blank = every source (null).
+    patch({ sample_rate: r, sources: list.length ? list : null }, "laya shadow scope updated");
+  }
+
+  if (!laya) return null;
+
+  return (
+    <div className="mb-6 rounded-lg border border-border bg-card p-5">
+      <h2 className="mb-2 text-sm font-semibold uppercase text-gray-400">laya Shadow Scope</h2>
+      <p className="mb-4 text-xs text-gray-500">
+        Which requests the laya sidecar shadows, and how often. {RUNTIME_ONLY_NOTE}
+      </p>
+      <div className="space-y-3">
+        <div className="flex items-center justify-between">
+          <div>
+            <span className="text-sm text-white">Enabled</span>
+            <p className="text-xs text-gray-500">
+              {laya.running ? "Sidecar running" : "Sidecar not running"}
+            </p>
+          </div>
+          <button
+            onClick={() => patch({ enabled: !laya.enabled }, `laya shadow ${laya.enabled ? "disabled" : "enabled"}`)}
+            disabled={saving}
+            className={`h-5 w-9 rounded-full transition-colors ${laya.enabled ? "bg-green-500" : "bg-gray-600"} relative`}
+          >
+            <span className={`absolute top-0.5 h-4 w-4 rounded-full bg-white transition-transform ${laya.enabled ? "left-[18px]" : "left-0.5"}`} />
+          </button>
+        </div>
+        <div className="flex items-center justify-between">
+          <span className="text-sm text-white">Sample rate (0–1)</span>
+          <input type="number" min="0" max="1" step="0.05" value={rate} disabled={saving}
+            onChange={(e) => setRate(e.target.value)}
+            className="w-24 rounded border border-border bg-gray-800 px-2 py-1 text-right text-sm text-white" />
+        </div>
+        <div className="flex items-center justify-between">
+          <div>
+            <span className="text-sm text-white">Sources</span>
+            <p className="text-xs text-gray-500">Comma-separated source names; blank = all sources.</p>
+          </div>
+          <input type="text" value={sources} disabled={saving} placeholder="all"
+            onChange={(e) => setSources(e.target.value)}
+            className="w-64 rounded border border-border bg-gray-800 px-2 py-1 font-mono text-sm text-white placeholder-gray-600" />
+        </div>
+        <div className="flex justify-end">
+          <button
+            onClick={saveScope}
+            disabled={saving}
+            className="rounded bg-accent px-3 py-1.5 text-sm font-medium text-white hover:opacity-90 disabled:opacity-50"
+          >
+            Save scope
+          </button>
+        </div>
       </div>
     </div>
   );
