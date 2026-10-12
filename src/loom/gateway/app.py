@@ -1654,7 +1654,12 @@ async def lifespan(app: FastAPI):
             state.audit = AuditLogger(
                 audit_path=state.config.observability.audit_log_path,
                 metrics_path=state.config.observability.metrics_log_path,
+                content_path=state.config.observability.content_log_path,
                 scanner=state.scanner,
+                max_bytes=state.config.observability.log_max_bytes,
+                backup_count=state.config.observability.log_backup_count,
+                content_max_bytes=state.config.observability.content_log_max_bytes,
+                content_backup_count=state.config.observability.content_log_backup_count,
             )
         except Exception:
             state.audit = None
@@ -3142,21 +3147,28 @@ def create_app() -> FastAPI:
         gw = state()
         if gw.audit is None:
             return JSONResponse({"error": "content logging not enabled"}, status_code=404)
-        content_path = gw.audit.content_path
-        if not os.path.exists(content_path):
+        content_paths = gw.audit.content_paths()
+        if not content_paths:
             return JSONResponse({"error": "no content logged"}, status_code=404)
         match = None
-        with open(content_path, "r") as f:
-            for line in f:
-                line = line.strip()
-                if not line:
-                    continue
-                try:
-                    record = json.loads(line)
-                except json.JSONDecodeError:
-                    continue
-                if record.get("request_id") == request_id:
-                    match = record  # keep scanning — last match wins (most recent write for this id)
+        # Newest file first; the first file holding the id has its latest write.
+        for content_path in content_paths:
+            try:
+                with open(content_path, "r") as f:
+                    for line in f:
+                        line = line.strip()
+                        if not line:
+                            continue
+                        try:
+                            record = json.loads(line)
+                        except json.JSONDecodeError:
+                            continue
+                        if record.get("request_id") == request_id:
+                            match = record  # keep scanning — last match in this file wins
+            except OSError:
+                continue  # rotated away between listing and open
+            if match is not None:
+                break
         if match is None:
             return JSONResponse({"error": "no content logged for this request"}, status_code=404)
         return match

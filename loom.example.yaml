@@ -133,6 +133,13 @@ storage:
 observability:
   audit_log_path: logs/audit.jsonl
   metrics_log_path: logs/metrics.jsonl
+  content_log_path: logs/content.jsonl  # prompt bodies, when scanner.content_logging != metadata
+  # Size-based rotation (file -> file.1 -> ... ; oldest dropped). 0 disables.
+  # Worst-case disk per file is max_bytes * (backup_count + 1).
+  log_max_bytes: 100000000            # audit + metrics: 100 MB
+  log_backup_count: 5
+  content_log_max_bytes: 10000000000  # content: 10 GB
+  content_log_backup_count: 3
   # Optional: write one row per upstream Anthropic response (rate-limit
   # headers + token usage, cost, latency, stop_reason; no prompt/response
   # content, no request headers) into a Postgres table you create. Off by

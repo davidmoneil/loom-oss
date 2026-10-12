@@ -25,12 +25,60 @@ class AuditLogger:
         metrics_path: str = "logs/metrics.jsonl",
         content_path: str = "logs/content.jsonl",
         scanner: Any = None,
+        max_bytes: int = 0,
+        backup_count: int = 3,
+        content_max_bytes: Optional[int] = None,
+        content_backup_count: Optional[int] = None,
     ) -> None:
         self.audit_path = audit_path
         self.metrics_path = metrics_path
         self.content_path = content_path
         self._scanner = scanner
+        # max_bytes <= 0 disables rotation (legacy unbounded behaviour).
+        self._max_bytes = max_bytes
+        self._backup_count = max(backup_count, 0)
+        # content.jsonl carries full prompt bodies and grows orders of magnitude
+        # faster than audit/metrics, so it gets its own limits (None = shared).
+        self._content_max_bytes = max_bytes if content_max_bytes is None else content_max_bytes
+        self._content_backup_count = max(
+            self._backup_count if content_backup_count is None else content_backup_count, 0
+        )
         self._ensure_dirs()
+
+    def _limits(self, path: str) -> tuple[int, int]:
+        if path == self.content_path:
+            return self._content_max_bytes, self._content_backup_count
+        return self._max_bytes, self._backup_count
+
+    def content_paths(self) -> list[str]:
+        """The live content file plus existing rotated backups, newest first."""
+        _, backups = self._limits(self.content_path)
+        paths = [self.content_path] + [f"{self.content_path}.{i}" for i in range(1, backups + 1)]
+        return [p for p in paths if os.path.exists(p)]
+
+    def _rotate_if_needed(self, path: str) -> None:
+        """Roll ``path`` -> ``path.1`` -> ... once it exceeds its size limit.
+
+        The oldest backup is dropped, so disk use per file is bounded by
+        roughly ``max_bytes * (backup_count + 1)``. Never raises: a failed
+        rotation must not cost the log line itself.
+        """
+        max_bytes, backups = self._limits(path)
+        if max_bytes <= 0:
+            return
+        try:
+            if os.path.getsize(path) < max_bytes:
+                return
+            if backups == 0:
+                os.remove(path)
+                return
+            for i in range(backups, 1, -1):
+                src = f"{path}.{i - 1}"
+                if os.path.exists(src):
+                    os.replace(src, f"{path}.{i}")
+            os.replace(path, f"{path}.1")
+        except OSError:
+            pass
 
     def _ensure_dirs(self) -> None:
         for path in (self.audit_path, self.metrics_path, self.content_path):
@@ -46,6 +94,7 @@ class AuditLogger:
             if self._scanner is not None:
                 record = self._scanner.sanitize_log_entry(record)
             line = json.dumps(record, default=str)
+            self._rotate_if_needed(path)
             with open(path, "a", encoding="utf-8") as fh:
                 fh.write(line + "\n")
         except Exception:

@@ -185,6 +185,13 @@ class RequestTagsConfig(BaseModel):
 class ObservabilityConfig(BaseModel):
     audit_log_path: str = "logs/audit.jsonl"
     metrics_log_path: str = "logs/metrics.jsonl"
+    content_log_path: str = "logs/content.jsonl"
+    # Size-based rotation for the JSONL logs; 0 disables. audit/metrics share
+    # log_*; content.jsonl (full prompt bodies, GBs/day) has its own limits.
+    log_max_bytes: int = 100_000_000
+    log_backup_count: int = 5
+    content_log_max_bytes: int = 10_000_000_000
+    content_log_backup_count: int = 3
     ratelimit_sink: RateLimitSinkConfig = Field(default_factory=RateLimitSinkConfig)
 
 
