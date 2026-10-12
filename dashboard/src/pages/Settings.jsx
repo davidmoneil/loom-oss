@@ -766,14 +766,26 @@ function LayaShadowSettings({ saving, setSaving, setError, flashSuccess }) {
     <div className="mb-6 rounded-lg border border-border bg-card p-5">
       <h2 className="mb-2 text-sm font-semibold uppercase text-gray-400">laya Shadow Scope</h2>
       <p className="mb-4 text-xs text-gray-500">
-        Which requests the laya sidecar shadows, and how often. {RUNTIME_ONLY_NOTE}
+        laya is a second prompt classifier running in the laya-sidecar container. In shadow mode
+        the gateway also sends a request's latest user message to laya and logs laya's tier next to
+        the rule detector's tier in <span className="font-mono">logs/laya_shadow.jsonl</span>, so the
+        two can be compared on real traffic. It only observes: routing, compression and responses
+        never change, and a slow or down sidecar never delays a request. {RUNTIME_ONLY_NOTE}
       </p>
       <div className="space-y-3">
         <div className="flex items-center justify-between">
           <div>
             <span className="text-sm text-white">Enabled</span>
-            <p className="text-xs text-gray-500">
-              {laya.running ? "Sidecar running" : "Sidecar not running"}
+            <p className="max-w-md text-xs text-gray-500">
+              Whether the gateway starts its laya client at boot. Takes effect on the next restart;
+              to stop shadowing right now, set the sample rate to 0.
+            </p>
+            <p className={`text-xs ${laya.running ? "text-green-400" : "text-gray-500"}`}>
+              {laya.running
+                ? "Shadowing is active in this gateway process"
+                : laya.enabled
+                  ? "Not active yet: restart the gateway to start it"
+                  : "Not active"}
             </p>
           </div>
           <button
@@ -785,7 +797,13 @@ function LayaShadowSettings({ saving, setSaving, setError, flashSuccess }) {
           </button>
         </div>
         <div className="flex items-center justify-between">
-          <span className="text-sm text-white">Sample rate (0–1)</span>
+          <div>
+            <span className="text-sm text-white">Sample rate (0–1)</span>
+            <p className="max-w-md text-xs text-gray-500">
+              Share of matching requests also sent to laya: 1 = every one, 0.1 = about 1 in 10,
+              0 = none. Lower it to cut sidecar load. Applies immediately.
+            </p>
+          </div>
           <input type="number" min="0" max="1" step="0.05" value={rate} disabled={saving}
             onChange={(e) => setRate(e.target.value)}
             className="w-24 rounded border border-border bg-gray-800 px-2 py-1 text-right text-sm text-white" />
@@ -793,7 +811,13 @@ function LayaShadowSettings({ saving, setSaving, setError, flashSuccess }) {
         <div className="flex items-center justify-between">
           <div>
             <span className="text-sm text-white">Sources</span>
-            <p className="text-xs text-gray-500">Comma-separated source names; blank = all sources.</p>
+            <p className="max-w-md text-xs text-gray-500">
+              Which callers are shadowed, matched on the request's{" "}
+              <span className="font-mono">x-loom-source</span> header (no header ={" "}
+              <span className="font-mono">default</span>). Comma-separated, e.g.{" "}
+              <span className="font-mono">headless, default</span>. Blank = every source. Applies
+              immediately.
+            </p>
           </div>
           <input type="text" value={sources} disabled={saving} placeholder="all"
             onChange={(e) => setSources(e.target.value)}
