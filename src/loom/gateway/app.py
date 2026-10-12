@@ -49,6 +49,7 @@ from loom.observability.request_tags import (
     current_tags,
 )
 from loom.gateway.auth import check_request_auth, gateway_keys_exist, is_public_path
+from loom.gateway.endpoint_limits import EndpointLimiter, LimitedBackend
 from loom.logging_setup import configure_logging, get_logger
 from loom.netcheck import UnsafeURLError, validate_outbound_url
 from loom.storage import LoomStorage, create_storage
@@ -187,6 +188,7 @@ class GatewayState:
         self.scanner: Any = None
         self.governor: Any = None
         self.header_observer: Any = HeaderObserver()
+        self.endpoint_limiter = EndpointLimiter()
 
     def build_backend(self, provider_name: str, api_base: str) -> ProviderBackend:
         name = provider_name.lower()
@@ -1576,7 +1578,10 @@ async def lifespan(app: FastAPI):
         backend = state.build_backend(provider.name, provider.api_base)
         if hasattr(backend, "set_config_models") and provider.models:
             backend.set_config_models([m.model_id for m in provider.models])
-        state.backends[provider.name] = backend
+        limit = state.endpoint_limiter.register(
+            provider.name, provider.api_base, provider.max_concurrency, provider.queue_timeout_seconds
+        )
+        state.backends[provider.name] = LimitedBackend(backend, limit) if limit else backend
 
     if SensitiveDataScanner is not None:
         try:
@@ -2064,6 +2069,12 @@ def create_app() -> FastAPI:
         except Exception as exc:  # never crash
             _audit_error(gw, request_id, "/v1/chat/completions", source, 500)
             return _error_response(exc, request_id)
+
+    # ------------------------------------------- endpoint concurrency limits
+    @app.get("/v1/endpoint-limits")
+    async def endpoint_limits_endpoint():
+        """Live per-endpoint concurrency budgets (in flight, waiting, served, rejected)."""
+        return {"endpoints": state().endpoint_limiter.snapshot()}
 
     # ------------------------------------------- models (Anthropic discovery)
     @app.get("/v1/models")
