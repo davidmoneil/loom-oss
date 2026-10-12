@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import asyncio
 import dataclasses
+import math
 import gzip
 import hashlib
 import json
@@ -3463,7 +3464,7 @@ def create_app() -> FastAPI:
                                         status_code=400)
         if "queue_timeout_seconds" in body:
             val = body["queue_timeout_seconds"]
-            if isinstance(val, bool) or not isinstance(val, (int, float)) or val <= 0:
+            if isinstance(val, bool) or not isinstance(val, (int, float)) or not math.isfinite(val) or val <= 0:
                 return JSONResponse({"error": "queue_timeout_seconds must be a positive number"},
                                     status_code=400)
             updates["queue_timeout_seconds"] = float(min(val, 600.0))
@@ -3520,7 +3521,7 @@ def create_app() -> FastAPI:
             updates["enabled"] = body["enabled"]
         if "sample_rate" in body:
             val = body["sample_rate"]
-            if isinstance(val, bool) or not isinstance(val, (int, float)) or not 0 <= val <= 1:
+            if isinstance(val, bool) or not isinstance(val, (int, float)) or not math.isfinite(val) or not 0 <= val <= 1:
                 return JSONResponse({"error": "sample_rate must be a number between 0 and 1"},
                                     status_code=400)
             updates["sample_rate"] = float(val)

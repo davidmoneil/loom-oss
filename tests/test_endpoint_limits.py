@@ -281,3 +281,21 @@ def test_error_response_carries_retry_after_header():
     err.headers = {"Retry-After": "7"}
     resp = _error_response(err, "rid")
     assert resp.status_code == 429 and resp.headers["retry-after"] == "7"
+
+
+def test_provider_patch_rejects_non_finite_queue_timeout():
+    from loom.config import LoomConfig
+    client, gw = _api_client()
+    prev_cfg, prev_lim = gw.config, gw.endpoint_limiter
+    try:
+        gw.config = LoomConfig(providers=[
+            ProviderConfig(name="box", api_base="http://box:9292/v1", max_concurrency=2)])
+        gw.endpoint_limiter = EndpointLimiter()
+        gw.endpoint_limiter.register("box", "http://box:9292/v1", 2, 30.0)
+        for bad in ("NaN", "Infinity"):
+            r = client.patch("/api/config/providers/box", content=f'{{"queue_timeout_seconds": {bad}}}',
+                             headers={"Content-Type": "application/json"})
+            assert r.status_code == 400, (bad, r.text)
+        assert client.get("/api/config/providers/box").json()["queue_timeout_seconds"] == 30.0
+    finally:
+        gw.config, gw.endpoint_limiter = prev_cfg, prev_lim
