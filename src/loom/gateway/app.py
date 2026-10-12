@@ -885,6 +885,30 @@ def _extract_prompt_text(messages: list) -> str:
     ).strip()
 
 
+_SYSTEM_REMINDER_RE = re.compile(r"<system-reminder>.*?</system-reminder>", re.DOTALL)
+
+
+def _latest_user_text(messages: list) -> str:
+    """The most recent user ask, for laya: one short item, not the whole thread.
+
+    Skips user turns that only carry tool results, and strips injected
+    ``<system-reminder>`` blocks (Claude Code adds them to user turns).
+    """
+    for m in reversed(messages):
+        if not isinstance(m, dict) or m.get("role") != "user":
+            continue
+        content = m.get("content")
+        parts = content if isinstance(content, list) else [{"type": "text", "text": content or ""}]
+        text = "\n".join(
+            p.get("text", "") for p in parts
+            if isinstance(p, dict) and p.get("type", "text") == "text"
+        )
+        text = _SYSTEM_REMINDER_RE.sub("", text).strip()
+        if text:
+            return text
+    return ""
+
+
 def _shadow_observe(gw: Any, request_id: str, source: str, messages: list) -> None:
     """Passively compare the rule detector against laya on real traffic.
 
@@ -899,7 +923,7 @@ def _shadow_observe(gw: Any, request_id: str, source: str, messages: list) -> No
     if gw.laya_shadow is None:
         return
     try:
-        prompt = _extract_prompt_text(messages)
+        prompt = _latest_user_text(messages)
         if not prompt:
             return
 

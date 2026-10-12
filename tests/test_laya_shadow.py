@@ -28,7 +28,7 @@ def _fake_response(json_data=None, status_code=200):
 GOOD_RESULT = {
     "answers": {
         "tier": {"choice": "premium", "probabilities": {"economy": 0.05, "standard": 0.15, "premium": 0.80}},
-        "needs_reasoning": {"noul": 0.9},
+        "reasoning_depth": {"type": "score", "score": 2.2},
     }
 }
 
@@ -60,7 +60,8 @@ def test_run_writes_comparison_record(tmp_path):
     assert args[0] == "http://localhost:8091/classify"
     assert kwargs["json"]["state"] == {"request": "design a system"}
     assert kwargs["json"]["checkpoint"] == "base"
-    assert "tier" in kwargs["json"]["questions"] and "needs_reasoning" in kwargs["json"]["questions"]
+    assert "tier" in kwargs["json"]["questions"] and "reasoning_depth" in kwargs["json"]["questions"]
+    assert kwargs["json"]["questions"]["reasoning_depth"]["type"] == "score"
 
     lines = log_path.read_text().strip().splitlines()
     assert len(lines) == 1
@@ -71,7 +72,9 @@ def test_run_writes_comparison_record(tmp_path):
     assert record["rule_confidence"] == 55.0
     assert record["laya_tier"] == "premium"
     assert record["laya_probabilities"] == GOOD_RESULT["answers"]["tier"]["probabilities"]
-    assert record["laya_needs_reasoning"] == 0.9
+    assert record["laya_reasoning_score"] == 2.2
+    assert record["laya_needs_reasoning"] is True  # 2.2 >= REASONING_CUTOFF
+    assert record["question_version"] == 2
     assert record["agree"] is False
     assert "laya_latency_ms" in record
     assert record["cached"] is False
@@ -275,11 +278,23 @@ def test_shadow_observe_skips_empty_prompt():
     assert sh.calls == []
 
 
-def test_shadow_observe_joins_multiple_messages():
+def test_shadow_observe_scores_only_latest_user_ask():
+    """laya scores one short item: the newest user ask, not the whole thread."""
     sh = _RecordingShadow()
     _observe(_FakeGateway(sh), [
         {"role": "system", "content": "be terse"},
+        {"role": "user", "content": "old question"},
+        {"role": "assistant", "content": "old answer"},
         {"role": "user", "content": "explain gc"},
     ])
-    assert "be terse" in sh.calls[0]["prompt"]
-    assert "explain gc" in sh.calls[0]["prompt"]
+    assert sh.calls[0]["prompt"] == "explain gc"
+
+
+def test_shadow_observe_skips_tool_result_turns_and_reminders():
+    sh = _RecordingShadow()
+    _observe(_FakeGateway(sh), [
+        {"role": "user", "content": "<system-reminder>ctx</system-reminder>refactor the parser"},
+        {"role": "assistant", "content": [{"type": "tool_use", "id": "t1", "name": "Read", "input": {}}]},
+        {"role": "user", "content": [{"type": "tool_result", "tool_use_id": "t1", "content": "file body"}]},
+    ])
+    assert sh.calls[0]["prompt"] == "refactor the parser"
