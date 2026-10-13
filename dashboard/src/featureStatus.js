@@ -27,6 +27,13 @@ export const FEATURE_STATUS = {
       'the dashboard is planned — today rules are configured in loom.yaml.',
     issue: 'https://github.com/davidmoneil/loom-oss/issues/34',
   },
+  '/tags': {
+    badge: 'In Planning',
+    summary:
+      'Tags are copied from request headers and grouped live. Adding or removing tags is ' +
+      'YAML + restart only, and header discovery starts empty after every restart.',
+    issue: 'https://github.com/davidmoneil/loom-oss/issues/155',
+  },
   '/scanner': {
     badge: 'Partial',
     summary:

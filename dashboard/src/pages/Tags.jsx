@@ -38,16 +38,7 @@ export default function Tags() {
 
   return (
     <div className="p-6">
-      <Header
-        title={
-          <span className="flex items-center gap-3">
-            Request Tags
-            <span className="rounded-full border border-amber-500/40 bg-amber-500/10 px-2 py-0.5 text-xs font-medium uppercase tracking-wide text-amber-300">
-              In planning
-            </span>
-          </span>
-        }
-        updatedAt={updatedAt} error={error} onRefresh={load}>
+      <Header title="Request Tags" updatedAt={updatedAt} error={error} onRefresh={load}>
         <select
           value={hours}
           onChange={(e) => setHours(Number(e.target.value))}
@@ -60,7 +51,7 @@ export default function Tags() {
       </Header>
 
       <div className="mt-6 rounded-lg border border-amber-500/30 bg-amber-500/5 p-4 text-sm text-gray-300">
-        <p className="mb-2 font-medium text-amber-300">In planning: this page works but is not finished.</p>
+        <p className="mb-2 font-medium text-amber-300">What this page does today, and what is not done.</p>
         <p className="mb-2">
           <span className="text-gray-200">What it does today.</span> The gateway copies selected request
           headers onto each request as tags, so usage can be grouped by them. The mapping lives in{" "}
