@@ -376,6 +376,20 @@ def _stream_stop_reason(lines: list[str]) -> Optional[str]:
     return found
 
 
+_REQUEST_PARAM_KEYS = ("tool_choice", "max_tokens", "temperature", "top_p", "thinking", "stop_sequences")
+
+
+def _request_params(body: dict) -> Optional[dict]:
+    """Non-content request settings for the content log; tools by name only."""
+    params = {k: body[k] for k in _REQUEST_PARAM_KEYS if body.get(k) is not None}
+    tools = body.get("tools") or body.get("functions")
+    if tools:
+        params["tools"] = [
+            t.get("name") or (t.get("function") or {}).get("name") for t in tools if isinstance(t, dict)
+        ]
+    return params or None
+
+
 def _record_request(
     state: GatewayState,
     *,
@@ -409,6 +423,8 @@ def _record_request(
     client_job: Optional[str] = None,
     stop_reason: Optional[str] = None,
     tags: Optional[dict] = None,
+    system: Any = None,
+    request_params: Optional[dict] = None,
 ) -> None:
     """Persist + audit a completed request. Never raises into the request path."""
     tokens_in, tokens_out, cache_read, cache_creation = _extract_tokens(usage)
@@ -590,6 +606,8 @@ def _record_request(
                 usage=usage,
                 stop_reason=stop_reason_val,
                 response_model=response_model_val,
+                system=system,
+                request_params=request_params,
             )
         except Exception:
             pass
@@ -2035,6 +2053,8 @@ def create_app() -> FastAPI:
                 "by_block_type": (
                     json.dumps(comp_by_type, separators=(",", ":")) if comp_by_type else None
                 ),
+                "system": body.get("system"),
+                "request_params": _request_params(body),
             }
 
             if stream:
@@ -2342,6 +2362,8 @@ def create_app() -> FastAPI:
                 "by_block_type": (
                     json.dumps(comp_by_type, separators=(",", ":")) if comp_by_type else None
                 ),
+                "system": body.get("system"),
+                "request_params": _request_params(body),
             }
 
             if stream:
