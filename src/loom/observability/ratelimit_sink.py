@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import json
 import logging
+import math
 import queue
 import re
 import threading
@@ -171,7 +172,9 @@ class RateLimitSink:
         self._connect = connect or self._default_connect
         self._queue: "queue.Queue[Optional[dict]]" = queue.Queue(maxsize=max(1, queue_size))
         self._conn: Any = None
-        self._last_warn = 0.0
+        # -inf, not 0.0: monotonic() counts from boot, so 0.0 would swallow the
+        # first warning on a host up less than _WARN_INTERVAL_S.
+        self._last_warn = -math.inf
         self._stop = threading.Event()
         self.dropped = 0
         cols = COLUMNS + ((AUTH_TYPE_COLUMN,) if auth_type_column else ())
