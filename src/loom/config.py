@@ -165,6 +165,11 @@ class RateLimitSinkConfig(BaseModel):
     # ``raw_headers`` ("x-loom-auth-type") instead. Needs
     # ALTER TABLE <table> ADD COLUMN auth_type text;
     auth_type_column: bool = False
+    # Also write the reply summary (turn/hop index, block types, tool names,
+    # thinking size, prefix-mismatch fields) to dedicated columns. Off by
+    # default: without it they ride inside ``raw_headers`` ("x-loom-reply").
+    # Columns are listed in docs/homelab-deploy.md.
+    reply_columns: bool = False
 
 
 class RequestTagsConfig(BaseModel):

@@ -49,6 +49,11 @@ from loom.observability.request_tags import (
     RequestTagsMiddleware,
     current_tags,
 )
+from loom.observability.reply_summary import (
+    conversation_position as _conversation_position,
+    summarize_message as _summarize_message,
+    summarize_sse as _summarize_sse,
+)
 from loom.gateway.auth import check_request_auth, gateway_keys_exist, is_public_path
 from loom.gateway.endpoint_limits import EndpointLimiter, LimitedBackend
 from loom.logging_setup import configure_logging, get_logger
@@ -425,8 +430,19 @@ def _record_request(
     tags: Optional[dict] = None,
     system: Any = None,
     request_params: Optional[dict] = None,
+    reply: Optional[dict] = None,
+    position: Optional[dict] = None,
 ) -> None:
-    """Persist + audit a completed request. Never raises into the request path."""
+    """Persist + audit a completed request. Never raises into the request path.
+
+    ``reply`` is a content-free summary of the model's reply (see
+    ``observability.reply_summary``); ``position`` is the request's
+    turn/hop index, taken from the messages before compression.
+    """
+    if reply is None and isinstance(result, dict):
+        reply = _summarize_message(result)
+    if stop_reason is None and reply:
+        stop_reason = reply.get("stop_reason")
     tokens_in, tokens_out, cache_read, cache_creation = _extract_tokens(usage)
     if tags is None:
         tags = current_tags.get()
@@ -528,6 +544,14 @@ def _record_request(
             )
             if tags:
                 audit_kwargs["tags"] = tags
+            if stop_reason:
+                audit_kwargs["stop_reason"] = stop_reason
+            if reply:
+                audit_kwargs["tool_names"] = reply.get("tool_names") or None
+                audit_kwargs["block_types"] = reply.get("block_types") or None
+            if position:
+                audit_kwargs["turn_index"] = position.get("turn_index")
+                audit_kwargs["hop_index"] = position.get("hop_index")
             if ratelimit:
                 audit_kwargs["ratelimit"] = ratelimit
             if skip_reasons_json:
@@ -570,6 +594,8 @@ def _record_request(
                 latency_ms=latency_ms,
                 stop_reason=stop_reason,
                 auth_type=auth_type,
+                reply=reply,
+                position=position,
             )
         except Exception:
             pass
@@ -594,6 +620,8 @@ def _record_request(
                 response_content = result.get("content")
                 stop_reason_val = result.get("stop_reason")
                 response_model_val = result.get("model")
+            if stop_reason_val is None:
+                stop_reason_val = stop_reason
             state.audit.log_content(
                 request_id=request_id,
                 model=model,
@@ -608,6 +636,8 @@ def _record_request(
                 response_model=response_model_val,
                 system=system,
                 request_params=request_params,
+                reply=reply,
+                position=position,
             )
         except Exception:
             pass
@@ -1574,9 +1604,11 @@ async def _wrapped_stream(
         stream_stop_reason = _stream_stop_reason(collected_lines) if collected_lines else None
     except Exception:
         stream_stop_reason = None
+    stream_reply = _summarize_sse(collected_lines) if collected_lines else None
     _record_request(
         state,
         stop_reason=stream_stop_reason,
+        reply=stream_reply,
         status_code=status,
         latency_ms=round((time.monotonic() - t0) * 1000, 2),
         usage=stream_usage,
@@ -2203,6 +2235,8 @@ def create_app() -> FastAPI:
         api_key = _provider_api_key(request) or request.headers.get("x-api-key", "") or _bearer(request)
         source = _source(request)
         stream = bool(body.get("stream", False))
+        # Turn/hop position from the client's messages, before compression.
+        position = _conversation_position(messages)
 
         # Shadow-mode observation on real traffic. Fire-and-forget, never
         # affects model selection or the response. See _shadow_observe's
@@ -2364,6 +2398,7 @@ def create_app() -> FastAPI:
                 ),
                 "system": body.get("system"),
                 "request_params": _request_params(body),
+                "position": position,
             }
 
             if stream:
@@ -2387,6 +2422,7 @@ def create_app() -> FastAPI:
                 ratelimit=rl,
                 skip_reasons=comp_stats,
                 stop_reason=result.get("stop_reason") if isinstance(result, dict) else None,
+                reply=_summarize_message(result),
                 **meta,
             )
             result = _scan_response(gw, result, provider_name, model, source)

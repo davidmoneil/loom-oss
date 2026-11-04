@@ -128,6 +128,11 @@ class AuditLogger:
         cache_creation_tokens: int = 0,
         auth_type: Optional[str] = None,
         tags: Optional[dict] = None,
+        stop_reason: Optional[str] = None,
+        tool_names: Optional[list] = None,
+        block_types: Optional[list] = None,
+        turn_index: Optional[int] = None,
+        hop_index: Optional[int] = None,
     ) -> None:
         record = {
             "ts": _utc_iso(),
@@ -165,6 +170,18 @@ class AuditLogger:
             record["ratelimit"] = ratelimit
         if skip_reasons:
             record["skip_reasons"] = skip_reasons
+        # Reply summary: what the model did (names only, never arguments) and
+        # where the request sits in the conversation.
+        if stop_reason:
+            record["stop_reason"] = stop_reason
+        if tool_names:
+            record["tool_names"] = tool_names
+        if block_types:
+            record["block_types"] = block_types
+        if turn_index is not None:
+            record["turn_index"] = turn_index
+        if hop_index is not None:
+            record["hop_index"] = hop_index
         self._write(self.audit_path, record)
 
     def log_metrics(
@@ -217,6 +234,8 @@ class AuditLogger:
         response_model: Optional[str] = None,
         system: Any = None,
         request_params: Optional[dict] = None,
+        reply: Optional[dict] = None,
+        position: Optional[dict] = None,
     ) -> None:
         """Log prompt/response content according to the content_logging level.
 
@@ -284,4 +303,8 @@ class AuditLogger:
             record["stop_reason"] = stop_reason
         if response_model:
             record["response_model"] = response_model
+        if reply:
+            record["reply"] = reply
+        if position:
+            record.update({k: v for k, v in position.items() if v is not None})
         self._write(self.content_path, record)

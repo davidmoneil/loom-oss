@@ -159,6 +159,20 @@ observability:
   #   # For a real column, run this yourself first, then set auth_type_column: true:
   #   #   ALTER TABLE api_headers ADD COLUMN auth_type text;
   #   auth_type_column: false
+  #   # Reply summary per request: stop_reason (all paths), turn_index (human
+  #   # messages so far), hop_index (model replies since the last human message),
+  #   # block types, tool names (never arguments), thinking size, and the
+  #   # anthropic-thinking-prefix-mismatch header split into fields. Stored inside
+  #   # raw_headers under "x-loom-reply" by default, no schema change needed:
+  #   #   SELECT raw_headers->'x-loom-reply'->>'hop_index', stop_reason FROM api_headers;
+  #   # For real columns, run this yourself first, then set reply_columns: true:
+  #   #   ALTER TABLE api_headers
+  #   #     ADD COLUMN turn_index int, ADD COLUMN hop_index int, ADD COLUMN message_count int,
+  #   #     ADD COLUMN block_types text, ADD COLUMN tool_names text, ADD COLUMN tool_count int,
+  #   #     ADD COLUMN thinking_chars int, ADD COLUMN prefix_mismatch_kind text,
+  #   #     ADD COLUMN prefix_mismatch_pattern text, ADD COLUMN prefix_mismatch_removed int,
+  #   #     ADD COLUMN prefix_mismatch_inserted int, ADD COLUMN prefix_mismatch_modified int;
+  #   reply_columns: false
 
 # Request tags: capture selected incoming request headers as per-request tags.
 # Tags are stored with each request (audit + metrics), can be filtered in
