@@ -27,7 +27,7 @@ from loom.observability.request_tags import (
     tag_like_pattern,
 )
 
-SCHEMA_VERSION = 17
+SCHEMA_VERSION = 18
 
 
 class PostgresStorage:
@@ -356,6 +356,23 @@ class PostgresStorage:
             ):
                 conn.execute(f"ALTER TABLE rate_limits ADD COLUMN IF NOT EXISTS {col} {typ}")
 
+        if current < 18:
+            # Conversation position + reply summary per request (issue #168):
+            # turn_index = human prompts so far, hop_index = model replies since
+            # the last prompt. Same counting compression uses (turn_shape).
+            for col, typ in (
+                ("turn_index", "INTEGER"),
+                ("hop_index", "INTEGER"),
+                ("tool_calls_this_turn", "INTEGER"),
+                ("stop_reason", "TEXT"),
+                ("tool_names", "TEXT"),
+            ):
+                conn.execute(f"ALTER TABLE metrics ADD COLUMN IF NOT EXISTS {col} {typ}")
+            conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_metrics_session_turn "
+                "ON metrics (session_id, turn_index, hop_index)"
+            )
+
         if current < SCHEMA_VERSION:
             conn.execute(
                 "INSERT INTO schema_version (version, applied_at) VALUES (%s, %s) "
@@ -423,6 +440,11 @@ class PostgresStorage:
         tokens_after: int = 0,
         by_block_type: Optional[str] = None,
         tags: Optional[str] = None,
+        turn_index: Optional[int] = None,
+        hop_index: Optional[int] = None,
+        tool_calls_this_turn: Optional[int] = None,
+        stop_reason: Optional[str] = None,
+        tool_names: Optional[str] = None,
     ) -> None:
         self.conn.execute(
             """
@@ -432,8 +454,9 @@ class PostgresStorage:
                 latency_ms, cost_estimate, compressed, compression_ratio,
                 message_count, source, tokens_saved, session_id,
                 status_code, cache_read_tokens, cache_creation_tokens, skill,
-                tier, skip_reasons, tokens_before, tokens_after, by_block_type, tags
-            ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                tier, skip_reasons, tokens_before, tokens_after, by_block_type, tags,
+                turn_index, hop_index, tool_calls_this_turn, stop_reason, tool_names
+            ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
             """,
             (
                 time.time(),
@@ -462,6 +485,11 @@ class PostgresStorage:
                 tokens_after,
                 by_block_type,
                 tags,
+                turn_index,
+                hop_index,
+                tool_calls_this_turn,
+                stop_reason,
+                tool_names,
             ),
         )
 

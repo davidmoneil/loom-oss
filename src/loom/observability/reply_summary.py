@@ -5,11 +5,11 @@ Three helpers, all pure and never raising:
 * ``summarize_sse`` / ``summarize_message``: what the model sent back
   (block types, tool names, thinking size, stop_reason). Tool arguments and
   text are never kept, only names and character counts.
-* ``conversation_position``: where this request sits in the conversation.
-  ``turn_index`` counts the human messages so far; ``hop_index`` counts the
-  model replies since the last human message (0 = the model is answering the
-  human directly, 3 = third tool round-trip). Worked out from the request
-  body alone, so it needs no stored state and survives restarts.
+* ``turn_shape`` / ``conversation_position``: where this request sits in the
+  conversation. ``turn_index`` counts the human prompts so far; ``hop_index``
+  counts the model replies since the last prompt (0 = the model is answering
+  the human directly, 3 = third tool round-trip). Compression uses the same
+  ``turn_shape``, so there is one definition of a turn.
 * ``parse_prefix_mismatch``: splits Anthropic's
   ``anthropic-thinking-prefix-mismatch`` header ("k=v; k=v") into fields.
 """
@@ -113,37 +113,83 @@ def summarize_message(result: Any) -> Optional[dict]:
         return None
 
 
-def _is_human(msg: dict) -> bool:
-    """A user message that carries no tool results was typed by a person (or a job)."""
+def is_user_prompt(msg: dict) -> bool:
+    """True for a genuine user prompt: a user message carrying text and no
+    tool_result block (tool results ride in user-role messages too)."""
+    if not isinstance(msg, dict) or msg.get("role") != "user":
+        return False
     content = msg.get("content")
     if isinstance(content, str):
-        return True
-    if isinstance(content, list):
-        return not any(
-            isinstance(b, dict) and b.get("type") == "tool_result" for b in content
-        )
-    return False
+        return bool(content.strip())
+    if not isinstance(content, list):
+        return False
+    has_text = False
+    for block in content:
+        if not isinstance(block, dict):
+            continue
+        if block.get("type") == "tool_result":
+            return False
+        if block.get("type") == "text" and str(block.get("text", "")).strip():
+            has_text = True
+    return has_text
+
+
+def turn_shape(messages: list) -> dict:
+    """Prompt/tool-call shape of a conversation. The one place Loom counts turns.
+
+    Returns user_prompts (genuine prompts), tool_calls (all tool_use blocks),
+    tool_calls_this_turn (tool_use blocks since the latest prompt),
+    hops_this_turn (model replies since the latest prompt, i.e. API round-trips)
+    and prompt_indices (message index of each prompt, oldest first). Used by
+    compression for turn-aware protection and recorded per request.
+    """
+    prompt_indices: list[int] = []
+    tool_calls = 0
+    this_turn = 0
+    hops = 0
+    for idx, msg in enumerate(messages or []):
+        if is_user_prompt(msg):
+            prompt_indices.append(idx)
+            this_turn = 0
+            hops = 0
+            continue
+        if not isinstance(msg, dict) or msg.get("role") != "assistant":
+            continue
+        hops += 1
+        content = msg.get("content")
+        if isinstance(content, list):
+            n_calls = sum(
+                1 for b in content
+                if isinstance(b, dict) and b.get("type") == "tool_use"
+            )
+            tool_calls += n_calls
+            this_turn += n_calls
+    return {
+        "user_prompts": len(prompt_indices),
+        "tool_calls": tool_calls,
+        "tool_calls_this_turn": this_turn,
+        "hops_this_turn": hops,
+        "prompt_indices": prompt_indices,
+    }
 
 
 def conversation_position(messages: Any) -> dict:
-    """Return turn_index, hop_index and message_count for a messages list."""
+    """turn_index (= user_prompts), hop_index (= hops_this_turn),
+    tool_calls_this_turn and message_count for a messages list."""
+    empty = {"turn_index": None, "hop_index": None,
+             "tool_calls_this_turn": None, "message_count": None}
     try:
         if not isinstance(messages, list):
-            return {"turn_index": None, "hop_index": None, "message_count": None}
-        turn = 0
-        hop = 0
-        for msg in messages:
-            if not isinstance(msg, dict):
-                continue
-            role = msg.get("role")
-            if role == "user" and _is_human(msg):
-                turn += 1
-                hop = 0
-            elif role == "assistant":
-                hop += 1
-        return {"turn_index": turn, "hop_index": hop, "message_count": len(messages)}
+            return empty
+        shape = turn_shape(messages)
+        return {
+            "turn_index": shape["user_prompts"],
+            "hop_index": shape["hops_this_turn"],
+            "tool_calls_this_turn": shape["tool_calls_this_turn"],
+            "message_count": len(messages),
+        }
     except Exception:
-        return {"turn_index": None, "hop_index": None, "message_count": None}
+        return empty
 
 
 def _to_int(val: Optional[str]) -> Optional[int]:

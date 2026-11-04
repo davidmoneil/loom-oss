@@ -51,6 +51,8 @@ from loom.observability.request_tags import (
 )
 from loom.observability.reply_summary import (
     conversation_position as _conversation_position,
+    is_user_prompt as _reply_is_user_prompt,
+    turn_shape as _reply_turn_shape,
     summarize_message as _summarize_message,
     summarize_sse as _summarize_sse,
 )
@@ -493,6 +495,11 @@ def _record_request(
                 tokens_after=tokens_after,
                 by_block_type=by_block_type,
                 tags=tags_json,
+                turn_index=(position or {}).get("turn_index"),
+                hop_index=(position or {}).get("hop_index"),
+                tool_calls_this_turn=(position or {}).get("tool_calls_this_turn"),
+                stop_reason=stop_reason,
+                tool_names=",".join((reply or {}).get("tool_names") or []) or None,
             )
         except Exception:
             pass
@@ -4587,60 +4594,10 @@ def _detect_compression_loop(messages: list[dict]) -> bool:
     return len(dupes) > 0
 
 
-def _is_user_prompt(msg: dict) -> bool:
-    """True for a genuine user prompt: a user message carrying text and no
-    tool_result block (tool results ride in user-role messages too)."""
-    if msg.get("role") != "user":
-        return False
-    content = msg.get("content")
-    if isinstance(content, str):
-        return bool(content.strip())
-    if not isinstance(content, list):
-        return False
-    has_text = False
-    for block in content:
-        if not isinstance(block, dict):
-            continue
-        if block.get("type") == "tool_result":
-            return False
-        if block.get("type") == "text" and str(block.get("text", "")).strip():
-            has_text = True
-    return has_text
-
-
-def _turn_shape(messages: list[dict]) -> dict:
-    """Prompt/tool-call shape of a conversation.
-
-    Returns user_prompts (genuine prompts), tool_calls (all tool_use blocks),
-    tool_calls_this_turn (tool_use blocks since the latest prompt) and
-    prompt_indices (message index of each prompt, oldest first). Recorded per
-    request so calls-between-prompts can be measured, and used for
-    turn-aware protection.
-    """
-    prompt_indices: list[int] = []
-    tool_calls = 0
-    this_turn = 0
-    for idx, msg in enumerate(messages):
-        if _is_user_prompt(msg):
-            prompt_indices.append(idx)
-            this_turn = 0
-            continue
-        if msg.get("role") != "assistant":
-            continue
-        content = msg.get("content")
-        if isinstance(content, list):
-            n_calls = sum(
-                1 for b in content
-                if isinstance(b, dict) and b.get("type") == "tool_use"
-            )
-            tool_calls += n_calls
-            this_turn += n_calls
-    return {
-        "user_prompts": len(prompt_indices),
-        "tool_calls": tool_calls,
-        "tool_calls_this_turn": this_turn,
-        "prompt_indices": prompt_indices,
-    }
+# Turn counting lives in observability.reply_summary (one definition shared
+# by compression and request logging); these names stay for callers/tests.
+_is_user_prompt = _reply_is_user_prompt
+_turn_shape = _reply_turn_shape
 
 
 def _has_cache_control(msg: dict) -> bool:
@@ -4738,6 +4695,7 @@ def _compress_messages_inline(
             "user_prompts": shape["user_prompts"],
             "tool_calls": shape["tool_calls"],
             "tool_calls_this_turn": shape["tool_calls_this_turn"],
+            "hops_this_turn": shape["hops_this_turn"],
         }
 
     mode_b = None

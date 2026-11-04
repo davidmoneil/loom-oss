@@ -281,7 +281,14 @@ FROM api_headers WHERE source='loom-oss' AND ts > now() - interval '1 day'
 GROUP BY 1 ORDER BY 1;
 ```
 
-To move these into real columns, run the `ALTER TABLE` in `loom.example.yaml` (under `reply_columns`) and set `reply_columns: true`.
+The same turn/hop numbers are also written to Loom's own `metrics` table (database `loom`, schema v18: `turn_index`, `hop_index`, `tool_calls_this_turn`, `stop_reason`, `tool_names`, indexed on `session_id, turn_index, hop_index`). Turns are counted by `turn_shape` in `observability/reply_summary.py`, the same function compression uses for turn-aware protection. Example, hops per human turn for one session:
+
+```sql
+SELECT turn_index, max(hop_index) AS hops FROM metrics
+WHERE session_id = '<id>' GROUP BY 1 ORDER BY 1;
+```
+
+To move the `api_headers` copy into real columns, run the `ALTER TABLE` in `loom.example.yaml` (under `reply_columns`) and set `reply_columns: true`.
 
 **Turn it off:** set `enabled: false` under `ratelimit_sink` in `loom.homelab.yaml`, then `docker compose -f docker-compose.homelab.yml up -d --no-deps --force-recreate loom`.
 

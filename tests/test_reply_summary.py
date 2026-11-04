@@ -86,7 +86,7 @@ def test_conversation_position_counts_hops_since_human():
         {"role": "assistant", "content": [{"type": "tool_use", "id": "t2", "name": "Read", "input": {}}]},
         _tool_result(),
     ]
-    assert conversation_position(msgs) == {"turn_index": 2, "hop_index": 2, "message_count": 7}
+    assert conversation_position(msgs) == {"turn_index": 2, "hop_index": 2, "tool_calls_this_turn": 2, "message_count": 7}
     assert conversation_position(msgs[:3])["hop_index"] == 0
     assert conversation_position(None)["turn_index"] is None
 
@@ -198,3 +198,23 @@ def test_non_stream_result_fills_reply(tmp_path):
     )
     assert sink.calls[0]["stop_reason"] == "end_turn"
     assert sink.calls[0]["reply"]["block_types"] == ["text"]
+
+
+def test_metrics_table_stores_turn_and_hop(tmp_path):
+    from loom.storage.sqlite import LoomStorage as SQLiteStorage
+
+    st = SQLiteStorage(str(tmp_path / "loom.db"))
+    for hop in range(3):
+        st.record_metrics(
+            request_id=f"r{hop}", model="m", provider="anthropic", tokens_in=1,
+            tokens_out=1, latency_ms=1.0, cost=0.0, session_id="s1",
+            turn_index=2, hop_index=hop, tool_calls_this_turn=hop,
+            stop_reason="tool_use" if hop < 2 else "end_turn", tool_names="Bash",
+        )
+    if hasattr(st, "flush"):
+        st.flush()
+    rows = st.conn.execute(
+        "SELECT turn_index, hop_index, stop_reason FROM metrics "
+        "WHERE session_id='s1' ORDER BY hop_index"
+    ).fetchall()
+    assert [tuple(r) for r in rows] == [(2, 0, "tool_use"), (2, 1, "tool_use"), (2, 2, "end_turn")]
