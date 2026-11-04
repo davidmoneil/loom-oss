@@ -53,6 +53,18 @@ AUTH_TYPE_COLUMN = "auth_type"
 # Default carrier needing no schema change: a key inside ``raw_headers``.
 AUTH_TYPE_RAW_KEY = "x-loom-auth-type"
 
+# Optional reply-summary columns, only inserted when ``reply_columns`` is on
+# (see docs/homelab-deploy.md for the ALTER TABLE). Default carrier needing no
+# schema change: a compact object inside ``raw_headers`` under ``x-loom-reply``.
+REPLY_COLUMNS = (
+    "turn_index", "hop_index", "message_count",
+    "block_types", "tool_names", "tool_count", "thinking_chars",
+    "prefix_mismatch_kind", "prefix_mismatch_pattern",
+    "prefix_mismatch_removed", "prefix_mismatch_inserted", "prefix_mismatch_modified",
+)
+REPLY_RAW_KEY = "x-loom-reply"
+PREFIX_MISMATCH_HEADER = "anthropic-thinking-prefix-mismatch"
+
 
 def _int(val: Any) -> Optional[int]:
     if val is None or isinstance(val, bool):
@@ -100,6 +112,9 @@ def build_row(
     stop_reason: Optional[str] = None,
     auth_type: Optional[str] = None,
     auth_type_column: bool = False,
+    reply: Optional[dict] = None,
+    position: Optional[dict] = None,
+    reply_columns: bool = False,
 ) -> dict:
     """Map a loom ratelimit snapshot + request metadata onto the table columns.
 
@@ -107,6 +122,10 @@ def build_row(
     ``raw_headers`` under ``x-loom-auth-type`` so the live table needs no
     schema change; with ``auth_type_column`` it is also returned under ``auth_type``
     for the optional dedicated column.
+
+    ``reply`` (from ``reply_summary.summarize_*``) and ``position`` (from
+    ``conversation_position``) work the same way: inside ``raw_headers`` under
+    ``x-loom-reply`` by default, or in ``REPLY_COLUMNS`` with ``reply_columns``.
     """
     rl = ratelimit or {}
     if auth_type is None:
@@ -116,6 +135,13 @@ def build_row(
         raw = {**(raw or {}), AUTH_TYPE_RAW_KEY: auth_type}
     else:
         auth_type = None
+    if stop_reason is None and reply:
+        stop_reason = reply.get("stop_reason")
+    extra = _reply_fields(reply, position, raw)
+    if extra and not reply_columns:
+        compact = {k: v for k, v in extra.items() if v not in (None, "", 0) or k == "hop_index"}
+        if compact:
+            raw = {**(raw or {}), REPLY_RAW_KEY: compact}
     row = {
         "request_id": rl.get("upstream_request_id"),
         "method": method,
@@ -143,11 +169,39 @@ def build_row(
     }
     if auth_type_column:
         row[AUTH_TYPE_COLUMN] = auth_type
+    if reply_columns:
+        for col in REPLY_COLUMNS:
+            row[col] = extra.get(col)
     for bucket in ("requests", "tokens", "input_tokens", "output_tokens"):
         row[f"rl_{bucket}_limit"] = _int(rl.get(f"ratelimit_{bucket}_limit"))
         row[f"rl_{bucket}_remaining"] = _int(rl.get(f"ratelimit_{bucket}_remaining"))
         row[f"rl_{bucket}_reset"] = _ts(rl.get(f"ratelimit_{bucket}_reset"))
     return row
+
+
+def _reply_fields(reply: Optional[dict], position: Optional[dict], raw: Any) -> dict:
+    """Flatten reply + position + the prefix-mismatch header into REPLY_COLUMNS."""
+    from loom.observability.reply_summary import parse_prefix_mismatch
+
+    out: dict = {}
+    pos = position or {}
+    for key in ("turn_index", "hop_index", "message_count"):
+        out[key] = _int(pos.get(key))
+    rep = reply or {}
+    out["block_types"] = ",".join(rep.get("block_types") or []) or None
+    out["tool_names"] = ",".join(rep.get("tool_names") or []) or None
+    out["tool_count"] = _int(rep.get("tool_count")) if reply else None
+    out["thinking_chars"] = _int(rep.get("thinking_chars")) if reply else None
+    pm = parse_prefix_mismatch((raw or {}).get(PREFIX_MISMATCH_HEADER)) if isinstance(raw, dict) else None
+    pm = pm or {}
+    out["prefix_mismatch_kind"] = pm.get("kind")
+    out["prefix_mismatch_pattern"] = pm.get("pattern")
+    out["prefix_mismatch_removed"] = pm.get("removed")
+    out["prefix_mismatch_inserted"] = pm.get("inserted")
+    out["prefix_mismatch_modified"] = pm.get("modified")
+    if not any(v is not None for v in out.values()):
+        return {}
+    return out
 
 
 class RateLimitSink:
@@ -162,11 +216,13 @@ class RateLimitSink:
         connect: Optional[Callable[[str], Any]] = None,
         start: bool = True,
         auth_type_column: bool = False,
+        reply_columns: bool = False,
     ) -> None:
         if not _IDENT_RE.match(table):
             raise ValueError(f"invalid ratelimit sink table name: {table!r}")
         self._dsn = dsn
         self._auth_type_column = auth_type_column
+        self._reply_columns = reply_columns
         self.table = table
         self.source = source
         self._connect = connect or self._default_connect
@@ -177,7 +233,11 @@ class RateLimitSink:
         self._last_warn = -math.inf
         self._stop = threading.Event()
         self.dropped = 0
-        cols = COLUMNS + ((AUTH_TYPE_COLUMN,) if auth_type_column else ())
+        cols = (
+            COLUMNS
+            + ((AUTH_TYPE_COLUMN,) if auth_type_column else ())
+            + (REPLY_COLUMNS if reply_columns else ())
+        )
         self._sql = "INSERT INTO {} ({}) VALUES ({})".format(
             table, ", ".join(cols), ", ".join(
                 f"%({c})s::jsonb" if c == "raw_headers" else f"%({c})s" for c in cols
@@ -210,7 +270,8 @@ class RateLimitSink:
         (minus ``source``, which comes from config)."""
         try:
             row = build_row(
-                source=self.source, auth_type_column=self._auth_type_column, **fields,
+                source=self.source, auth_type_column=self._auth_type_column,
+                reply_columns=self._reply_columns, **fields,
             )
             self._queue.put_nowait(row)
         except queue.Full:
@@ -286,6 +347,7 @@ def build_sink(cfg: Any) -> Optional[RateLimitSink]:
         return RateLimitSink(
             dsn=dsn, table=cfg.table, source=cfg.source, queue_size=cfg.queue_size,
             auth_type_column=bool(getattr(cfg, "auth_type_column", False)),
+            reply_columns=bool(getattr(cfg, "reply_columns", False)),
         )
     except Exception as exc:
         _log.warning("ratelimit sink disabled: %s", type(exc).__name__)
