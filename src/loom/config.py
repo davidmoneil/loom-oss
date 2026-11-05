@@ -20,6 +20,8 @@ from typing import Any, Optional
 import yaml
 from pydantic import BaseModel, Field
 
+from loom.pricing import ModelPrice
+
 
 class ModelConfig(BaseModel):
     model_id: str
@@ -283,6 +285,9 @@ class LoomConfig(BaseModel):
     scanner: ScannerConfig = Field(default_factory=ScannerConfig)
     laya_shadow: LayaShadowConfig = Field(default_factory=LayaShadowConfig)
     request_tags: RequestTagsConfig = Field(default_factory=RequestTagsConfig)
+    # Cost-estimate prices (USD per 1K tokens) by model id. Adds to or
+    # overrides the built-in table in loom/pricing.py. Not used for routing.
+    pricing: dict[str, ModelPrice] = Field(default_factory=dict)
 
     # ------------------------------------------------------------------ loaders
     @classmethod
@@ -291,6 +296,9 @@ class LoomConfig(BaseModel):
             data = yaml.safe_load(fh) or {}
         config = cls.model_validate(data)
         config._apply_env_overrides()
+        from loom import pricing
+
+        pricing.set_overrides(config.pricing)
         return config
 
     @classmethod

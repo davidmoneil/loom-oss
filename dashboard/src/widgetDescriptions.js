@@ -6,7 +6,8 @@ export const WIDGET_DESCRIPTIONS = {
   "overview.requests": "Total number of requests in the selected time range.",
   "overview.avgLatency":
     "Average request latency across all providers and models in the selected time range.",
-  "overview.costToday": "Total estimated cost of all requests in the selected time range.",
+  "overview.costToday":
+    "Estimated cost at API list prices of all requests in the selected time range, including prompt-cache reads and writes. Requests to a cloud model with no known price count as $0 and are shown as unpriced.",
   "overview.tokensInOut":
     "Total input tokens sent to providers and output tokens received back, summed over the selected time range.",
   "overview.activeSessions":

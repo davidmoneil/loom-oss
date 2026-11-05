@@ -43,6 +43,7 @@ from fastapi.staticfiles import StaticFiles
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from loom import __version__
+from loom import pricing
 from loom.config import LoomConfig, ModelConfig, SourcePolicy
 from loom.observability.request_tags import (
     HeaderObserver,
@@ -861,17 +862,52 @@ def _normalize_response(result: dict, provider: str, model: str) -> dict:
     return result
 
 
+def _cache_write_split(usage: Any, cache_creation: int) -> tuple[int, int]:
+    """(5-minute, 1-hour) cache-write tokens. Unsplit writes count as 5-minute."""
+    detail = usage.get("cache_creation") if isinstance(usage, dict) else None
+    if isinstance(detail, dict):
+        try:
+            w5 = int(detail.get("ephemeral_5m_input_tokens") or 0)
+            w1 = int(detail.get("ephemeral_1h_input_tokens") or 0)
+        except (TypeError, ValueError):
+            w5 = w1 = 0
+        if w5 or w1:
+            return w5, w1
+    return cache_creation, 0
+
+
+_unpriced_warned: set[str] = set()
+
+
 def _model_cost(model_cfg: Optional[ModelConfig], usage: Any) -> float:
+    """Estimated USD cost of one request.
+
+    Price source, first match wins: ``pricing:`` in loom.yaml, a non-zero price
+    on the configured model, the built-in table in loom/pricing.py. A model with
+    none of these (e.g. a local model) costs 0.
+    """
     if model_cfg is None:
         return 0.0
     tokens_in, tokens_out, cache_read, cache_creation = _extract_tokens(usage)
-    base_input = tokens_in - cache_read - cache_creation
-    input_cost = (
-        (base_input / 1000.0) * model_cfg.cost_per_1k_input
-        + (cache_read / 1000.0) * model_cfg.cost_per_1k_input * 0.1
-        + (cache_creation / 1000.0) * model_cfg.cost_per_1k_input * 2.0
-    )
-    return input_cost + (tokens_out / 1000.0) * model_cfg.cost_per_1k_output
+    w5, w1 = _cache_write_split(usage, cache_creation)
+    model_id = model_cfg.model_id
+    price = pricing.lookup_price(model_id, pricing._overrides) if pricing._overrides else None
+    if price is None and (model_cfg.cost_per_1k_input or model_cfg.cost_per_1k_output):
+        table = pricing.lookup_price(model_id)
+        price = pricing.ModelPrice(
+            input=model_cfg.cost_per_1k_input,
+            output=model_cfg.cost_per_1k_output,
+            cache_read=table.cache_read if table else None,
+        )
+    if price is None:
+        price = pricing.lookup_price(model_id)
+    if price is None:
+        if model_id and model_id.lower().startswith(("claude", "gpt", "o1", "o3", "o4", "gemini", "grok")) \
+                and model_id not in _unpriced_warned:
+            _unpriced_warned.add(model_id)
+            get_logger("loom.gateway").warning("no price for model %s: cost recorded as 0 (add it under pricing: in loom.yaml)", model_id)
+        return 0.0
+    return pricing.estimate_cost(price, tokens_in, tokens_out, cache_read, w5, w1)
 
 
 # --------------------------------------------------------------------------- #
@@ -1406,6 +1442,8 @@ def _extract_stream_usage(lines: list[str]) -> tuple[dict | None, list[str]]:
             for k in ("cache_creation_input_tokens", "cache_read_input_tokens"):
                 if msg_usage.get(k):
                     usage[k] = msg_usage[k]
+            if isinstance(msg_usage.get("cache_creation"), dict):
+                usage["cache_creation"] = msg_usage["cache_creation"]
         elif etype == "message_delta":
             evt_usage = event.get("usage", {})
             if evt_usage.get("output_tokens"):
