@@ -128,8 +128,13 @@ export default function Overview() {
           infoKey="overview.avgLatency"
         />
         <StatCard
-          label="Cost Today"
+          label={`Est. Cost (${rangeLabel})`}
           value={fmtCost(m.total_cost)}
+          sub={
+            m.unpriced_requests
+              ? `${fmtNumber(m.unpriced_requests)} requests unpriced`
+              : undefined
+          }
           loading={loading}
           infoKey="overview.costToday"
         />

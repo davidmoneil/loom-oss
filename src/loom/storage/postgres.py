@@ -714,7 +714,12 @@ class PostgresStorage:
                 COALESCE(SUM(tokens_in), 0) AS tokens_in,
                 COALESCE(SUM(tokens_out), 0) AS tokens_out,
                 COALESCE(SUM(cost_estimate), 0.0) AS cost,
-                COALESCE(AVG(latency_ms), 0.0) AS avg_latency
+                COALESCE(AVG(latency_ms), 0.0) AS avg_latency,
+                COUNT(*) FILTER (
+                    WHERE COALESCE(cost_estimate, 0) = 0
+                      AND provider IN ('anthropic', 'openai', 'gemini', 'xai')
+                      AND COALESCE(status_code, 200) < 400
+                ) AS unpriced
             FROM metrics
             WHERE timestamp >= %s
             """,
@@ -730,6 +735,7 @@ class PostgresStorage:
             "tokens_out": metric_row[2] if metric_row else 0,
             "total_cost": metric_row[3] if metric_row else 0.0,
             "avg_latency_ms": metric_row[4] if metric_row else 0.0,
+            "unpriced_requests": metric_row[5] if metric_row else 0,
         }
 
     # ------------------------------------------------------------ sessions

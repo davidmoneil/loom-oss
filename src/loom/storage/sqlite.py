@@ -711,7 +711,12 @@ class LoomStorage:
                 COALESCE(SUM(tokens_in), 0) AS tokens_in,
                 COALESCE(SUM(tokens_out), 0) AS tokens_out,
                 COALESCE(SUM(cost_estimate), 0.0) AS cost,
-                COALESCE(AVG(latency_ms), 0.0) AS avg_latency
+                COALESCE(AVG(latency_ms), 0.0) AS avg_latency,
+                COUNT(*) FILTER (
+                    WHERE COALESCE(cost_estimate, 0) = 0
+                      AND provider IN ('anthropic', 'openai', 'gemini', 'xai')
+                      AND COALESCE(status_code, 200) < 400
+                ) AS unpriced
             FROM metrics
             WHERE timestamp >= ?
             """,
@@ -727,6 +732,7 @@ class LoomStorage:
             "tokens_out": metric_rows["tokens_out"] if metric_rows else 0,
             "total_cost": metric_rows["cost"] if metric_rows else 0.0,
             "avg_latency_ms": metric_rows["avg_latency"] if metric_rows else 0.0,
+            "unpriced_requests": metric_rows["unpriced"] if metric_rows else 0,
         }
 
     # ------------------------------------------------------------ sessions
