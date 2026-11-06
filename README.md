@@ -153,6 +153,14 @@ Loom is organized into a few focused layers:
 Configuration is loaded from `loom.yaml` (see `loom.example.yaml`) with `LOOM_*` environment
 variable overrides.
 
+## Community
+
+- [ROADMAP.md](ROADMAP.md) — what's shipped and what's planned
+- [CONTRIBUTING.md](CONTRIBUTING.md) — dev setup, PR guidelines, versioning policy
+- [CHANGELOG.md](CHANGELOG.md) — release notes
+- [Issues](https://github.com/davidmoneil/loom-oss/issues) — bug reports and feature requests
+- [SECURITY.md](SECURITY.md) — private vulnerability reporting
+
 ## License
 
 Loom is **source-available** under the [PolyForm Internal Use License 1.0.0](LICENSE) —
