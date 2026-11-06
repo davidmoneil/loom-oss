@@ -43,11 +43,19 @@ from fastapi.staticfiles import StaticFiles
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from loom import __version__
+from loom import pricing
 from loom.config import LoomConfig, ModelConfig, SourcePolicy
 from loom.observability.request_tags import (
     HeaderObserver,
     RequestTagsMiddleware,
     current_tags,
+)
+from loom.observability.reply_summary import (
+    conversation_position as _conversation_position,
+    is_user_prompt as _reply_is_user_prompt,
+    turn_shape as _reply_turn_shape,
+    summarize_message as _summarize_message,
+    summarize_sse as _summarize_sse,
 )
 from loom.gateway.auth import check_request_auth, gateway_keys_exist, is_public_path
 from loom.gateway.endpoint_limits import EndpointLimiter, LimitedBackend
@@ -376,6 +384,20 @@ def _stream_stop_reason(lines: list[str]) -> Optional[str]:
     return found
 
 
+_REQUEST_PARAM_KEYS = ("tool_choice", "max_tokens", "temperature", "top_p", "thinking", "stop_sequences")
+
+
+def _request_params(body: dict) -> Optional[dict]:
+    """Non-content request settings for the content log; tools by name only."""
+    params = {k: body[k] for k in _REQUEST_PARAM_KEYS if body.get(k) is not None}
+    tools = body.get("tools") or body.get("functions")
+    if tools:
+        params["tools"] = [
+            t.get("name") or (t.get("function") or {}).get("name") for t in tools if isinstance(t, dict)
+        ]
+    return params or None
+
+
 def _record_request(
     state: GatewayState,
     *,
@@ -409,8 +431,21 @@ def _record_request(
     client_job: Optional[str] = None,
     stop_reason: Optional[str] = None,
     tags: Optional[dict] = None,
+    system: Any = None,
+    request_params: Optional[dict] = None,
+    reply: Optional[dict] = None,
+    position: Optional[dict] = None,
 ) -> None:
-    """Persist + audit a completed request. Never raises into the request path."""
+    """Persist + audit a completed request. Never raises into the request path.
+
+    ``reply`` is a content-free summary of the model's reply (see
+    ``observability.reply_summary``); ``position`` is the request's
+    turn/hop index, taken from the messages before compression.
+    """
+    if reply is None and isinstance(result, dict):
+        reply = _summarize_message(result)
+    if stop_reason is None and reply:
+        stop_reason = reply.get("stop_reason")
     tokens_in, tokens_out, cache_read, cache_creation = _extract_tokens(usage)
     if tags is None:
         tags = current_tags.get()
@@ -461,6 +496,11 @@ def _record_request(
                 tokens_after=tokens_after,
                 by_block_type=by_block_type,
                 tags=tags_json,
+                turn_index=(position or {}).get("turn_index"),
+                hop_index=(position or {}).get("hop_index"),
+                tool_calls_this_turn=(position or {}).get("tool_calls_this_turn"),
+                stop_reason=stop_reason,
+                tool_names=",".join((reply or {}).get("tool_names") or []) or None,
             )
         except Exception:
             pass
@@ -512,6 +552,14 @@ def _record_request(
             )
             if tags:
                 audit_kwargs["tags"] = tags
+            if stop_reason:
+                audit_kwargs["stop_reason"] = stop_reason
+            if reply:
+                audit_kwargs["tool_names"] = reply.get("tool_names") or None
+                audit_kwargs["block_types"] = reply.get("block_types") or None
+            if position:
+                audit_kwargs["turn_index"] = position.get("turn_index")
+                audit_kwargs["hop_index"] = position.get("hop_index")
             if ratelimit:
                 audit_kwargs["ratelimit"] = ratelimit
             if skip_reasons_json:
@@ -554,6 +602,8 @@ def _record_request(
                 latency_ms=latency_ms,
                 stop_reason=stop_reason,
                 auth_type=auth_type,
+                reply=reply,
+                position=position,
             )
         except Exception:
             pass
@@ -578,6 +628,8 @@ def _record_request(
                 response_content = result.get("content")
                 stop_reason_val = result.get("stop_reason")
                 response_model_val = result.get("model")
+            if stop_reason_val is None:
+                stop_reason_val = stop_reason
             state.audit.log_content(
                 request_id=request_id,
                 model=model,
@@ -590,6 +642,10 @@ def _record_request(
                 usage=usage,
                 stop_reason=stop_reason_val,
                 response_model=response_model_val,
+                system=system,
+                request_params=request_params,
+                reply=reply,
+                position=position,
             )
         except Exception:
             pass
@@ -806,17 +862,52 @@ def _normalize_response(result: dict, provider: str, model: str) -> dict:
     return result
 
 
+def _cache_write_split(usage: Any, cache_creation: int) -> tuple[int, int]:
+    """(5-minute, 1-hour) cache-write tokens. Unsplit writes count as 5-minute."""
+    detail = usage.get("cache_creation") if isinstance(usage, dict) else None
+    if isinstance(detail, dict):
+        try:
+            w5 = int(detail.get("ephemeral_5m_input_tokens") or 0)
+            w1 = int(detail.get("ephemeral_1h_input_tokens") or 0)
+        except (TypeError, ValueError):
+            w5 = w1 = 0
+        if w5 or w1:
+            return w5, w1
+    return cache_creation, 0
+
+
+_unpriced_warned: set[str] = set()
+
+
 def _model_cost(model_cfg: Optional[ModelConfig], usage: Any) -> float:
+    """Estimated USD cost of one request.
+
+    Price source, first match wins: ``pricing:`` in loom.yaml, a non-zero price
+    on the configured model, the built-in table in loom/pricing.py. A model with
+    none of these (e.g. a local model) costs 0.
+    """
     if model_cfg is None:
         return 0.0
     tokens_in, tokens_out, cache_read, cache_creation = _extract_tokens(usage)
-    base_input = tokens_in - cache_read - cache_creation
-    input_cost = (
-        (base_input / 1000.0) * model_cfg.cost_per_1k_input
-        + (cache_read / 1000.0) * model_cfg.cost_per_1k_input * 0.1
-        + (cache_creation / 1000.0) * model_cfg.cost_per_1k_input * 2.0
-    )
-    return input_cost + (tokens_out / 1000.0) * model_cfg.cost_per_1k_output
+    w5, w1 = _cache_write_split(usage, cache_creation)
+    model_id = model_cfg.model_id
+    price = pricing.lookup_price(model_id, pricing._overrides) if pricing._overrides else None
+    if price is None and (model_cfg.cost_per_1k_input or model_cfg.cost_per_1k_output):
+        table = pricing.lookup_price(model_id)
+        price = pricing.ModelPrice(
+            input=model_cfg.cost_per_1k_input,
+            output=model_cfg.cost_per_1k_output,
+            cache_read=table.cache_read if table else None,
+        )
+    if price is None:
+        price = pricing.lookup_price(model_id)
+    if price is None:
+        if model_id and model_id.lower().startswith(("claude", "gpt", "o1", "o3", "o4", "gemini", "grok")) \
+                and model_id not in _unpriced_warned:
+            _unpriced_warned.add(model_id)
+            get_logger("loom.gateway").warning("no price for model %s: cost recorded as 0 (add it under pricing: in loom.yaml)", model_id)
+        return 0.0
+    return pricing.estimate_cost(price, tokens_in, tokens_out, cache_read, w5, w1)
 
 
 # --------------------------------------------------------------------------- #
@@ -1351,6 +1442,8 @@ def _extract_stream_usage(lines: list[str]) -> tuple[dict | None, list[str]]:
             for k in ("cache_creation_input_tokens", "cache_read_input_tokens"):
                 if msg_usage.get(k):
                     usage[k] = msg_usage[k]
+            if isinstance(msg_usage.get("cache_creation"), dict):
+                usage["cache_creation"] = msg_usage["cache_creation"]
         elif etype == "message_delta":
             evt_usage = event.get("usage", {})
             if evt_usage.get("output_tokens"):
@@ -1556,9 +1649,11 @@ async def _wrapped_stream(
         stream_stop_reason = _stream_stop_reason(collected_lines) if collected_lines else None
     except Exception:
         stream_stop_reason = None
+    stream_reply = _summarize_sse(collected_lines) if collected_lines else None
     _record_request(
         state,
         stop_reason=stream_stop_reason,
+        reply=stream_reply,
         status_code=status,
         latency_ms=round((time.monotonic() - t0) * 1000, 2),
         usage=stream_usage,
@@ -2035,6 +2130,8 @@ def create_app() -> FastAPI:
                 "by_block_type": (
                     json.dumps(comp_by_type, separators=(",", ":")) if comp_by_type else None
                 ),
+                "system": body.get("system"),
+                "request_params": _request_params(body),
             }
 
             if stream:
@@ -2183,6 +2280,8 @@ def create_app() -> FastAPI:
         api_key = _provider_api_key(request) or request.headers.get("x-api-key", "") or _bearer(request)
         source = _source(request)
         stream = bool(body.get("stream", False))
+        # Turn/hop position from the client's messages, before compression.
+        position = _conversation_position(messages)
 
         # Shadow-mode observation on real traffic. Fire-and-forget, never
         # affects model selection or the response. See _shadow_observe's
@@ -2342,6 +2441,9 @@ def create_app() -> FastAPI:
                 "by_block_type": (
                     json.dumps(comp_by_type, separators=(",", ":")) if comp_by_type else None
                 ),
+                "system": body.get("system"),
+                "request_params": _request_params(body),
+                "position": position,
             }
 
             if stream:
@@ -2365,6 +2467,7 @@ def create_app() -> FastAPI:
                 ratelimit=rl,
                 skip_reasons=comp_stats,
                 stop_reason=result.get("stop_reason") if isinstance(result, dict) else None,
+                reply=_summarize_message(result),
                 **meta,
             )
             result = _scan_response(gw, result, provider_name, model, source)
@@ -4529,60 +4632,10 @@ def _detect_compression_loop(messages: list[dict]) -> bool:
     return len(dupes) > 0
 
 
-def _is_user_prompt(msg: dict) -> bool:
-    """True for a genuine user prompt: a user message carrying text and no
-    tool_result block (tool results ride in user-role messages too)."""
-    if msg.get("role") != "user":
-        return False
-    content = msg.get("content")
-    if isinstance(content, str):
-        return bool(content.strip())
-    if not isinstance(content, list):
-        return False
-    has_text = False
-    for block in content:
-        if not isinstance(block, dict):
-            continue
-        if block.get("type") == "tool_result":
-            return False
-        if block.get("type") == "text" and str(block.get("text", "")).strip():
-            has_text = True
-    return has_text
-
-
-def _turn_shape(messages: list[dict]) -> dict:
-    """Prompt/tool-call shape of a conversation.
-
-    Returns user_prompts (genuine prompts), tool_calls (all tool_use blocks),
-    tool_calls_this_turn (tool_use blocks since the latest prompt) and
-    prompt_indices (message index of each prompt, oldest first). Recorded per
-    request so calls-between-prompts can be measured, and used for
-    turn-aware protection.
-    """
-    prompt_indices: list[int] = []
-    tool_calls = 0
-    this_turn = 0
-    for idx, msg in enumerate(messages):
-        if _is_user_prompt(msg):
-            prompt_indices.append(idx)
-            this_turn = 0
-            continue
-        if msg.get("role") != "assistant":
-            continue
-        content = msg.get("content")
-        if isinstance(content, list):
-            n_calls = sum(
-                1 for b in content
-                if isinstance(b, dict) and b.get("type") == "tool_use"
-            )
-            tool_calls += n_calls
-            this_turn += n_calls
-    return {
-        "user_prompts": len(prompt_indices),
-        "tool_calls": tool_calls,
-        "tool_calls_this_turn": this_turn,
-        "prompt_indices": prompt_indices,
-    }
+# Turn counting lives in observability.reply_summary (one definition shared
+# by compression and request logging); these names stay for callers/tests.
+_is_user_prompt = _reply_is_user_prompt
+_turn_shape = _reply_turn_shape
 
 
 def _has_cache_control(msg: dict) -> bool:
@@ -4680,6 +4733,7 @@ def _compress_messages_inline(
             "user_prompts": shape["user_prompts"],
             "tool_calls": shape["tool_calls"],
             "tool_calls_this_turn": shape["tool_calls_this_turn"],
+            "hops_this_turn": shape["hops_this_turn"],
         }
 
     mode_b = None

@@ -29,7 +29,7 @@ from loom.observability.request_tags import (
     tag_like_pattern,
 )
 
-SCHEMA_VERSION = 17
+SCHEMA_VERSION = 18
 
 # Compression-cache entries live this long, matching the Postgres backend's
 # "NOW() + INTERVAL '7 days'".
@@ -441,6 +441,24 @@ class LoomStorage:
                 except sqlite3.OperationalError:
                     pass
 
+        if current < 18:
+            # Conversation position + reply summary per request (issue #168).
+            for col, typ in (
+                ("turn_index", "INTEGER"),
+                ("hop_index", "INTEGER"),
+                ("tool_calls_this_turn", "INTEGER"),
+                ("stop_reason", "TEXT"),
+                ("tool_names", "TEXT"),
+            ):
+                try:
+                    c.execute(f"ALTER TABLE metrics ADD COLUMN {col} {typ}")
+                except sqlite3.OperationalError:
+                    pass
+            c.execute(
+                "CREATE INDEX IF NOT EXISTS idx_metrics_session_turn "
+                "ON metrics (session_id, turn_index, hop_index)"
+            )
+
         if current < SCHEMA_VERSION:
             c.execute(
                 "INSERT OR REPLACE INTO schema_version (version, applied_at) VALUES (?, ?)",
@@ -510,6 +528,11 @@ class LoomStorage:
         tokens_after: int = 0,
         by_block_type: Optional[str] = None,
         tags: Optional[str] = None,
+        turn_index: Optional[int] = None,
+        hop_index: Optional[int] = None,
+        tool_calls_this_turn: Optional[int] = None,
+        stop_reason: Optional[str] = None,
+        tool_names: Optional[str] = None,
     ) -> None:
         with self._write_lock:
             self.conn.execute(
@@ -520,8 +543,9 @@ class LoomStorage:
                     latency_ms, cost_estimate, compressed, compression_ratio,
                     message_count, source, tokens_saved, session_id,
                     status_code, cache_read_tokens, cache_creation_tokens, skill,
-                    tier, skip_reasons, tokens_before, tokens_after, by_block_type, tags
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    tier, skip_reasons, tokens_before, tokens_after, by_block_type, tags,
+                    turn_index, hop_index, tool_calls_this_turn, stop_reason, tool_names
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     time.time(),
@@ -550,6 +574,11 @@ class LoomStorage:
                     tokens_after,
                     by_block_type,
                     tags,
+                    turn_index,
+                    hop_index,
+                    tool_calls_this_turn,
+                    stop_reason,
+                    tool_names,
                 ),
             )
             self._schedule_flush()
@@ -682,7 +711,12 @@ class LoomStorage:
                 COALESCE(SUM(tokens_in), 0) AS tokens_in,
                 COALESCE(SUM(tokens_out), 0) AS tokens_out,
                 COALESCE(SUM(cost_estimate), 0.0) AS cost,
-                COALESCE(AVG(latency_ms), 0.0) AS avg_latency
+                COALESCE(AVG(latency_ms), 0.0) AS avg_latency,
+                COUNT(*) FILTER (
+                    WHERE COALESCE(cost_estimate, 0) = 0
+                      AND provider IN ('anthropic', 'openai', 'gemini', 'xai')
+                      AND COALESCE(status_code, 200) < 400
+                ) AS unpriced
             FROM metrics
             WHERE timestamp >= ?
             """,
@@ -698,6 +732,7 @@ class LoomStorage:
             "tokens_out": metric_rows["tokens_out"] if metric_rows else 0,
             "total_cost": metric_rows["cost"] if metric_rows else 0.0,
             "avg_latency_ms": metric_rows["avg_latency"] if metric_rows else 0.0,
+            "unpriced_requests": metric_rows["unpriced"] if metric_rows else 0,
         }
 
     # ------------------------------------------------------------ sessions

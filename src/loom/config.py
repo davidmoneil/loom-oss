@@ -20,6 +20,8 @@ from typing import Any, Optional
 import yaml
 from pydantic import BaseModel, Field
 
+from loom.pricing import ModelPrice
+
 
 class ModelConfig(BaseModel):
     model_id: str
@@ -165,6 +167,11 @@ class RateLimitSinkConfig(BaseModel):
     # ``raw_headers`` ("x-loom-auth-type") instead. Needs
     # ALTER TABLE <table> ADD COLUMN auth_type text;
     auth_type_column: bool = False
+    # Also write the reply summary (turn/hop index, block types, tool names,
+    # thinking size, prefix-mismatch fields) to dedicated columns. Off by
+    # default: without it they ride inside ``raw_headers`` ("x-loom-reply").
+    # Columns are listed in docs/homelab-deploy.md.
+    reply_columns: bool = False
 
 
 class RequestTagsConfig(BaseModel):
@@ -278,6 +285,9 @@ class LoomConfig(BaseModel):
     scanner: ScannerConfig = Field(default_factory=ScannerConfig)
     laya_shadow: LayaShadowConfig = Field(default_factory=LayaShadowConfig)
     request_tags: RequestTagsConfig = Field(default_factory=RequestTagsConfig)
+    # Cost-estimate prices (USD per 1K tokens) by model id. Adds to or
+    # overrides the built-in table in loom/pricing.py. Not used for routing.
+    pricing: dict[str, ModelPrice] = Field(default_factory=dict)
 
     # ------------------------------------------------------------------ loaders
     @classmethod
@@ -286,6 +296,9 @@ class LoomConfig(BaseModel):
             data = yaml.safe_load(fh) or {}
         config = cls.model_validate(data)
         config._apply_env_overrides()
+        from loom import pricing
+
+        pricing.set_overrides(config.pricing)
         return config
 
     @classmethod

@@ -302,3 +302,13 @@ def test_audit_skill_filter(storage):
     page = storage.get_audit_entries(limit=10, skill="end-session")
     assert page["total"] == 1
     assert page["entries"][0]["request_id"] == "req-skill-1"
+
+
+def test_routing_stats_counts_unpriced_cloud_requests(storage):
+    _record_request(storage, f"req-{uuid.uuid4().hex[:12]}", model="claude-x", cost=0.0)
+    _record_request(storage, f"req-{uuid.uuid4().hex[:12]}", model="claude-y", cost=0.5)
+    _record_request(
+        storage, f"req-{uuid.uuid4().hex[:12]}", model="claude-z", cost=0.0, status_code=500
+    )
+    stats = storage.get_routing_stats(hours=1)
+    assert stats["unpriced_requests"] == 1

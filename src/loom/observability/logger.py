@@ -128,6 +128,11 @@ class AuditLogger:
         cache_creation_tokens: int = 0,
         auth_type: Optional[str] = None,
         tags: Optional[dict] = None,
+        stop_reason: Optional[str] = None,
+        tool_names: Optional[list] = None,
+        block_types: Optional[list] = None,
+        turn_index: Optional[int] = None,
+        hop_index: Optional[int] = None,
     ) -> None:
         record = {
             "ts": _utc_iso(),
@@ -165,6 +170,18 @@ class AuditLogger:
             record["ratelimit"] = ratelimit
         if skip_reasons:
             record["skip_reasons"] = skip_reasons
+        # Reply summary: what the model did (names only, never arguments) and
+        # where the request sits in the conversation.
+        if stop_reason:
+            record["stop_reason"] = stop_reason
+        if tool_names:
+            record["tool_names"] = tool_names
+        if block_types:
+            record["block_types"] = block_types
+        if turn_index is not None:
+            record["turn_index"] = turn_index
+        if hop_index is not None:
+            record["hop_index"] = hop_index
         self._write(self.audit_path, record)
 
     def log_metrics(
@@ -187,6 +204,21 @@ class AuditLogger:
         }
         self._write(self.metrics_path, record)
 
+    def _scan_system(self, system: Any, source: str, provider: str) -> Any:
+        """Scan a system prompt: a string, or Anthropic text blocks."""
+        if isinstance(system, str):
+            return self._scanner.apply(system, source=source, provider=provider)[0]
+        if isinstance(system, list):
+            out = []
+            for block in system:
+                if isinstance(block, dict) and isinstance(block.get("text"), str):
+                    text, _ = self._scanner.apply(block["text"], source=source, provider=provider)
+                    out.append({**block, "text": text})
+                else:
+                    out.append(block)
+            return out
+        return system
+
     def log_content(
         self,
         request_id: str,
@@ -200,8 +232,16 @@ class AuditLogger:
         usage: Optional[dict] = None,
         stop_reason: Optional[str] = None,
         response_model: Optional[str] = None,
+        system: Any = None,
+        request_params: Optional[dict] = None,
+        reply: Optional[dict] = None,
+        position: Optional[dict] = None,
     ) -> None:
         """Log prompt/response content according to the content_logging level.
+
+        ``system`` (the request's system prompt, string or block list) is scanned
+        like message text. ``request_params`` holds non-content settings (tool
+        names, tool_choice, max_tokens, temperature, thinking) and is logged as is.
 
         Levels:
           off       — no-op
@@ -234,18 +274,26 @@ class AuditLogger:
             if response_text:
                 scanned_resp, _ = self._scanner.apply(response_text, source=source, provider=provider)
                 record["response"] = scanned_resp
+            if system:
+                record["system"] = self._scan_system(system, source, provider)
         elif content_logging == "full":
             if self._scanner is not None:
                 record["messages"] = self._scanner.sanitize_log_entry({"m": messages})["m"]
                 if response_text:
                     record["response"] = self._scanner.sanitize_log_entry({"r": response_text})["r"]
+                if system:
+                    record["system"] = self._scanner.sanitize_log_entry({"s": system})["s"]
             else:
                 record["messages"] = messages
                 if response_text:
                     record["response"] = response_text
+                if system:
+                    record["system"] = system
         else:
             return
 
+        if request_params:
+            record["request_params"] = request_params
         record["message_count"] = len(messages)
         if response_content:
             record["response_content"] = response_content
@@ -255,4 +303,8 @@ class AuditLogger:
             record["stop_reason"] = stop_reason
         if response_model:
             record["response_model"] = response_model
+        if reply:
+            record["reply"] = reply
+        if position:
+            record.update({k: v for k, v in position.items() if v is not None})
         self._write(self.content_path, record)

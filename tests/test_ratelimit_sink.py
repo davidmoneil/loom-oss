@@ -188,6 +188,19 @@ def test_fail_open_when_db_down_warns_once_per_minute(caplog):
     assert len(conn.rows) == 1
 
 
+def test_first_warning_fires_on_freshly_booted_host(caplog, monkeypatch):
+    # monotonic() counts from boot; a host up 5s must still get the first warning
+    monkeypatch.setattr(time, "monotonic", lambda: 5.0)
+
+    def bad_connect(dsn):
+        raise ConnectionError("refused")
+
+    sink = RateLimitSink("dsn", connect=bad_connect, start=False)
+    with caplog.at_level(logging.WARNING, logger="loom.ratelimit_sink"):
+        assert sink.flush_one({c: None for c in COLUMNS}) is False
+    assert [r for r in caplog.records if "write failed" in r.getMessage()]
+
+
 # ------------------------------------------------------------------ gateway wiring
 class _SpySink:
     def __init__(self, raises=False):

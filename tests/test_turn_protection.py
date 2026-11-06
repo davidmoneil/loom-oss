@@ -78,7 +78,7 @@ def test_turn_protection_capped():
     _compress_messages_inline(HalvingProcessor(), msgs, config=_cfg(protect_turns=1, turn_max=20), stats=stats)
     assert stats["protected_recency"] == 20
     assert stats["protected_turn"] == 14
-    assert stats["turn"] == {"user_prompts": 1, "tool_calls": 40, "tool_calls_this_turn": 40}
+    assert stats["turn"] == {"user_prompts": 1, "tool_calls": 40, "tool_calls_this_turn": 40, "hops_this_turn": 40}
 
 
 def test_calls_per_prompt_groups_by_session_and_turn():

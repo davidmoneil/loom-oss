@@ -273,6 +273,23 @@ docker exec postgres-unified psql -U <user> -d pulse -At -c \
   "SELECT count(*), max(ts), string_agg(DISTINCT raw_headers->>'x-loom-auth-type', ',') FROM api_headers WHERE source='loom-oss' AND ts > now() - interval '10 minutes'"
 ```
 
+**Reply summary (issue #168):** each row also carries what the model did and where the request sits in the conversation, inside `raw_headers` under `x-loom-reply` (`turn_index`, `hop_index`, `message_count`, `block_types`, `tool_names`, `tool_count`, `thinking_chars`, `prefix_mismatch_*`). `stop_reason` is now filled on stream and non-stream paths. `hop_index` 0 means the model is answering the human directly; 3 means the third tool round-trip since the human last spoke. Tool arguments and text are never stored. Example: tool rounds per human turn, last day:
+
+```sql
+SELECT (raw_headers->'x-loom-reply'->>'hop_index')::int AS hop, count(*)
+FROM api_headers WHERE source='loom-oss' AND ts > now() - interval '1 day'
+GROUP BY 1 ORDER BY 1;
+```
+
+The same turn/hop numbers are also written to Loom's own `metrics` table (database `loom`, schema v18: `turn_index`, `hop_index`, `tool_calls_this_turn`, `stop_reason`, `tool_names`, indexed on `session_id, turn_index, hop_index`). Turns are counted by `turn_shape` in `observability/reply_summary.py`, the same function compression uses for turn-aware protection. Example, hops per human turn for one session:
+
+```sql
+SELECT turn_index, max(hop_index) AS hops FROM metrics
+WHERE session_id = '<id>' GROUP BY 1 ORDER BY 1;
+```
+
+To move the `api_headers` copy into real columns, run the `ALTER TABLE` in `loom.example.yaml` (under `reply_columns`) and set `reply_columns: true`.
+
 **Turn it off:** set `enabled: false` under `ratelimit_sink` in `loom.homelab.yaml`, then `docker compose -f docker-compose.homelab.yml up -d --no-deps --force-recreate loom`.
 
 **Rollback image:** `loom-oss-loom:pre-2026-10-06-sink` is the build from before #130 and #132. Run `docker tag loom-oss-loom:pre-2026-10-06-sink loom-oss-loom`, then recreate as above.
