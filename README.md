@@ -98,6 +98,10 @@ The gateway serves a built-in React dashboard at its root URL (`http://localhost
 prompt/response detail), Sessions, Costs, Metrics, Models, Routing, Rate Limits,
 Governor, Data Protection (Scanner), and Settings.
 
+![Loom dashboard Overview page showing request volume, model distribution, token flow and cache hits](docs/images/dashboard-overview.png)
+
+*Overview page after 25 sample requests against a stub upstream (no real provider calls).*
+
 Some sections are marked **In Planning** in the UI — the page shows live data but part
 of its functionality (e.g., editing configuration from the dashboard) is still being
 built. Each badge links to the tracked GitHub issue explaining current state and what's
