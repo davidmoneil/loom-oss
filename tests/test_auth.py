@@ -18,6 +18,7 @@ def gw_client(tmp_path):
     gw = app.state.gateway
     prev_storage = gw.storage
     prev_cache = getattr(gw, "_gateway_keys_exist", None)
+    prev_flags = (gw.storage_unavailable, gw.storage_error)
     storage = LoomStorage(str(tmp_path / "auth-test.db"))
     storage.connect()
     gw.storage = storage
@@ -28,6 +29,11 @@ def gw_client(tmp_path):
         storage.close()
         gw.storage = prev_storage
         gw._gateway_keys_exist = prev_cache
+        gw.storage_unavailable, gw.storage_error = prev_flags
+        task = gw.storage_reconnect_task
+        if task is not None and not task.done():
+            task.cancel()
+        gw.storage_reconnect_task = None
 
 
 def test_no_keys_fail_open_but_reported(gw_client):
@@ -228,3 +234,81 @@ def test_attach_storage_failure_marks_unavailable():
     assert gw.storage is None
     assert gw.storage_unavailable is True
     assert gw.storage_error == "ConnectionError"
+
+
+async def test_runtime_error_marks_degraded_and_single_reconnect(tmp_path):
+    import asyncio
+
+    from loom.gateway import app as appmod
+    from loom.gateway.auth import STORAGE_UNAVAILABLE, check_request_auth
+
+    gw = appmod.GatewayState()
+    broken = LoomStorage(str(tmp_path / "broken.db"))
+    broken.connect()
+
+    def boom():
+        raise RuntimeError("connection lost")
+
+    broken.list_gateway_keys = boom
+    gw.storage = broken
+    gw._gateway_keys_exist = None
+
+    gate = asyncio.Event()
+    attempts = {"n": 0}
+
+    def factory(cfg):
+        attempts["n"] += 1
+        return LoomStorage(str(tmp_path / "recovered.db"))
+
+    real_reconnect = appmod._storage_reconnect
+
+    async def gated(state, factory_=None, **kw):
+        await gate.wait()
+        return await real_reconnect(state, factory_, initial_delay=0, **kw)
+
+    orig = appmod._storage_reconnect
+    appmod._storage_reconnect = gated
+    orig_create = appmod.create_storage
+    appmod.create_storage = factory
+    try:
+        for _ in range(3):
+            assert check_request_auth("/api/config", "", "", gw, False) == STORAGE_UNAVAILABLE
+            appmod.mark_storage_failed(gw, RuntimeError("x"), factory)
+        assert gw.storage_unavailable is True
+        assert gw.storage_error == "RuntimeError"
+        first = gw.storage_reconnect_task
+        assert first is not None and not first.done()
+        appmod.mark_storage_failed(gw, RuntimeError("x"), factory)
+        assert gw.storage_reconnect_task is first  # exactly one task
+
+        gate.set()
+        await first
+        assert attempts["n"] == 1
+        assert gw.storage_unavailable is False
+        assert gw.storage is not None
+        gw.storage.close()
+    finally:
+        appmod._storage_reconnect = orig
+        appmod.create_storage = orig_create
+
+
+async def test_lifespan_shutdown_awaits_reconnect_task(monkeypatch):
+    import asyncio
+
+    from loom.gateway import app as appmod
+
+    cancelled = {"done": False}
+
+    async def forever(state, factory=None, **kw):
+        try:
+            await asyncio.sleep(3600)
+        except asyncio.CancelledError:
+            await asyncio.sleep(0)
+            cancelled["done"] = True
+            raise
+
+    monkeypatch.setattr(appmod, "_storage_reconnect", forever)
+    monkeypatch.setattr(appmod, "_attach_storage", lambda state, factory=None: False)
+    async with appmod.lifespan(appmod.app):
+        await asyncio.sleep(0.01)  # let the reconnect task start
+    assert cancelled["done"] is True

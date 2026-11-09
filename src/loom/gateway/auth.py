@@ -54,6 +54,16 @@ def gateway_keys_exist(gw) -> bool:
     return cached
 
 
+def _note_storage_error(gw, exc: Exception) -> None:
+    """Report a runtime storage error so /health degrades and reconnect starts."""
+    try:
+        from loom.gateway.app import mark_storage_failed
+
+        mark_storage_failed(gw, exc)
+    except Exception:
+        pass
+
+
 def check_request_auth(
     path: str,
     raw_key: str,
@@ -74,7 +84,8 @@ def check_request_auth(
         return None  # storage not configured at all (embedded/test use)
     try:
         keys_exist = gateway_keys_exist(gw)
-    except Exception:
+    except Exception as exc:
+        _note_storage_error(gw, exc)
         return STORAGE_UNAVAILABLE
     if not keys_exist:
         return None  # fail-open: no keys provisioned yet (loudly reported)
@@ -87,7 +98,8 @@ def check_request_auth(
     if raw_key:
         try:
             valid = gw.storage.validate_gateway_key(raw_key)
-        except Exception:
+        except Exception as exc:
+            _note_storage_error(gw, exc)
             return STORAGE_UNAVAILABLE
         if valid:
             return None
