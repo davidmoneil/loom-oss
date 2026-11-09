@@ -197,6 +197,7 @@ class GatewayState:
         # it must never be read as "no keys provisioned".
         self.storage_unavailable: bool = False
         self.storage_error: Optional[str] = None
+        self.storage_reconnect_task: Optional[asyncio.Task] = None
         self.audit: Any = None
         self.ratelimit_sink: Any = None
         self.routing: Any = None
@@ -1735,6 +1736,36 @@ def _attach_storage(state: "GatewayState", factory=None) -> bool:
     return True
 
 
+def mark_storage_failed(state: "GatewayState", exc: BaseException, factory=None) -> None:
+    """Flip to degraded after a runtime storage error and start one reconnect.
+
+    Safe to call repeatedly: only one reconnect task runs at a time.
+    """
+    if not state.storage_unavailable:
+        get_logger("loom.gateway").critical(
+            "STORAGE UNAVAILABLE (%s): protected API endpoints return 503 "
+            "until the storage backend reconnects; retrying in background.",
+            type(exc).__name__,
+        )
+        old = state.storage
+        state.storage = None
+        state.storage_unavailable = True
+        state.storage_error = type(exc).__name__
+        if old is not None:
+            try:
+                old.close()
+            except Exception:
+                pass
+    task = state.storage_reconnect_task
+    if task is None or task.done():
+        try:
+            state.storage_reconnect_task = asyncio.get_running_loop().create_task(
+                _storage_reconnect(state, factory)
+            )
+        except RuntimeError:
+            pass  # no running loop (sync/test use); lifespan owns reconnects
+
+
 async def _storage_reconnect(
     state: "GatewayState",
     factory=None,
@@ -1793,12 +1824,11 @@ async def lifespan(app: FastAPI):
         except ImportError:
             pass
 
-    storage_reconnect: Optional[asyncio.Task] = None
     if not _attach_storage(state):
         # Fail closed: protected endpoints answer 503 while storage is down
         # (see auth.check_request_auth). Keep retrying in the background so a
         # gateway that started before its database recovers on its own.
-        storage_reconnect = asyncio.create_task(_storage_reconnect(state))
+        state.storage_reconnect_task = asyncio.create_task(_storage_reconnect(state))
 
     if ThrottleGovernor is not None:
         try:
@@ -1922,8 +1952,13 @@ async def lifespan(app: FastAPI):
         yield
     finally:
         janitor.cancel()
-        if storage_reconnect is not None:
-            storage_reconnect.cancel()
+        reconnect = state.storage_reconnect_task
+        if reconnect is not None:
+            reconnect.cancel()
+            try:
+                await reconnect
+            except (asyncio.CancelledError, Exception):
+                pass
         if state.variants is not None:
             try:
                 state.variants.close()
