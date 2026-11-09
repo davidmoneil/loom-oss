@@ -27,6 +27,8 @@ class HealthResponse(ObservabilityResponse):
     version: str | None = None
     # False means no gateway keys exist and the API is running open.
     auth_enabled: bool | None = None
+    # "ok", or "unavailable" when the storage backend could not connect.
+    storage: str | None = None
     uptime_seconds: float | None = None
     checks: dict[str, Any] = {}
 

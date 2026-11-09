@@ -57,7 +57,12 @@ from loom.observability.reply_summary import (
     summarize_message as _summarize_message,
     summarize_sse as _summarize_sse,
 )
-from loom.gateway.auth import check_request_auth, gateway_keys_exist, is_public_path
+from loom.gateway.auth import (
+    STORAGE_UNAVAILABLE,
+    check_request_auth,
+    gateway_keys_exist,
+    is_public_path,
+)
 from loom.gateway.endpoint_limits import EndpointLimiter, LimitedBackend
 from loom.logging_setup import configure_logging, get_logger
 from loom.netcheck import UnsafeURLError, validate_outbound_url
@@ -187,6 +192,11 @@ class GatewayState:
         # model id / display name -> (provider_name, ModelConfig)
         self.model_index: dict[str, tuple[str, ModelConfig]] = {}
         self.storage: Optional[LoomStorage] = None
+        # Set when the configured storage backend failed to connect. Auth then
+        # fails CLOSED (protected paths return 503) until a reconnect succeeds;
+        # it must never be read as "no keys provisioned".
+        self.storage_unavailable: bool = False
+        self.storage_error: Optional[str] = None
         self.audit: Any = None
         self.ratelimit_sink: Any = None
         self.routing: Any = None
@@ -1669,6 +1679,84 @@ async def _wrapped_stream(
 # --------------------------------------------------------------------------- #
 #  Lifespan
 # --------------------------------------------------------------------------- #
+def _log_storage_ready(state: "GatewayState") -> None:
+    """Log the storage target and auth posture after a successful connect."""
+    log = get_logger("loom.gateway")
+    # Split-brain guard: the live deployment once silently wrote metrics
+    # to the wrong Postgres database for a month because the resolved
+    # DSN was never surfaced anywhere. Log host+db (never credentials).
+    if state.config.storage.backend == "postgres":
+        host, db = _dsn_host_db(state.config.storage.postgres_dsn)
+        log.info("storage backend: postgres host=%s db=%s", host, db)
+    else:
+        log.info("storage backend: sqlite path=%s", state.config.storage.database_path)
+
+    # Auth posture at a glance. Without keys the whole API is open — that's
+    # intended for first-run setup, but it must never be a silent state.
+    try:
+        auth_on = gateway_keys_exist(state)
+    except Exception:
+        auth_on = True  # can't tell; check_request_auth fails closed on errors
+    if not auth_on:
+        log.critical(
+            "AUTH DISABLED: no gateway keys exist — every API endpoint is "
+            "unauthenticated. Create a key (POST /api/config/gateway-keys or "
+            "the dashboard Settings page) to enable authentication."
+        )
+
+
+def _attach_storage(state: "GatewayState", factory=None) -> bool:
+    """Create and connect the storage backend. Returns True on success.
+
+    On failure the gateway is marked ``storage_unavailable`` so auth fails
+    closed — a storage outage must never look like "no keys provisioned".
+    """
+    factory = factory or create_storage
+    try:
+        storage = factory(state.config)
+        storage.connect()
+    except Exception as exc:
+        first = not state.storage_unavailable
+        state.storage = None
+        state.storage_unavailable = True
+        state.storage_error = type(exc).__name__
+        if first:
+            get_logger("loom.gateway").critical(
+                "STORAGE UNAVAILABLE (%s): protected API endpoints return 503 "
+                "until the storage backend reconnects; retrying in background.",
+                type(exc).__name__,
+            )
+        return False
+    state.storage = storage
+    state.storage_unavailable = False
+    state.storage_error = None
+    state._gateway_keys_exist = None
+    _log_storage_ready(state)
+    return True
+
+
+async def _storage_reconnect(
+    state: "GatewayState",
+    factory=None,
+    initial_delay: float = 2.0,
+    max_delay: float = 30.0,
+    sleep=asyncio.sleep,
+) -> None:
+    """Retry the storage connection with capped exponential backoff."""
+    delay = initial_delay
+    attempt = 0
+    while state.storage_unavailable:
+        await sleep(delay)
+        attempt += 1
+        if await asyncio.to_thread(_attach_storage, state, factory):
+            get_logger("loom.gateway").warning(
+                "storage reconnected after %d retr%s; auth enforcement restored",
+                attempt, "y" if attempt == 1 else "ies",
+            )
+            return
+        delay = min(delay * 2, max_delay)
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     state: GatewayState = app.state.gateway
@@ -1705,38 +1793,12 @@ async def lifespan(app: FastAPI):
         except ImportError:
             pass
 
-    try:
-        state.storage = create_storage(state.config)
-        state.storage.connect()
-    except Exception:
-        state.storage = None
-
-    if state.storage is not None:
-        # Split-brain guard: the live deployment once silently wrote metrics
-        # to the wrong Postgres database for a month because the resolved
-        # DSN was never surfaced anywhere. Log host+db (never credentials).
-        if state.config.storage.backend == "postgres":
-            host, db = _dsn_host_db(state.config.storage.postgres_dsn)
-            get_logger("loom.gateway").info(
-                "storage backend: postgres host=%s db=%s", host, db,
-            )
-        else:
-            get_logger("loom.gateway").info(
-                "storage backend: sqlite path=%s", state.config.storage.database_path,
-            )
-
-    # Auth posture at a glance. Without keys the whole API is open — that's
-    # intended for first-run setup, but it must never be a silent state.
-    try:
-        auth_on = state.storage is not None and gateway_keys_exist(state)
-    except Exception:
-        auth_on = False
-    if not auth_on:
-        get_logger("loom.gateway").critical(
-            "AUTH DISABLED: no gateway keys exist — every API endpoint is "
-            "unauthenticated. Create a key (POST /api/config/gateway-keys or "
-            "the dashboard Settings page) to enable authentication."
-        )
+    storage_reconnect: Optional[asyncio.Task] = None
+    if not _attach_storage(state):
+        # Fail closed: protected endpoints answer 503 while storage is down
+        # (see auth.check_request_auth). Keep retrying in the background so a
+        # gateway that started before its database recovers on its own.
+        storage_reconnect = asyncio.create_task(_storage_reconnect(state))
 
     if ThrottleGovernor is not None:
         try:
@@ -1860,6 +1922,8 @@ async def lifespan(app: FastAPI):
         yield
     finally:
         janitor.cancel()
+        if storage_reconnect is not None:
+            storage_reconnect.cancel()
         if state.variants is not None:
             try:
                 state.variants.close()
@@ -1966,6 +2030,12 @@ def create_app() -> FastAPI:
             app.state.gateway,
             config.server.oauth_passthrough,
         )
+        if denial == STORAGE_UNAVAILABLE:
+            return JSONResponse(
+                {"error": {"message": "storage unavailable", "type": "service_unavailable"}},
+                status_code=503,
+                headers={"Retry-After": "5"},
+            )
         if denial is not None:
             get_logger("loom.gateway").warning(
                 "gateway auth failed (path=%s, key=%s)", path, denial
@@ -2940,14 +3010,21 @@ def create_app() -> FastAPI:
     )
     async def health():
         gw = state()
+        storage_down = getattr(gw, "storage_unavailable", False)
         try:
             auth_enabled = gw.storage is not None and gateway_keys_exist(gw)
         except Exception:
             auth_enabled = False
+            storage_down = gw.storage is not None or storage_down
         return {
-            "status": "healthy",
+            # Still HTTP 200: a degraded gateway keeps serving public paths
+            # and reconnects itself, so container healthchecks shouldn't
+            # restart-loop it. Monitors should alert on "degraded".
+            "status": "degraded" if storage_down else "healthy",
             "version": __version__,
-            "auth_enabled": auth_enabled,
+            # While storage is down, protected paths fail closed (503).
+            "auth_enabled": True if storage_down else auth_enabled,
+            "storage": "unavailable" if storage_down else "ok",
             "uptime_seconds": round(time.time() - gw.started_at, 1),
             "requests": gw.request_count,
             "errors": gw.error_count,
