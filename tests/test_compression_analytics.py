@@ -106,6 +106,37 @@ def test_compression_summary_empty_window(storage):
     assert sum(b["count"] for b in out["ratio_histogram"]) == 0
 
 
+def _age_metrics(storage, seconds):
+    """Push every metrics row ``seconds`` into the past (both backends)."""
+    ph = "?" if type(storage).__name__ == "LoomStorage" else "%s"
+    storage.conn.execute(f"UPDATE metrics SET timestamp = timestamp - {ph}", (seconds,))
+    if hasattr(storage.conn, "commit"):
+        storage.conn.commit()
+
+
+def test_compression_summary_window_hours_and_days(storage):
+    # 1 row ~3h old, then 1 row ~2 days old, then 1 fresh row.
+    _record(storage, saved=100)
+    _age_metrics(storage, 2 * 86400 - 3 * 3600)  # first row: now ~2d - 3h
+    _record(storage, saved=10)
+    _age_metrics(storage, 3 * 3600)  # rows: ~2d and ~3h old
+    _record(storage, saved=1)  # fresh
+
+    def saved(**kw):
+        return storage.get_compression_summary(**kw)["totals"]["tokens_saved"]
+
+    # Hour windows are exact (not rounded up to a whole day).
+    assert saved(days=1, hours=1) == 1
+    assert saved(days=1, hours=6) == 11
+    assert saved(days=1, hours=24) == 11
+    # Day windows still work, and differ from each other.
+    assert saved(days=1) == 11
+    assert saved(days=7) == 111
+    out = storage.get_compression_summary(days=1, hours=6)
+    assert out["window_hours"] == 6
+    assert storage.get_compression_summary(days=7)["window_hours"] == 168
+
+
 def test_compression_endpoint(tmp_path):
     from loom.gateway.app import app
     from loom.storage.sqlite import LoomStorage
@@ -127,6 +158,14 @@ def test_compression_endpoint(tmp_path):
         assert data["totals"]["tokens_saved"] == 500
         assert "est_savings_usd" in data["totals"]
         assert all("est_savings_usd" in b for b in data["by_model"])
+
+        # hours wins over days and is clamped to >= 1.
+        data = TestClient(app).get("/api/metrics/compression?hours=2").json()
+        assert data["window_hours"] == 2
+        assert data["window_days"] == 1
+        assert data["totals"]["tokens_saved"] == 500
+        data = TestClient(app).get("/api/metrics/compression?hours=0").json()
+        assert data["window_hours"] == 1
     finally:
         storage.close()
         gw.storage = prev_storage

@@ -53,7 +53,7 @@ class StorageBackend(Protocol):
 
     # ---- observability aggregates ----
     def get_routing_stats(self, hours: int = 24) -> dict: ...
-    def get_compression_summary(self, days: int = 30) -> dict: ...
+    def get_compression_summary(self, days: int = 30, hours: int | None = None) -> dict: ...
     def get_routing_decisions(self, hours: int = 24, limit: int = 200) -> dict: ...
     def get_session_stats(self, hours: int | None = None) -> dict: ...
     def list_sessions(self, hours: int = 24, limit: int = 200) -> list[dict]: ...
@@ -75,7 +75,7 @@ class StorageBackend(Protocol):
 HISTOGRAM_BUCKETS = 10
 
 
-def _summarize_compression(records: list[dict], days: int) -> dict:
+def _summarize_compression(records: list[dict], days: int, hours: int | None = None) -> dict:
     """Shared aggregation behind get_compression_summary.
 
     Both backends fetch the window's per-request rows and delegate here, so
@@ -187,6 +187,7 @@ def _summarize_compression(records: list[dict], days: int) -> dict:
 
     return {
         "window_days": days,
+        "window_hours": hours if hours else days * 24,
         "totals": {
             "requests": len(records),
             "compressed_requests": len(compressed),
