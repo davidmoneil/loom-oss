@@ -3150,12 +3150,17 @@ def create_app() -> FastAPI:
         tags=["observability"],
         summary="Compression performance: savings totals, ratio distribution, breakdowns",
     )
-    async def api_compression_metrics(days: int = 30):
+    async def api_compression_metrics(days: int = 30, hours: int | None = None):
+        # ``hours`` lets the dashboard ask for sub-day windows exactly; when
+        # set it wins over ``days`` (which is kept for existing callers).
+        if hours is not None:
+            hours = max(1, min(hours, 8760))
+            days = max(1, -(-hours // 24))
         gw = state()
         if gw.storage is None:
-            return {"available": False, "window_days": days}
+            return {"available": False, "window_days": days, "window_hours": hours}
         try:
-            summary = _jsonable(gw.storage.get_compression_summary(days=days))
+            summary = _jsonable(gw.storage.get_compression_summary(days=days, hours=hours))
         except Exception as exc:
             return JSONResponse({"error": str(exc)}, status_code=500)
 

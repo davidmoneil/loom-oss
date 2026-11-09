@@ -1,4 +1,4 @@
-import { useEffect, useState, useCallback } from "react";
+import { useEffect, useState, useCallback, useRef } from "react";
 import {
   BarChart,
   Bar,
@@ -26,25 +26,34 @@ const QUICK_PICKS = [
 
 export default function Compression() {
   const range = useTimeRange({ defaultAmount: 7, defaultUnit: "days" });
-  const { days } = range;
+  const { days, hours, unit } = range;
+  // Hour-unit windows go to the API as hours so 1h / 6h / 24h differ;
+  // day-unit windows keep using days.
+  const queryHours = unit === "hours" ? hours : null;
   const [data, setData] = useState(null);
+  // Only the newest request may update the page: switching windows fast
+  // must not let a slower, older response (e.g. 30d) overwrite a newer one.
+  const requestSeq = useRef(0);
   const [loading, setLoading] = useState(true);
   const [updatedAt, setUpdatedAt] = useState(null);
   const [error, setError] = useState(null);
 
   const load = useCallback(async () => {
+    const seq = ++requestSeq.current;
     setLoading(true);
     try {
-      const summary = await api.compressionMetrics(days);
+      const summary = await api.compressionMetrics(days, queryHours);
+      if (seq !== requestSeq.current) return;
       setData(summary);
       setUpdatedAt(new Date());
       setError(null);
     } catch (e) {
+      if (seq !== requestSeq.current) return;
       setError(e.message);
     } finally {
-      setLoading(false);
+      if (seq === requestSeq.current) setLoading(false);
     }
-  }, [days]);
+  }, [days, queryHours]);
 
   useEffect(() => {
     load();

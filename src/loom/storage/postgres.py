@@ -593,7 +593,7 @@ class PostgresStorage:
         return result.rowcount
 
     # ------------------------------------------------------------------ reads
-    def get_compression_summary(self, days: int = 30) -> dict:
+    def get_compression_summary(self, days: int = 30, hours: int | None = None) -> dict:
         """Compression-performance aggregates for /api/metrics/compression.
 
         Mirrors the SQLite backend: fetch the window's per-request rows and
@@ -601,7 +601,9 @@ class PostgresStorage:
         """
         from loom.storage.base import _summarize_compression
 
-        since = time.time() - days * 86400
+        # ``hours`` (when given) wins over ``days`` so sub-day windows are
+        # exact instead of rounding up to a whole day.
+        since = time.time() - (hours * 3600 if hours else days * 86400)
         rows = self.conn.execute(
             """
             SELECT compressed, compression_ratio, tokens_saved, tier,
@@ -628,7 +630,7 @@ class PostgresStorage:
             }
             for r in rows
         ]
-        return _summarize_compression(records, days)
+        return _summarize_compression(records, days, hours)
 
     def get_routing_decisions(self, hours: int = 24, limit: int = 200) -> dict:
         since = time.time() - hours * 3600

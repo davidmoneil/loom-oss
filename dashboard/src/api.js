@@ -103,7 +103,12 @@ export const api = {
   routingTable: () => getJSON("/api/routing/table"),
   sessions: (hours = 24) => getJSON(`/api/sessions?hours=${hours}`),
   costs: (days = 30) => getJSON(`/api/costs?days=${days}`),
-  compressionMetrics: (days = 30) => getJSON(`/api/metrics/compression?days=${days}`),
+  // Pass hours for sub-day / hour-unit windows so they aren't rounded up
+  // to a whole day; days stays the default for existing callers.
+  compressionMetrics: (days = 30, hours = null) =>
+    getJSON(
+      hours ? `/api/metrics/compression?hours=${hours}` : `/api/metrics/compression?days=${days}`
+    ),
   updateServerConfig: (updates) => patchJSON("/api/config/server", updates),
   updateCompression: (updates) => patchJSON("/api/config/compression", updates),
   updateSourcePolicy: (name, updates) =>

@@ -55,6 +55,7 @@ class CostSummaryResponse(ObservabilityResponse):
 class CompressionSummaryResponse(ObservabilityResponse):
     available: bool = True
     window_days: int | None = None
+    window_hours: int | None = None
     totals: dict[str, Any] = {}
     ratio_histogram: list[dict[str, Any]] = []
     by_tier: list[dict[str, Any]] = []

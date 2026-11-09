@@ -1211,14 +1211,16 @@ class LoomStorage:
 
         return {"total": total, "offset": offset, "limit": limit, "entries": entries}
 
-    def get_compression_summary(self, days: int = 30) -> dict:
+    def get_compression_summary(self, days: int = 30, hours: int | None = None) -> dict:
         """Compression-performance aggregates for /api/metrics/compression.
 
         Ratio statistics and the histogram are computed in Python from the
         window's per-request rows (identical logic on both backends; request
         volumes make this cheap).
         """
-        since = time.time() - days * 86400
+        # ``hours`` (when given) wins over ``days`` so sub-day windows are
+        # exact instead of rounding up to a whole day.
+        since = time.time() - (hours * 3600 if hours else days * 86400)
         rows = self.conn.execute(
             """
             SELECT compressed, compression_ratio, tokens_saved, tier,
@@ -1245,7 +1247,7 @@ class LoomStorage:
             }
             for r in rows
         ]
-        return _summarize_compression(records, days)
+        return _summarize_compression(records, days, hours)
 
     # ------------------------------------------------------------------ rate limits
     def get_rate_limit_current(
