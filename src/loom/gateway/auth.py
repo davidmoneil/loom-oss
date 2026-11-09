@@ -6,6 +6,12 @@ the dashboard shell). Before any key is created the gateway runs open —
 that fail-open state is deliberate for first-run setup, and the gateway
 logs it loudly and reports it via /health so it can't be missed.
 
+Fail-open applies ONLY when storage answered and holds zero keys. If the
+storage backend is unavailable (failed to connect at startup, or a key
+lookup raises), protected paths fail CLOSED with ``STORAGE_UNAVAILABLE``,
+which the middleware maps to 503. A database outage must never look like
+"no keys provisioned".
+
 OAuth passthrough (``server.oauth_passthrough``) only applies to inference
 routes (``/v1/*``): an Anthropic OAuth bearer is forwarded upstream where
 Anthropic validates it. It never grants access to the admin/observability
@@ -25,6 +31,9 @@ from typing import Optional
 _PROTECTED_PREFIXES = ("/api/", "/v1/")
 
 _PUBLIC_API_PATHS = frozenset({"/v1/models", "/api/models", "/api/tags"})
+
+# Denial reason for "storage down": the middleware answers 503, not 401.
+STORAGE_UNAVAILABLE = "storage_unavailable"
 
 # OAuth passthrough may satisfy auth ONLY for these prefixes (inference).
 _OAUTH_ELIGIBLE_PREFIXES = ("/v1/",)
@@ -59,7 +68,15 @@ def check_request_auth(
     """
     if is_public_path(path):
         return None
-    if gw.storage is None or not gateway_keys_exist(gw):
+    if getattr(gw, "storage_unavailable", False):
+        return STORAGE_UNAVAILABLE  # fail closed: storage down, keys unknown
+    if gw.storage is None:
+        return None  # storage not configured at all (embedded/test use)
+    try:
+        keys_exist = gateway_keys_exist(gw)
+    except Exception:
+        return STORAGE_UNAVAILABLE
+    if not keys_exist:
         return None  # fail-open: no keys provisioned yet (loudly reported)
     if (
         oauth_passthrough_enabled
@@ -67,6 +84,11 @@ def check_request_auth(
         and path.startswith(_OAUTH_ELIGIBLE_PREFIXES)
     ):
         return None
-    if raw_key and gw.storage.validate_gateway_key(raw_key):
-        return None
+    if raw_key:
+        try:
+            valid = gw.storage.validate_gateway_key(raw_key)
+        except Exception:
+            return STORAGE_UNAVAILABLE
+        if valid:
+            return None
     return "present" if raw_key else "missing"
