@@ -17,7 +17,7 @@ import StatCard from "../components/StatCard.jsx";
 import Chart, { CHART_COLORS, axisProps, tooltipStyle } from "../components/Chart.jsx";
 import { Header } from "./Overview.jsx";
 import TimeRangeControl, { useTimeRange } from "../components/TimeRangeControl.jsx";
-import { api, fmtNumber, fmtCost } from "../api.js";
+import { api, fmtNumber, fmtCompact, fmtCost } from "../api.js";
 
 const QUICK_PICKS = [
   { label: "24h", amount: 1, unit: "days" },
@@ -84,13 +84,15 @@ export default function Costs() {
         <StatCard label="Requests" value={fmtNumber(totals.requests)} loading={loading} infoKey="costs.requests" />
         <StatCard
           label="Tokens In"
-          value={fmtNumber(totals.tokens_in)}
+          value={fmtCompact(totals.tokens_in)}
+          title={fmtNumber(totals.tokens_in)}
           loading={loading}
           infoKey="costs.tokensIn"
         />
         <StatCard
           label="Tokens Out"
-          value={fmtNumber(totals.tokens_out)}
+          value={fmtCompact(totals.tokens_out)}
+          title={fmtNumber(totals.tokens_out)}
           loading={loading}
           infoKey="costs.tokensOut"
         />
@@ -99,7 +101,8 @@ export default function Costs() {
       <div className="mt-4 grid grid-cols-2 gap-4 lg:grid-cols-4">
         <StatCard
           label="Tokens Saved"
-          value={fmtNumber(totals.tokens_saved)}
+          value={fmtCompact(totals.tokens_saved)}
+          title={fmtNumber(totals.tokens_saved)}
           loading={loading}
           infoKey="costs.tokensSaved"
         />

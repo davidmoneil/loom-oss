@@ -162,6 +162,18 @@ export function fmtNumber(n) {
   return Number(n).toLocaleString();
 }
 
+// Short form for big counts on stat cards: 600K, 60M, 1.3B. Pair it with
+// a title tooltip of fmtNumber(n) so the exact value is one hover away.
+const _compact = new Intl.NumberFormat("en", {
+  notation: "compact",
+  maximumFractionDigits: 1,
+});
+
+export function fmtCompact(n) {
+  if (n === null || n === undefined) return "—";
+  return _compact.format(Number(n));
+}
+
 export function fmtCost(n) {
   if (!n) return "$0.00";
   if (n < 0.01) return `$${Number(n).toFixed(4)}`;

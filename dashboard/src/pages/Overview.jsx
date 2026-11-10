@@ -20,7 +20,7 @@ import Chart, { CHART_COLORS, axisProps, tooltipStyle } from "../components/Char
 import WidgetInfo from "../components/WidgetInfo.jsx";
 import { WIDGET_DESCRIPTIONS } from "../widgetDescriptions.js";
 import TimeRangeControl, { useTimeRange } from "../components/TimeRangeControl.jsx";
-import { api, fmtNumber, fmtCost, fmtLatency, fmtBucketLabel, pickBucket } from "../api.js";
+import { api, fmtNumber, fmtCompact, fmtCost, fmtLatency, fmtBucketLabel, pickBucket } from "../api.js";
 
 const REFRESH_MS = 30000;
 
@@ -140,7 +140,8 @@ export default function Overview() {
         />
         <StatCard
           label="Tokens In / Out"
-          value={`${fmtNumber(m.tokens_in)} / ${fmtNumber(m.tokens_out)}`}
+          value={`${fmtCompact(m.tokens_in)} / ${fmtCompact(m.tokens_out)}`}
+          title={`${fmtNumber(m.tokens_in)} / ${fmtNumber(m.tokens_out)}`}
           loading={loading}
           infoKey="overview.tokensInOut"
         />
@@ -374,9 +375,9 @@ function CompressionPanel({ compression, stats, rangeLabel, loading }) {
       ) : (
         <>
           <div className="grid grid-cols-2 gap-4 lg:grid-cols-4">
-            <StatCard label="Tokens Before" value={fmtNumber(totals.tokens_before)} />
-            <StatCard label="Tokens After" value={fmtNumber(totals.tokens_after)} />
-            <StatCard label="Tokens Saved" value={fmtNumber(totals.tokens_saved)} />
+            <StatCard label="Tokens Before" value={fmtCompact(totals.tokens_before)} title={fmtNumber(totals.tokens_before)} />
+            <StatCard label="Tokens After" value={fmtCompact(totals.tokens_after)} title={fmtNumber(totals.tokens_after)} />
+            <StatCard label="Tokens Saved" value={fmtCompact(totals.tokens_saved)} title={fmtNumber(totals.tokens_saved)} />
             <StatCard label="Compression Ratio" value={fmtPct(totals.compression_ratio)} />
           </div>
 
