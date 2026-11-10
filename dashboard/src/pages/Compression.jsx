@@ -16,7 +16,7 @@ import WidgetInfo from "../components/WidgetInfo.jsx";
 import { WIDGET_DESCRIPTIONS } from "../widgetDescriptions.js";
 import { Header } from "./Overview.jsx";
 import TimeRangeControl, { useTimeRange } from "../components/TimeRangeControl.jsx";
-import { api, fmtNumber, fmtCost } from "../api.js";
+import { api, fmtNumber, fmtCompact, fmtCost } from "../api.js";
 
 const QUICK_PICKS = [
   { label: "24h", amount: 1, unit: "days" },
@@ -102,7 +102,8 @@ export default function Compression() {
       <div className="mt-6 grid grid-cols-2 gap-4 lg:grid-cols-4">
         <StatCard
           label="Tokens Saved"
-          value={fmtNumber(totals.tokens_saved)}
+          value={fmtCompact(totals.tokens_saved)}
+          title={fmtNumber(totals.tokens_saved)}
           loading={loading}
           infoKey="compression.tokensSaved"
         />
