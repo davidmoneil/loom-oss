@@ -73,3 +73,23 @@ jobs:
         run: |
           npm ci
           npm audit --audit-level=high
+
+  dashboard-bundle:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+      - name: Rebuild dashboard bundle
+        working-directory: dashboard
+        run: |
+          npm ci
+          npm run build
+      - name: Fail if the committed bundle is stale
+        run: |
+          if [ -n "$(git status --porcelain -- src/loom/dashboard/static)" ]; then
+            git status --short -- src/loom/dashboard/static
+            echo "::error::src/loom/dashboard/static is out of date with dashboard/src. Run 'cd dashboard && npm ci && npm run build' and commit the result."
+            exit 1
+          fi
