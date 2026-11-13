@@ -53,6 +53,7 @@ class RoutingEngine:
         payload_tokens_est: int = 0,
         min_tier_floor: Optional[str] = None,
         preferred_model: Optional[str] = None,
+        preferred_required: bool = False,
     ) -> Optional[RoutingRecommendation]:
         """Recommend a model using the EQRT algorithm, or config fallback.
 
@@ -69,6 +70,12 @@ class RoutingEngine:
         can't be honored, routing proceeds exactly as it would with no
         preference, and the returned recommendation's ``routing_reason``
         notes the override so it's visible in logs/observability.
+
+        ``preferred_required`` marks the preference as a *required pin*
+        (Nexus ``model_pin: required``): it is honored whenever the model
+        is known, and is never downgraded for tier floor, budget cap,
+        provider or tool-support policy. Only an unknown model falls
+        through, with ``required_pin_unresolved`` in the routing reason.
         """
         policy = self._config.get_source_policy(source)
         profile = SourceProfile.from_policy(source, policy)
@@ -79,7 +86,9 @@ class RoutingEngine:
             profile.minimum_tier = min_tier_floor
 
         if preferred_model:
-            honored = self._honor_preferred(preferred_model, profile, requires_tools)
+            honored = self._honor_preferred(
+                preferred_model, profile, requires_tools, required=preferred_required
+            )
             if honored is not None:
                 return honored
 
@@ -96,10 +105,11 @@ class RoutingEngine:
             rec = self._config_fallback(profile, requires_tools)
 
         if preferred_model and rec is not None:
+            tag = "required_pin_unresolved" if preferred_required else "preferred_overridden"
             rec.routing_reason = (
-                f"{rec.routing_reason}|preferred_overridden:{preferred_model}"
+                f"{rec.routing_reason}|{tag}:{preferred_model}"
                 if rec.routing_reason
-                else f"preferred_overridden:{preferred_model}"
+                else f"{tag}:{preferred_model}"
             )
         return rec
 
@@ -134,6 +144,7 @@ class RoutingEngine:
         preferred_model: str,
         profile: SourceProfile,
         requires_tools: bool = False,
+        required: bool = False,
     ) -> Optional[RoutingRecommendation]:
         """Return a recommendation for ``preferred_model`` if — and only
         if — it resolves to a known model that passes the source's policy.
@@ -144,7 +155,9 @@ class RoutingEngine:
         if resolved is None:
             return None
         tools_needed = requires_tools or profile.requires_tools
-        if not self._passes_policy(resolved, resolved.provider, profile, tools_needed):
+        if not required and not self._passes_policy(
+            resolved, resolved.provider, profile, tools_needed
+        ):
             return None
         return RoutingRecommendation(
             model=resolved.model_id,
@@ -157,7 +170,7 @@ class RoutingEngine:
             engine=resolved.engine,
             estimated_cost_per_1k=resolved.avg_cost_per_1k(),
             is_empirical=False,
-            routing_reason="preferred_honored",
+            routing_reason="required_pin_honored" if required else "preferred_honored",
         )
 
     def _config_fallback(

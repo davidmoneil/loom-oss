@@ -183,3 +183,50 @@ class TestSelectModelPreferenceOrdering:
         )
         assert model == "haiku"
         assert reason == "config_fallback"
+
+
+class TestRequiredPin:
+    """Nexus `model_pin: required` is never downgraded; optional pins may be."""
+
+    def test_required_pin_above_budget_tier_is_honored(self):
+        engine = RoutingEngine(make_config(minimum_tier="economy", budget_tier="standard"))
+        rec = engine.recommend(
+            task_type="chat", source="default", preferred_model="opus",
+            preferred_required=True,
+        )
+        assert rec.model == "opus"
+        assert rec.routing_reason == "required_pin_honored"
+
+    def test_optional_pin_same_case_is_downgraded(self):
+        engine = RoutingEngine(make_config(minimum_tier="economy", budget_tier="standard"))
+        rec = engine.recommend(
+            task_type="chat", source="default", preferred_model="opus",
+            preferred_required=False,
+        )
+        assert rec.model == "haiku"
+
+    def test_required_pin_below_tier_floor_and_without_tools_is_honored(self):
+        engine = RoutingEngine(make_config(minimum_tier="premium", requires_tools=True))
+        rec = engine.recommend(
+            task_type="chat", source="default", requires_tools=True,
+            preferred_model="haiku", preferred_required=True,
+        )
+        assert rec.model == "haiku"
+
+    def test_required_pin_unknown_model_falls_back_with_reason(self):
+        engine = RoutingEngine(make_config(minimum_tier="economy"))
+        rec = engine.recommend(
+            task_type="chat", source="default", preferred_model="nope",
+            preferred_required=True,
+        )
+        assert "required_pin_unresolved:nope" in rec.routing_reason
+
+    def test_select_model_reads_model_pin_from_body(self):
+        config = make_config(minimum_tier="economy", budget_tier="standard")
+        state = make_state(config, routing=RoutingEngine(config))
+        body = {"preferred_model": "opus", "model_pin": "required"}
+        model, _, reason = _select_model(state, "auto", "default", body, [])
+        assert model == "opus" and reason == "required_pin_honored"
+        body = {"preferred_model": "opus", "model_pin": "optional"}
+        model, _, _ = _select_model(state, "auto", "default", body, [])
+        assert model == "haiku"
