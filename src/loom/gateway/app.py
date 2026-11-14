@@ -1105,11 +1105,13 @@ def _select_model(
     # candidate must satisfy. See `RoutingEngine.recommend`'s `preferred_model`
     # handling for the honor/override logic.
     preferred_model = _clean_preferred_model(body)
+    preferred_required = bool(preferred_model) and _pin_is_required(body)
 
     if state.routing is not None:
         tier_floor = _detect_tier_floor(state, source, messages)
         rec = _try_recommend(
-            state.routing, task_type, source, policy, tier_floor, preferred_model
+            state.routing, task_type, source, policy, tier_floor, preferred_model,
+            preferred_required,
         )
         model = _recommendation_model(rec)
         if model:
@@ -1128,6 +1130,14 @@ def _select_model(
         "no model available: routing produced no result and no providers are configured",
         status_code=503,
     )
+
+
+def _pin_is_required(body: dict) -> bool:
+    """True when the caller marked its preferred model a required pin
+    (`model_pin: "required"` in the body; Nexus forwards its registry
+    `model_pin` flag). Anything else, including absent, means optional."""
+    val = body.get("model_pin")
+    return isinstance(val, str) and val.strip().lower() == "required"
 
 
 def _clean_preferred_model(body: dict) -> Optional[str]:
@@ -1154,8 +1164,22 @@ def _try_recommend(
     policy: SourcePolicy,
     min_tier_floor: Optional[str] = None,
     preferred_model: Optional[str] = None,
+    preferred_required: bool = False,
 ) -> Any:
     """Call RoutingEngine.recommend, tolerating minor signature drift."""
+    try:
+        return engine.recommend(
+            task_type=task_type,
+            source=source,
+            requires_tools=policy.requires_tools,
+            min_tier_floor=min_tier_floor,
+            preferred_model=preferred_model,
+            preferred_required=preferred_required,
+        )
+    except TypeError:
+        pass
+    except Exception:
+        return None
     try:
         return engine.recommend(
             task_type=task_type,
