@@ -36,7 +36,7 @@ build-backend = "setuptools.build_meta"
 where = ["src"]
 
 [tool.setuptools.package-data]
-loom = ["dashboard/static/**/*"]
+loom = ["dashboard/static/**/*", "rules/*.yaml"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

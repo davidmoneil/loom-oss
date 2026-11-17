@@ -1,0 +1,24 @@
+# Default tool-call -> action-label rules for loom.observability.tool_actions.
+# Ordered; first match wins. Applies to Bash commands only (argv0 + subcommand).
+# match.argv0: list of program names (basename). match.sub: optional list of
+# subcommands (first non-option word). status: active | shadow (shadow rules are
+# evaluated for comparison but do not set the label).
+version: 1
+rules:
+  - {id: vcs-commit, label: vcs.commit, status: active, match: {argv0: [git], sub: [commit, add, merge, rebase, cherry-pick, tag, push]}}
+  - {id: vcs-read, label: vcs.read, status: active, match: {argv0: [git], sub: [status, diff, log, show, branch, blame, rev-parse, ls-files, remote, fetch, describe, grep]}}
+  - {id: vcs-pr, label: vcs.pr, status: active, match: {argv0: [gh]}}
+  - {id: vcs-other, label: vcs.write, status: active, match: {argv0: [git]}}
+  - {id: container-exec, label: container.exec, status: active, match: {argv0: [docker, podman], sub: [exec]}}
+  - {id: container-read, label: container.read, status: active, match: {argv0: [docker, podman], sub: [ps, logs, inspect, images, stats, top, info, version]}}
+  - {id: container-manage, label: container.manage, status: active, match: {argv0: [docker, podman, docker-compose, kubectl, systemctl]}}
+  - {id: db-query, label: db.query, status: active, match: {argv0: [psql, sqlite3, mysql, mariadb, redis-cli, mongosh, cypher-shell]}}
+  - {id: http-call, label: http.call, status: active, match: {argv0: [curl, wget, http, https, httpie]}}
+  - {id: search-text, label: search.text, status: active, match: {argv0: [grep, rg, ag, find, fd, locate]}}
+  - {id: file-read, label: file.read, status: active, match: {argv0: [cat, head, tail, less, more, ls, stat, wc, tree, file, du, bat]}}
+  - {id: task-pulse, label: task.pulse, status: active, match: {argv0: [pulse, nexus-label]}}
+  - {id: pkg-install, label: pkg.install, status: active, match: {argv0: [pip, pip3, npm, pnpm, yarn, apt, apt-get, uv, cargo], sub: [install, add, i, ci, sync]}}
+  - {id: test-run, label: test.run, status: active, match: {argv0: [pytest, jest, vitest, tox]}}
+  - {id: test-run-pkg, label: test.run, status: active, match: {argv0: [npm, pnpm, yarn, cargo, go], sub: [test]}}
+  - {id: script-python, label: script.python, status: active, match: {argv0: [python, python3, python3.10, python3.11, python3.12, python3.13]}}
+  - {id: script-node, label: script.node, status: active, match: {argv0: [node, nodejs, npx, tsx, deno, bun]}}
