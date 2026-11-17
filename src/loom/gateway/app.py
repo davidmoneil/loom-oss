@@ -930,11 +930,32 @@ def _classify_task_type(body: dict, messages: list[dict]) -> str:
     Delegates to the detection engine's 7-type classifier when available,
     falling back to a lightweight heuristic for tool_use detection (which
     the detection engine doesn't cover since it's request-structure-based).
+
+    Intent is per human turn, not per request: the classifier sees only the
+    latest genuine user prompt (not a tool_result carried in a user-role
+    message). Every tool hop resends the whole conversation, so a hop's latest
+    genuine prompt is the turn's prompt and it inherits the turn's task_type
+    with no per-session cache. "Has tools" is structural, not intent.
     """
+    if _detection_classify is not None:
+        prompt = None
+        for msg in reversed(messages or []):
+            if _reply_is_user_prompt(msg):
+                prompt = msg
+                break
+        if prompt is not None:
+            try:
+                return _detection_classify([prompt])
+            except Exception:
+                return "general"
+        if body.get("tools") or body.get("functions"):
+            return "tool_use"
+        try:
+            return _detection_classify(messages)
+        except Exception:
+            return "general"
     if body.get("tools") or body.get("functions"):
         return "tool_use"
-    if _detection_classify is not None:
-        return _detection_classify(messages)
     response_format = body.get("response_format")
     if isinstance(response_format, dict) and response_format.get("type") in (
         "json_object",
