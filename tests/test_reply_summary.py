@@ -218,3 +218,54 @@ def test_metrics_table_stores_turn_and_hop(tmp_path):
         "WHERE session_id='s1' ORDER BY hop_index"
     ).fetchall()
     assert [tuple(r) for r in rows] == [(2, 0, "tool_use"), (2, 1, "tool_use"), (2, 2, "end_turn")]
+
+
+def _sse(events):
+    return [f"data: {json.dumps(e)}" for e in events]
+
+
+def test_sse_two_tool_blocks_store_actions_and_no_input_text(tmp_path):
+    from loom.storage.sqlite import LoomStorage as SQLiteStorage
+
+    secret = "SECRET-PROMPT-TEXT"
+    events = [
+        {"type": "message_start", "message": {}},
+        {"type": "content_block_start", "index": 0,
+         "content_block": {"type": "tool_use", "id": "t1", "name": "Bash", "input": {}}},
+        {"type": "content_block_delta", "index": 0,
+         "delta": {"type": "input_json_delta", "partial_json": '{"command": "git com'}},
+        {"type": "content_block_delta", "index": 0,
+         "delta": {"type": "input_json_delta", "partial_json": f'mit -m \\"{secret}\\""}}'}},
+        {"type": "content_block_stop", "index": 0},
+        {"type": "content_block_start", "index": 1,
+         "content_block": {"type": "tool_use", "id": "t2", "name": "Read", "input": {}}},
+        {"type": "content_block_delta", "index": 1,
+         "delta": {"type": "input_json_delta", "partial_json": '{"file_path": "/x/foo.py"}'}},
+        {"type": "content_block_stop", "index": 1},
+        {"type": "message_delta", "delta": {"stop_reason": "tool_use"}, "usage": {"output_tokens": 5}},
+    ]
+    rep = summarize_sse(_sse(events))
+    assert rep["tool_names"] == ["Bash", "Read"]
+    assert rep["tool_actions"] == ["vcs.commit", "file.read"]
+
+    st = SQLiteStorage(str(tmp_path / "loom.db"))
+    st.record_metrics(
+        request_id="r1", model="m", provider="anthropic", tokens_in=1, tokens_out=1,
+        latency_ms=1.0, cost=0.0, session_id="s1",
+        tool_names=",".join(rep["tool_names"]), tool_actions=",".join(rep["tool_actions"]),
+    )
+    st.record_action_signatures(rep["tool_signatures"])
+    if hasattr(st, "flush"):
+        st.flush()
+    row = st.conn.execute("SELECT * FROM metrics WHERE request_id='r1'").fetchone()
+    assert row["tool_actions"] == "vcs.commit,file.read"
+    assert not any(isinstance(v, str) and (secret in v or "foo.py" in v) for v in tuple(row))
+    sigs = st.conn.execute("SELECT * FROM action_signatures").fetchall()
+    assert not any(secret in str(tuple(r)) or "foo.py" in str(tuple(r)) for r in sigs)
+
+
+def test_message_body_tool_actions():
+    rep = summarize_message({"stop_reason": "tool_use", "content": [
+        {"type": "tool_use", "name": "Bash", "input": {"command": "git commit -m x"}},
+    ]})
+    assert rep["tool_actions"] == ["vcs.commit"]

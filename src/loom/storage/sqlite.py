@@ -29,7 +29,7 @@ from loom.observability.request_tags import (
     tag_like_pattern,
 )
 
-SCHEMA_VERSION = 18
+SCHEMA_VERSION = 19
 
 # Compression-cache entries live this long, matching the Postgres backend's
 # "NOW() + INTERVAL '7 days'".
@@ -459,6 +459,20 @@ class LoomStorage:
                 "ON metrics (session_id, turn_index, hop_index)"
             )
 
+        if current < 19:
+            # Content-free action label per tool call plus unmatched signatures.
+            try:
+                c.execute("ALTER TABLE metrics ADD COLUMN tool_actions TEXT")
+            except sqlite3.OperationalError:
+                pass
+            c.execute(
+                "CREATE TABLE IF NOT EXISTS action_signatures ("
+                "signature TEXT NOT NULL, tool TEXT NOT NULL, "
+                "count INTEGER NOT NULL DEFAULT 0, "
+                "first_seen REAL NOT NULL, last_seen REAL NOT NULL, "
+                "sample_label TEXT, PRIMARY KEY (signature, tool))"
+            )
+
         if current < SCHEMA_VERSION:
             c.execute(
                 "INSERT OR REPLACE INTO schema_version (version, applied_at) VALUES (?, ?)",
@@ -501,6 +515,23 @@ class LoomStorage:
             )
             self._schedule_flush()
 
+    def record_action_signatures(self, signatures: list) -> None:
+        """Upsert (tool, label, signature) triples whose label ends in ``.other``."""
+        now = time.time()
+        with self._write_lock:
+            for tool, label, sig in signatures or []:
+                if not str(label).endswith(".other") or not sig:
+                    continue
+                self.conn.execute(
+                    "INSERT INTO action_signatures "
+                    "(signature, tool, count, first_seen, last_seen, sample_label) "
+                    "VALUES (?, ?, 1, ?, ?, ?) "
+                    "ON CONFLICT (signature, tool) DO UPDATE SET "
+                    "count = count + 1, last_seen = excluded.last_seen",
+                    (sig, tool, now, now, label),
+                )
+            self._schedule_flush()
+
     def record_metrics(
         self,
         request_id: str,
@@ -533,6 +564,7 @@ class LoomStorage:
         tool_calls_this_turn: Optional[int] = None,
         stop_reason: Optional[str] = None,
         tool_names: Optional[str] = None,
+        tool_actions: Optional[str] = None,
     ) -> None:
         with self._write_lock:
             self.conn.execute(
@@ -544,8 +576,8 @@ class LoomStorage:
                     message_count, source, tokens_saved, session_id,
                     status_code, cache_read_tokens, cache_creation_tokens, skill,
                     tier, skip_reasons, tokens_before, tokens_after, by_block_type, tags,
-                    turn_index, hop_index, tool_calls_this_turn, stop_reason, tool_names
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    turn_index, hop_index, tool_calls_this_turn, stop_reason, tool_names, tool_actions
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     time.time(),
@@ -579,6 +611,7 @@ class LoomStorage:
                     tool_calls_this_turn,
                     stop_reason,
                     tool_names,
+                    tool_actions,
                 ),
             )
             self._schedule_flush()

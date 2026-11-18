@@ -512,7 +512,10 @@ def _record_request(
                 tool_calls_this_turn=(position or {}).get("tool_calls_this_turn"),
                 stop_reason=stop_reason,
                 tool_names=",".join((reply or {}).get("tool_names") or []) or None,
+                tool_actions=",".join((reply or {}).get("tool_actions") or []) or None,
             )
+            if (reply or {}).get("tool_signatures"):
+                state.storage.record_action_signatures(reply["tool_signatures"])
         except Exception:
             pass
         try:
@@ -567,6 +570,7 @@ def _record_request(
                 audit_kwargs["stop_reason"] = stop_reason
             if reply:
                 audit_kwargs["tool_names"] = reply.get("tool_names") or None
+                audit_kwargs["tool_actions"] = reply.get("tool_actions") or None
                 audit_kwargs["block_types"] = reply.get("block_types") or None
             if position:
                 audit_kwargs["turn_index"] = position.get("turn_index")

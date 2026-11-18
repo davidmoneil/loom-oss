@@ -20,6 +20,23 @@ import json
 from typing import Any, Iterable, Optional
 
 _MAX_TOOLS = 64
+_TOOL_BLOCKS = ("tool_use", "server_tool_use", "mcp_tool_use")
+_MAX_INPUT_CHARS = 200_000
+
+
+def _classify_action(name: str, input_dict: Any, out: dict) -> None:
+    """Append the content-free action label and signature for one tool call.
+
+    The input is only read here, never stored. Lists stay parallel to tool_names.
+    """
+    try:
+        from loom.observability.tool_actions import classify
+
+        label, sig = classify(name, input_dict if isinstance(input_dict, dict) else {})
+    except Exception:
+        label, sig = "unknown.other", "unknown"
+    out["tool_actions"].append(label)
+    out["tool_signatures"].append((str(name)[:64], label, sig))
 
 
 def _empty() -> dict:
@@ -27,6 +44,8 @@ def _empty() -> dict:
         "stop_reason": None,
         "block_types": [],
         "tool_names": [],
+        "tool_actions": [],
+        "tool_signatures": [],
         "thinking_chars": 0,
         "text_chars": 0,
         "output_tokens": None,
@@ -35,6 +54,8 @@ def _empty() -> dict:
 
 def _finish(out: dict) -> dict:
     out["tool_names"] = out["tool_names"][:_MAX_TOOLS]
+    out["tool_actions"] = out["tool_actions"][:_MAX_TOOLS]
+    out["tool_signatures"] = out["tool_signatures"][:_MAX_TOOLS]
     out["tool_count"] = len(out["tool_names"])
     out["thinking"] = "thinking" in out["block_types"] or "redacted_thinking" in out["block_types"]
     return out
@@ -45,6 +66,8 @@ def summarize_sse(lines: Iterable[str]) -> Optional[dict]:
     try:
         out = _empty()
         seen = False
+        # index -> [tool_name, input_json_fragments, size]; dropped once classified.
+        pending: dict = {}
         for line in lines:
             if not isinstance(line, str) or not line.startswith("data: "):
                 continue
@@ -63,12 +86,34 @@ def summarize_sse(lines: Iterable[str]) -> Optional[dict]:
                 block = event.get("content_block") or {}
                 btype = block.get("type") or "unknown"
                 out["block_types"].append(btype)
-                if btype in ("tool_use", "server_tool_use", "mcp_tool_use") and block.get("name"):
+                if btype in _TOOL_BLOCKS and block.get("name"):
                     out["tool_names"].append(str(block["name"])[:64])
+                    start_input = block.get("input")
+                    pending[event.get("index")] = [
+                        str(block["name"]), [], 0,
+                        start_input if isinstance(start_input, dict) and start_input else None,
+                    ]
+            elif etype == "content_block_stop":
+                entry = pending.pop(event.get("index"), None)
+                if entry is not None:
+                    parsed = entry[3]
+                    if entry[1]:
+                        try:
+                            parsed = json.loads("".join(entry[1]))
+                        except ValueError:
+                            parsed = None
+                    _classify_action(entry[0], parsed, out)
             elif etype == "content_block_delta":
                 delta = event.get("delta") or {}
                 dtype = delta.get("type")
-                if dtype == "text_delta":
+                if dtype == "input_json_delta":
+                    entry = pending.get(event.get("index"))
+                    if entry is not None and entry[2] < _MAX_INPUT_CHARS:
+                        frag = delta.get("partial_json")
+                        if isinstance(frag, str):
+                            entry[1].append(frag)
+                            entry[2] += len(frag)
+                elif dtype == "text_delta":
                     out["text_chars"] += len(delta.get("text") or "")
                 elif dtype == "thinking_delta":
                     out["thinking_chars"] += len(delta.get("thinking") or "")
@@ -82,6 +127,9 @@ def summarize_sse(lines: Iterable[str]) -> Optional[dict]:
                     out["output_tokens"] = ot
             elif etype == "message_start":
                 seen = True
+        # Streams cut off before content_block_stop still get a label.
+        for entry in pending.values():
+            _classify_action(entry[0], None, out)
         return _finish(out) if seen else None
     except Exception:
         return None
@@ -99,8 +147,9 @@ def summarize_message(result: Any) -> Optional[dict]:
                 continue
             btype = block.get("type") or "unknown"
             out["block_types"].append(btype)
-            if btype in ("tool_use", "server_tool_use", "mcp_tool_use") and block.get("name"):
+            if btype in _TOOL_BLOCKS and block.get("name"):
                 out["tool_names"].append(str(block["name"])[:64])
+                _classify_action(block["name"], block.get("input"), out)
             elif btype == "text":
                 out["text_chars"] += len(block.get("text") or "")
             elif btype == "thinking":
