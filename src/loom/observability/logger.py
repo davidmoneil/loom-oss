@@ -130,6 +130,7 @@ class AuditLogger:
         tags: Optional[dict] = None,
         stop_reason: Optional[str] = None,
         tool_names: Optional[list] = None,
+        tool_actions: Optional[list] = None,
         block_types: Optional[list] = None,
         turn_index: Optional[int] = None,
         hop_index: Optional[int] = None,
@@ -176,6 +177,8 @@ class AuditLogger:
             record["stop_reason"] = stop_reason
         if tool_names:
             record["tool_names"] = tool_names
+        if tool_actions:
+            record["tool_actions"] = tool_actions
         if block_types:
             record["block_types"] = block_types
         if turn_index is not None:

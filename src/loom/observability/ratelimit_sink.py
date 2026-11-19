@@ -58,7 +58,7 @@ AUTH_TYPE_RAW_KEY = "x-loom-auth-type"
 # schema change: a compact object inside ``raw_headers`` under ``x-loom-reply``.
 REPLY_COLUMNS = (
     "turn_index", "hop_index", "message_count",
-    "block_types", "tool_names", "tool_count", "thinking_chars",
+    "block_types", "tool_names", "tool_actions", "tool_count", "thinking_chars",
     "prefix_mismatch_kind", "prefix_mismatch_pattern",
     "prefix_mismatch_removed", "prefix_mismatch_inserted", "prefix_mismatch_modified",
 )
@@ -190,6 +190,7 @@ def _reply_fields(reply: Optional[dict], position: Optional[dict], raw: Any) -> 
     rep = reply or {}
     out["block_types"] = ",".join(rep.get("block_types") or []) or None
     out["tool_names"] = ",".join(rep.get("tool_names") or []) or None
+    out["tool_actions"] = ",".join(rep.get("tool_actions") or []) or None
     out["tool_count"] = _int(rep.get("tool_count")) if reply else None
     out["thinking_chars"] = _int(rep.get("thinking_chars")) if reply else None
     pm = parse_prefix_mismatch((raw or {}).get(PREFIX_MISMATCH_HEADER)) if isinstance(raw, dict) else None
