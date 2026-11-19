@@ -81,3 +81,28 @@ def test_gateway_key_lifecycle(storage):
 
     assert storage.delete_gateway_key(created["id"])
     assert storage.list_gateway_keys() == []
+
+
+def test_tool_actions_and_action_signatures(storage, unique_id):
+    storage.record_metrics(
+        request_id=unique_id, model="m", provider="anthropic", tokens_in=1,
+        tokens_out=1, latency_ms=1.0, cost=0.0, session_id="s-actions",
+        tool_names="Bash,Read", tool_actions="vcs.commit,file.read",
+    )
+    storage.record_action_signatures([
+        ("Bash", "bash.other", "frobnicate run"),
+        ("Bash", "bash.other", "frobnicate run"),
+        ("Bash", "vcs.commit", "git commit"),  # matched labels are not stored
+    ])
+    if hasattr(storage, "flush"):
+        storage.flush()
+    row = storage.conn.execute(
+        "SELECT tool_actions FROM metrics WHERE request_id = %s" % ("%s" if storage.__class__.__name__ == "PostgresStorage" else "?"),
+        (unique_id,),
+    ).fetchone()
+    assert tuple(row)[0] == "vcs.commit,file.read"
+    rows = storage.conn.execute(
+        "SELECT signature, tool, count, sample_label, first_seen <= last_seen "
+        "FROM action_signatures"
+    ).fetchall()
+    assert [tuple(r)[:4] for r in rows] == [("frobnicate run", "Bash", 2, "bash.other")]

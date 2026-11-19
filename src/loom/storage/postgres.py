@@ -27,7 +27,7 @@ from loom.observability.request_tags import (
     tag_like_pattern,
 )
 
-SCHEMA_VERSION = 18
+SCHEMA_VERSION = 19
 
 
 class PostgresStorage:
@@ -373,6 +373,19 @@ class PostgresStorage:
                 "ON metrics (session_id, turn_index, hop_index)"
             )
 
+        if current < 19:
+            # Content-free action label per tool call (comma list parallel to
+            # tool_names) plus a table of unmatched command signatures, so rules
+            # can be written from what the labels miss.
+            conn.execute("ALTER TABLE metrics ADD COLUMN IF NOT EXISTS tool_actions TEXT")
+            conn.execute(
+                "CREATE TABLE IF NOT EXISTS action_signatures ("
+                "signature TEXT NOT NULL, tool TEXT NOT NULL, "
+                "count INTEGER NOT NULL DEFAULT 0, "
+                "first_seen DOUBLE PRECISION NOT NULL, last_seen DOUBLE PRECISION NOT NULL, "
+                "sample_label TEXT, PRIMARY KEY (signature, tool))"
+            )
+
         if current < SCHEMA_VERSION:
             conn.execute(
                 "INSERT INTO schema_version (version, applied_at) VALUES (%s, %s) "
@@ -413,6 +426,21 @@ class PostgresStorage:
             ),
         )
 
+    def record_action_signatures(self, signatures: list) -> None:
+        """Upsert (tool, label, signature) triples whose label ends in ``.other``."""
+        now = time.time()
+        for tool, label, sig in signatures or []:
+            if not str(label).endswith(".other") or not sig:
+                continue
+            self.conn.execute(
+                "INSERT INTO action_signatures "
+                "(signature, tool, count, first_seen, last_seen, sample_label) "
+                "VALUES (%s, %s, 1, %s, %s, %s) "
+                "ON CONFLICT (signature, tool) DO UPDATE SET "
+                "count = action_signatures.count + 1, last_seen = EXCLUDED.last_seen",
+                (sig, tool, now, now, label),
+            )
+
     def record_metrics(
         self,
         request_id: str,
@@ -445,6 +473,7 @@ class PostgresStorage:
         tool_calls_this_turn: Optional[int] = None,
         stop_reason: Optional[str] = None,
         tool_names: Optional[str] = None,
+        tool_actions: Optional[str] = None,
     ) -> None:
         self.conn.execute(
             """
@@ -455,8 +484,8 @@ class PostgresStorage:
                 message_count, source, tokens_saved, session_id,
                 status_code, cache_read_tokens, cache_creation_tokens, skill,
                 tier, skip_reasons, tokens_before, tokens_after, by_block_type, tags,
-                turn_index, hop_index, tool_calls_this_turn, stop_reason, tool_names
-            ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                turn_index, hop_index, tool_calls_this_turn, stop_reason, tool_names, tool_actions
+            ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
             """,
             (
                 time.time(),
@@ -490,6 +519,7 @@ class PostgresStorage:
                 tool_calls_this_turn,
                 stop_reason,
                 tool_names,
+                tool_actions,
             ),
         )
 
