@@ -56,18 +56,66 @@ def load_rules(path: Path | str = RULES_PATH) -> list[dict]:
     return list(data.get("rules", []))
 
 
-@lru_cache(maxsize=1)
-def _default_rules() -> tuple[tuple[dict, ...], dict[str, frozenset]]:
-    try:
-        rules = load_rules()
-    except Exception:  # missing/corrupt rule file must not break callers
-        rules = []
+def _build(rules: list[dict]) -> tuple[tuple[dict, ...], dict[str, frozenset]]:
     subs: dict[str, set] = {}
     for r in rules:
         m = r.get("match") or {}
         for a in m.get("argv0", []):
             subs.setdefault(a, set()).update(m.get("sub", []))
     return tuple(rules), {k: frozenset(v) for k, v in subs.items()}
+
+
+@lru_cache(maxsize=1)
+def _file_rules() -> tuple[tuple[dict, ...], dict[str, frozenset]]:
+    try:
+        rules = load_rules()
+    except Exception:  # missing/corrupt rule file must not break callers
+        rules = []
+    return _build(rules)
+
+
+_active: tuple[tuple[dict, ...], dict[str, frozenset]] | None = None
+
+
+def set_active_rules(rules: list[dict] | None) -> None:
+    """Hot-reload: use ``rules`` (from the DB) until cleared with ``None``."""
+    global _active
+    _active = _build(list(rules)) if rules is not None else None
+
+
+def _default_rules() -> tuple[tuple[dict, ...], dict[str, frozenset]]:
+    return _active if _active is not None else _file_rules()
+
+
+def validate_rules(rules: Any) -> list[str]:
+    """Return a list of problems with a rule list (empty = valid)."""
+    if not isinstance(rules, list):
+        return ["rules must be a list"]
+    errors: list[str] = []
+    seen: set[str] = set()
+    for i, r in enumerate(rules):
+        if not isinstance(r, dict):
+            errors.append(f"rule {i}: must be an object")
+            continue
+        rid = r.get("id")
+        if not isinstance(rid, str) or not rid:
+            errors.append(f"rule {i}: id is required")
+        elif rid in seen:
+            errors.append(f"rule {i}: duplicate id {rid!r}")
+        else:
+            seen.add(rid)
+        if not isinstance(r.get("label"), str) or not r.get("label"):
+            errors.append(f"rule {i}: label is required")
+        if r.get("status", "active") not in KNOWN_STATUSES:
+            errors.append(f"rule {i}: unknown status {r.get('status')!r}")
+        m = r.get("match")
+        argv0 = m.get("argv0") if isinstance(m, dict) else None
+        if not isinstance(argv0, list) or not argv0 or not all(isinstance(a, str) for a in argv0):
+            errors.append(f"rule {i}: match.argv0 must be a non-empty list of strings")
+        sub = m.get("sub", []) if isinstance(m, dict) else []
+        if not isinstance(sub, list) or not all(isinstance(a, str) for a in sub):
+            errors.append(f"rule {i}: match.sub must be a list of strings")
+    return errors
 
 
 def _first_command(command: str) -> list[str] | None:
