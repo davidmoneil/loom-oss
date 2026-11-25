@@ -27,7 +27,7 @@ from loom.observability.request_tags import (
     tag_like_pattern,
 )
 
-SCHEMA_VERSION = 20
+SCHEMA_VERSION = 21
 
 
 class PostgresStorage:
@@ -394,6 +394,15 @@ class PostgresStorage:
                 "actor TEXT NOT NULL, created_at DOUBLE PRECISION NOT NULL)"
             )
 
+        if current < 21:
+            # Shadow-rule evaluation counters (promotion gate input).
+            conn.execute(
+                "CREATE TABLE IF NOT EXISTS shadow_rule_stats ("
+                "rule_id TEXT PRIMARY KEY, hits BIGINT NOT NULL DEFAULT 0, "
+                "overlaps BIGINT NOT NULL DEFAULT 0, "
+                "first_seen DOUBLE PRECISION NOT NULL, last_seen DOUBLE PRECISION NOT NULL)"
+            )
+
         if current < SCHEMA_VERSION:
             conn.execute(
                 "INSERT INTO schema_version (version, applied_at) VALUES (%s, %s) "
@@ -448,6 +457,29 @@ class PostgresStorage:
                 "count = action_signatures.count + 1, last_seen = EXCLUDED.last_seen",
                 (sig, tool, now, now, label),
             )
+
+    def record_shadow_hits(self, hits: list) -> None:
+        """Upsert shadow-rule hit counters from ``(rule_id, overlaps_active)`` pairs."""
+        now = time.time()
+        for rule_id, overlap in hits or []:
+            self.conn.execute(
+                "INSERT INTO shadow_rule_stats (rule_id, hits, overlaps, first_seen, last_seen) "
+                "VALUES (%s, 1, %s, %s, %s) "
+                "ON CONFLICT (rule_id) DO UPDATE SET "
+                "hits = shadow_rule_stats.hits + 1, "
+                "overlaps = shadow_rule_stats.overlaps + EXCLUDED.overlaps, "
+                "last_seen = EXCLUDED.last_seen",
+                (str(rule_id), 1 if overlap else 0, now, now),
+            )
+
+    def get_shadow_stats(self) -> dict:
+        rows = self.conn.execute(
+            "SELECT rule_id, hits, overlaps, first_seen, last_seen FROM shadow_rule_stats"
+        ).fetchall()
+        return {
+            r[0]: {"hits": r[1], "overlaps": r[2], "first_seen": r[3], "last_seen": r[4]}
+            for r in rows
+        }
 
     def get_classification_rules(self) -> Optional[dict]:
         """Latest rule revision, or None when the table is empty."""

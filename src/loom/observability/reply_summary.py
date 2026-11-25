@@ -30,9 +30,10 @@ def _classify_action(name: str, input_dict: Any, out: dict) -> None:
     The input is only read here, never stored. Lists stay parallel to tool_names.
     """
     try:
-        from loom.observability.tool_actions import classify
+        from loom.observability.tool_actions import classify, shadow_matches
 
         label, sig = classify(name, input_dict if isinstance(input_dict, dict) else {})
+        out.setdefault("shadow_hits", []).extend(shadow_matches(name, input_dict))
     except Exception:
         label, sig = "unknown.other", "unknown"
     out["tool_actions"].append(label)
@@ -46,6 +47,7 @@ def _empty() -> dict:
         "tool_names": [],
         "tool_actions": [],
         "tool_signatures": [],
+        "shadow_hits": [],
         "thinking_chars": 0,
         "text_chars": 0,
         "output_tokens": None,

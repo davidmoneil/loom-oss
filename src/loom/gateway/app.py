@@ -516,6 +516,8 @@ def _record_request(
             )
             if (reply or {}).get("tool_signatures"):
                 state.storage.record_action_signatures(reply["tool_signatures"])
+            if (reply or {}).get("shadow_hits"):
+                state.storage.record_shadow_hits(reply["shadow_hits"])
         except Exception:
             pass
         try:
@@ -3939,6 +3941,30 @@ def create_app() -> FastAPI:
         saved = gw.storage.put_classification_rules(rules, actor)
         tool_actions.set_active_rules(rules)
         return JSONResponse(saved)
+
+    @app.get(
+        "/api/v1/classification/shadow",
+        tags=["config"],
+        summary="Shadow-rule hit and overlap counts",
+    )
+    async def api_classification_shadow():
+        gw = state()
+        if gw.storage is None:
+            return JSONResponse({"error": "storage unavailable"}, status_code=503)
+        return JSONResponse(gw.storage.get_shadow_stats())
+
+    @app.post(
+        "/api/v1/classification/promotion-check",
+        tags=["config"],
+        summary="Run the shadow-rule promotion gate (daily; idempotent)",
+    )
+    async def api_classification_promotion_check():
+        from loom.observability import promotion_gate
+
+        gw = state()
+        if gw.storage is None:
+            return JSONResponse({"error": "storage unavailable"}, status_code=503)
+        return JSONResponse(promotion_gate.run_gate(gw.storage))
 
     @app.get(
         "/api/v1/classification/signatures",
