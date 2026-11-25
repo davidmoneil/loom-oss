@@ -27,7 +27,7 @@ from loom.observability.request_tags import (
     tag_like_pattern,
 )
 
-SCHEMA_VERSION = 19
+SCHEMA_VERSION = 20
 
 
 class PostgresStorage:
@@ -386,6 +386,14 @@ class PostgresStorage:
                 "sample_label TEXT, PRIMARY KEY (signature, tool))"
             )
 
+        if current < 20:
+            # Revisioned classification rules (API-first; seeded from default_actions.yaml).
+            conn.execute(
+                "CREATE TABLE IF NOT EXISTS classification_rules ("
+                "revision INTEGER PRIMARY KEY, rules_json TEXT NOT NULL, "
+                "actor TEXT NOT NULL, created_at DOUBLE PRECISION NOT NULL)"
+            )
+
         if current < SCHEMA_VERSION:
             conn.execute(
                 "INSERT INTO schema_version (version, applied_at) VALUES (%s, %s) "
@@ -440,6 +448,39 @@ class PostgresStorage:
                 "count = action_signatures.count + 1, last_seen = EXCLUDED.last_seen",
                 (sig, tool, now, now, label),
             )
+
+    def get_classification_rules(self) -> Optional[dict]:
+        """Latest rule revision, or None when the table is empty."""
+        row = self.conn.execute(
+            "SELECT revision, rules_json, actor, created_at FROM classification_rules "
+            "ORDER BY revision DESC LIMIT 1"
+        ).fetchone()
+        if row is None:
+            return None
+        return {"revision": row[0], "rules": json.loads(row[1]), "actor": row[2], "created_at": row[3]}
+
+    def put_classification_rules(self, rules: list, actor: str) -> dict:
+        """Append a new revision (previous revisions are kept as history)."""
+        now = time.time()
+        row = self.conn.execute(
+            "INSERT INTO classification_rules (revision, rules_json, actor, created_at) "
+            "VALUES ((SELECT COALESCE(MAX(revision), 0) + 1 FROM classification_rules), %s, %s, %s) "
+            "RETURNING revision",
+            (json.dumps(rules), actor, now),
+        ).fetchone()
+        return {"revision": row[0], "rules": rules, "actor": actor, "created_at": now}
+
+    def get_action_signatures(self, limit: int = 100) -> list[dict]:
+        """Unmatched (``*.other``) signatures, most frequent first."""
+        rows = self.conn.execute(
+            "SELECT signature, tool, count, first_seen, last_seen FROM action_signatures "
+            "ORDER BY count DESC, last_seen DESC LIMIT %s",
+            (int(limit),),
+        ).fetchall()
+        return [
+            {"signature": r[0], "tool": r[1], "count": r[2], "first_seen": r[3], "last_seen": r[4]}
+            for r in rows
+        ]
 
     def record_metrics(
         self,

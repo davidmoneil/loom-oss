@@ -1781,8 +1781,22 @@ def _attach_storage(state: "GatewayState", factory=None) -> bool:
     state.storage_unavailable = False
     state.storage_error = None
     state._gateway_keys_exist = None
+    _load_classification_rules(storage)
     _log_storage_ready(state)
     return True
+
+
+def _load_classification_rules(storage) -> None:
+    """Seed the DB rules from the shipped YAML on first run, then activate the latest revision."""
+    try:
+        from loom.observability import tool_actions
+
+        latest = storage.get_classification_rules()
+        if latest is None:
+            latest = storage.put_classification_rules(tool_actions.load_rules(), "seed")
+        tool_actions.set_active_rules(latest["rules"])
+    except Exception as exc:  # classification must never block startup
+        get_logger("loom.gateway").warning("classification rules not loaded: %s", type(exc).__name__)
 
 
 def mark_storage_failed(state: "GatewayState", exc: BaseException, factory=None) -> None:
@@ -3886,6 +3900,56 @@ def create_app() -> FastAPI:
             gw._gateway_keys_exist = None
             return JSONResponse({"ok": True})
         return JSONResponse({"error": "key not found"}, status_code=404)
+
+    # -------------------------------------------------------- classification rules
+    @app.get(
+        "/api/v1/classification/rules",
+        tags=["config"],
+        summary="Current tool-action classification rules and revision",
+    )
+    async def api_get_classification_rules():
+        gw = state()
+        if gw.storage is None:
+            return JSONResponse({"error": "storage unavailable"}, status_code=503)
+        latest = gw.storage.get_classification_rules()
+        if latest is None:
+            return JSONResponse({"error": "no rules seeded"}, status_code=404)
+        return JSONResponse(latest)
+
+    @app.put(
+        "/api/v1/classification/rules",
+        tags=["config"],
+        summary="Replace the classification rules (validated, new revision, hot-reloaded)",
+    )
+    async def api_put_classification_rules(request: Request):
+        from loom.observability import tool_actions
+
+        gw = state()
+        if gw.storage is None:
+            return JSONResponse({"error": "storage unavailable"}, status_code=503)
+        try:
+            body = await request.json()
+        except Exception:
+            return JSONResponse({"error": "invalid JSON"}, status_code=400)
+        rules = body.get("rules") if isinstance(body, dict) else None
+        errors = tool_actions.validate_rules(rules)
+        if errors:
+            return JSONResponse({"error": "invalid rules", "details": errors}, status_code=422)
+        actor = str(body.get("actor") or "api")[:64]
+        saved = gw.storage.put_classification_rules(rules, actor)
+        tool_actions.set_active_rules(rules)
+        return JSONResponse(saved)
+
+    @app.get(
+        "/api/v1/classification/signatures",
+        tags=["config"],
+        summary="Unmatched (*.other) action signatures by frequency",
+    )
+    async def api_classification_signatures(limit: int = 100):
+        gw = state()
+        if gw.storage is None:
+            return JSONResponse({"error": "storage unavailable"}, status_code=503)
+        return JSONResponse(gw.storage.get_action_signatures(limit=max(1, min(limit, 1000))))
 
     # -------------------------------------------------------- scanner management
     @app.get(
