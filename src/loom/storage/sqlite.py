@@ -486,7 +486,7 @@ class LoomStorage:
             c.execute(
                 "CREATE TABLE IF NOT EXISTS shadow_rule_stats ("
                 "rule_id TEXT PRIMARY KEY, hits INTEGER NOT NULL DEFAULT 0, "
-                "overlaps INTEGER NOT NULL DEFAULT 0, "
+                "overlap_hits INTEGER NOT NULL DEFAULT 0, "
                 "first_seen REAL NOT NULL, last_seen REAL NOT NULL)"
             )
 
@@ -555,17 +555,17 @@ class LoomStorage:
         with self._write_lock:
             for rule_id, overlap in hits or []:
                 self.conn.execute(
-                    "INSERT INTO shadow_rule_stats (rule_id, hits, overlaps, first_seen, last_seen) "
+                    "INSERT INTO shadow_rule_stats (rule_id, hits, overlap_hits, first_seen, last_seen) "
                     "VALUES (?, 1, ?, ?, ?) "
                     "ON CONFLICT (rule_id) DO UPDATE SET hits = hits + 1, "
-                    "overlaps = overlaps + excluded.overlaps, last_seen = excluded.last_seen",
+                    "overlap_hits = overlap_hits + excluded.overlap_hits, last_seen = excluded.last_seen",
                     (str(rule_id), 1 if overlap else 0, now, now),
                 )
             self._schedule_flush()
 
     def get_shadow_stats(self) -> dict:
         rows = self.conn.execute(
-            "SELECT rule_id, hits, overlaps, first_seen, last_seen FROM shadow_rule_stats"
+            "SELECT rule_id, hits, overlap_hits, first_seen, last_seen FROM shadow_rule_stats"
         ).fetchall()
         return {
             r[0]: {"hits": r[1], "overlaps": r[2], "first_seen": r[3], "last_seen": r[4]}

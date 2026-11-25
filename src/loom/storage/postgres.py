@@ -399,7 +399,7 @@ class PostgresStorage:
             conn.execute(
                 "CREATE TABLE IF NOT EXISTS shadow_rule_stats ("
                 "rule_id TEXT PRIMARY KEY, hits BIGINT NOT NULL DEFAULT 0, "
-                "overlaps BIGINT NOT NULL DEFAULT 0, "
+                "overlap_hits BIGINT NOT NULL DEFAULT 0, "
                 "first_seen DOUBLE PRECISION NOT NULL, last_seen DOUBLE PRECISION NOT NULL)"
             )
 
@@ -463,18 +463,18 @@ class PostgresStorage:
         now = time.time()
         for rule_id, overlap in hits or []:
             self.conn.execute(
-                "INSERT INTO shadow_rule_stats (rule_id, hits, overlaps, first_seen, last_seen) "
+                "INSERT INTO shadow_rule_stats (rule_id, hits, overlap_hits, first_seen, last_seen) "
                 "VALUES (%s, 1, %s, %s, %s) "
                 "ON CONFLICT (rule_id) DO UPDATE SET "
                 "hits = shadow_rule_stats.hits + 1, "
-                "overlaps = shadow_rule_stats.overlaps + EXCLUDED.overlaps, "
+                "overlap_hits = shadow_rule_stats.overlap_hits + EXCLUDED.overlap_hits, "
                 "last_seen = EXCLUDED.last_seen",
                 (str(rule_id), 1 if overlap else 0, now, now),
             )
 
     def get_shadow_stats(self) -> dict:
         rows = self.conn.execute(
-            "SELECT rule_id, hits, overlaps, first_seen, last_seen FROM shadow_rule_stats"
+            "SELECT rule_id, hits, overlap_hits, first_seen, last_seen FROM shadow_rule_stats"
         ).fetchall()
         return {
             r[0]: {"hits": r[1], "overlaps": r[2], "first_seen": r[3], "last_seen": r[4]}
