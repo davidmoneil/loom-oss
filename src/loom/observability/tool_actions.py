@@ -204,6 +204,33 @@ def _classify_bash(inp: dict, rules=None) -> tuple[str, str]:
     return "bash.other", signature
 
 
+def shadow_matches(tool_name: Any, input_dict: Any = None, *, rules=None) -> list[tuple[str, bool]]:
+    """Shadow rules matching a Bash call, as ``(rule_id, overlaps_active)``.
+
+    Pure observation: never changes a label. ``overlaps_active`` is True when an
+    active rule already matches the same call. Never raises.
+    """
+    try:
+        if tool_name != "Bash" or not isinstance(input_dict, dict):
+            return []
+        command = input_dict.get("command")
+        if not isinstance(command, str) or not command.strip():
+            return []
+        argv = _first_command(command)
+        if not argv:
+            return []
+        argv0 = os.path.basename(argv[0])
+        sub = _subcommand(argv0, argv[1:])
+        rule_list, _ = rules if rules is not None else _default_rules()
+        shadows = [r for r in rule_list if r.get("status", "active") == "shadow" and _match(r, argv0, sub)]
+        if not shadows:
+            return []
+        overlap = any(r.get("status", "active") == "active" and _match(r, argv0, sub) for r in rule_list)
+        return [(str(r.get("id")), overlap) for r in shadows]
+    except Exception:
+        return []
+
+
 def _path_class(inp: dict) -> str:
     raw = next((inp[k] for k in _PATH_KEYS if isinstance(inp.get(k), str) and inp[k]), None)
     if raw is None:
